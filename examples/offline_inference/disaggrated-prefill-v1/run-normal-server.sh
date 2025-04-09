@@ -7,3 +7,4 @@ CUDA_VISIBLE_DEVICES=4 \
 #    --gpu-memory-utilization 0.6 \
 #    --max-model-len 8192 \
 #    --max-num-batched-tokens 8192 \
+#    --max-num-partial-prefills 8 \   ######## THIS WILL FALL BACK TO V0
