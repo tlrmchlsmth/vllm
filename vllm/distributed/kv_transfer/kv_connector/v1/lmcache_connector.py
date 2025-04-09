@@ -113,8 +113,15 @@ class ReqMeta:
     def from_request(request: "Request",
                      block_size: int,
                      load_spec: Optional[LoadSpec] = None) -> "ReqMeta":
+        # NOTE: be careful! The scheduler may not schedule all of the tokens
+        # in the request. And the allocated blocks could also be more than
+        # the number of tokens in the request.
+        # Therefore, we need to use min(tokens_in_request, tokens_in_blocks)
+        # to determine the number of tokens for connector to use.
         token_ids = torch.tensor(request.prompt_token_ids)
-        valid_num_tokens = len(token_ids)
+        num_blocks = len(request.block_ids)
+        valid_num_tokens = min(len(token_ids), num_blocks * block_size)
+        token_ids = token_ids[:valid_num_tokens]
 
         # Extract slot mapping from block ids
         block_ids = torch.Tensor(request.block_ids)
@@ -123,6 +130,13 @@ class ReqMeta:
         slot_mapping = block_offsets.reshape((1, block_size)) + \
                 block_ids.reshape((num_blocks, 1)) * block_size
         slot_mapping = slot_mapping.flatten()[:valid_num_tokens].long()
+        if len(slot_mapping) != len(token_ids):
+            logger.error("Slot mapping should be the same length as token ids")
+            logger.error("Block ids: %s", str(block_ids))
+            logger.error("Num blocks: %d", num_blocks)
+            logger.error("Num tokens: %d", valid_num_tokens)
+            logger.error("Slot mapping: %s", str(slot_mapping))
+            logger.error("Slot mapping len: %s", len(slot_mapping))
         return ReqMeta(token_ids, slot_mapping, load_spec)
 
 
@@ -337,6 +351,10 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
             The updated list of the computed blocks (appended with the remote
             cached blocks)
         """
+        if self.kv_role == "kv_producer":
+            # Don't do lookup if the role is kv_producer
+            return computed_blocks
+
         token_ids = torch.tensor(request.prompt_token_ids)
         num_external_hit_tokens = self.lookup_client.lookup(token_ids)
         logger.info("Num external hit tokens: %d", num_external_hit_tokens)
@@ -357,6 +375,7 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
         request.request_id = old_req_id
         kv_cache_manager.req_to_blocks.pop("temp-req-id-for-connector")
         kv_cache_manager.num_cached_block.pop("temp-req-id-for-connector")
+        kv_cache_manager.block_pool.free_blocks(allocated_blocks)
 
         # HACK: the scheduler should not see "all of the blocks" are
         # already allocated. Therefore, we need to back up one block
