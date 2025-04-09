@@ -157,26 +157,27 @@ class LMCacheConnectorMetadata(KVConnectorMetadata):
 
 class LMCacheConnectorV1(KVConnectorBase_V1):
 
-    def __init__(self, rank: Optional[int], local_rank: Optional[int],
-                 config: "VllmConfig", role: KVConnectorRole):
-        super().__init__(rank, local_rank, config, role)
+    def __init__(self, vllm_config: "VllmConfig", role: KVConnectorRole):
+        super().__init__(vllm_config=vllm_config, role=role)
 
-        self.kv_role = config.kv_transfer_config.kv_role
+        self.kv_role = vllm_config.kv_transfer_config.kv_role
         if role == KVConnectorRole.SCHEDULER:
             self.lookup_client = LMCacheLookupClient(self.kv_role)
         else:
-            self.lmcache_engine = init_lmcache_engine(config.model_config,
-                                                      config.parallel_config,
-                                                      config.cache_config)
+            self.lmcache_engine = init_lmcache_engine(
+                vllm_config.model_config, vllm_config.parallel_config,
+                vllm_config.cache_config)
             self.lookup_server = LMCacheLookupServer(self.lmcache_engine,
                                                      self.kv_role)
 
         self.kv_caches: dict[str, torch.Tensor] = {}
 
-        self._block_size = config.cache_config.block_size
+        self._block_size = vllm_config.cache_config.block_size
 
         # request_id -> (vllm cached tokes, lmcache cached tokens)
         self.load_specs: dict[str, LoadSpec] = {}
+
+        self.kv_cache_manager: Optional[KVCacheManager] = None
 
     def _init_kv_caches_from_forward_context(
             self, forward_context: "ForwardContext"):
@@ -355,6 +356,9 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
             # Don't do lookup if the role is kv_producer
             return computed_blocks
 
+        if self.kv_cache_manager is None:
+            self.kv_cache_manager = kv_cache_manager
+
         token_ids = torch.tensor(request.prompt_token_ids)
         num_external_hit_tokens = self.lookup_client.lookup(token_ids)
         logger.info("Num external hit tokens: %d", num_external_hit_tokens)
@@ -372,10 +376,15 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
             request, need_to_allocate, computed_blocks, skip_preallocate=True)
         if allocated_blocks is None:
             logger.error("Failed to allocate slots for the connector")
+            # TODO: Need to process the allocation failure
         request.request_id = old_req_id
-        kv_cache_manager.req_to_blocks.pop("temp-req-id-for-connector")
-        kv_cache_manager.num_cached_block.pop("temp-req-id-for-connector")
-        kv_cache_manager.block_pool.free_blocks(allocated_blocks)
+
+        self.kv_cache_manager.req_to_blocks.pop("temp-req-id-for-connector",
+                                                [])
+        self.kv_cache_manager.block_pool.free_blocks(
+            reversed(allocated_blocks))
+        self.kv_cache_manager.num_cached_block.pop("temp-req-id-for-connector",
+                                                   None)
 
         # HACK: the scheduler should not see "all of the blocks" are
         # already allocated. Therefore, we need to back up one block
@@ -394,8 +403,8 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
 
         return computed_blocks + allocated_blocks
 
-    def attach_connector_meta(
-            self, scheduler_output: SchedulerOutput) -> SchedulerOutput:
+    def build_connector_meta(
+            self, scheduler_output: SchedulerOutput) -> KVConnectorMetadata:
         """Attach the connector metadata to the request object.
 
         This function should NOT modify other fields in the scheduler_output 
@@ -405,9 +414,16 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
         Args:
             scheduler_output (SchedulerOutput): the scheduler output object.
         """
+        # Free the temp blocks
+        #if self.kv_cache_manager is not None:
+        #    blocks = self.kv_cache_manager.req_to_blocks.pop(
+        #            "temp-req-id-for-connector", [])
+        #    self.kv_cache_manager.block_pool.free_blocks(reversed(blocks))
+        #    self.kv_cache_manager.num_cached_block.pop(
+        #            "temp-req-id-for-connector", None)
+
         meta = LMCacheConnectorMetadata()
         for request in scheduler_output.scheduled_new_reqs:
             load_spec = self.load_specs.pop(request.req_id, None)
             meta.add_request(request, self._block_size, load_spec)
-        scheduler_output.kv_connector_metadata = meta
-        return scheduler_output
+        return meta

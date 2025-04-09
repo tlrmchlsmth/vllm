@@ -11,29 +11,32 @@ if [[ $1 == "producer" ]]; then
     UCX_TLS=cuda_ipc,cuda_copy,tcp \
         LMCACHE_CONFIG_FILE=lmcache_prefill_config.yaml \
         LMCACHE_USE_EXPERIMENTAL=True \
-        VLLM_ENABLE_V1_MULTIPROCESSING=0 \
+        VLLM_ENABLE_V1_MULTIPROCESSING=1 \
+        VLLM_WORKER_MULTIPROC_METHOD=spawn \
         CUDA_VISIBLE_DEVICES=0 \
         vllm serve meta-llama/Llama-3.1-8B-Instruct \
-        --enforce-eager \
-        --gpu-memory-utilization 0.6 \
-        --max-model-len 8192 \
-        --max-num-batched-tokens 8192 \
         --port 8100 \
         --disable-log-requests \
+        --enforce-eager \
         --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_producer","kv_connector_extra_config": {}}'
+
+        #--gpu-memory-utilization 0.6 \
+        #--max-model-len 8192 \
+        #--max-num-batched-tokens 8192 \
 elif [[ $1 == "consumer" ]]; then
     UCX_TLS=cuda_ipc,cuda_copy,tcp \
         LMCACHE_CONFIG_FILE=lmcache_decode_config.yaml \
         LMCACHE_USE_EXPERIMENTAL=True \
-        VLLM_ENABLE_V1_MULTIPROCESSING=0 \
+        VLLM_ENABLE_V1_MULTIPROCESSING=1 \
+        VLLM_WORKER_MULTIPROC_METHOD=spawn \
         CUDA_VISIBLE_DEVICES=1 \
         vllm serve meta-llama/Llama-3.1-8B-Instruct \
-        --enforce-eager \
         --gpu-memory-utilization 0.6 \
         --max-model-len 8192 \
         --max-num-batched-tokens 8192 \
         --port 8200 \
         --disable-log-requests \
+        --enforce-eager \
         --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_consumer","kv_connector_extra_config": {}}'
 else
     echo "Invalid role: $1"
