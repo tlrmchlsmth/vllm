@@ -8,6 +8,9 @@ from collections.abc import Iterable
 from typing import Optional, Union
 
 from vllm.config import VllmConfig
+from vllm.distributed.kv_transfer.kv_connector.factory import (
+    KVConnectorFactory)
+from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.v1.core.encoder_cache_manager import (EncoderCacheManager,
@@ -60,19 +63,13 @@ class Scheduler(SchedulerInterface):
             self.scheduler_config.max_num_batched_tokens
         self.max_model_len = self.scheduler_config.max_model_len
 
-        # create connector
+        # Create KVConnector for the Scheduler. Note that each Worker
+        # will have a corresponding KVConnector with Role=WORKER.
+        # KV Connector pushes/pull of remote KVs for P/D and offloading.
+        self.connector = None
         if self.vllm_config.kv_transfer_config is not None:
-            from vllm.distributed.kv_transfer.kv_connector.factory import (
-                KVConnectorFactory)
-            from vllm.distributed.kv_transfer.kv_connector.v1 import (
-                KVConnectorRole as KVConnectorRole_V1)
-            self.connector = KVConnectorFactory.create_connector(
-                rank=None,
-                local_rank=None,
-                config=self.vllm_config,
-                role=KVConnectorRole_V1.SCHEDULER)
-        else:
-            self.connector = None
+            self.connector = KVConnectorFactory.create_connector_v1(
+                config=self.vllm_config, role=KVConnectorRole.SCHEDULER)
 
         num_gpu_blocks = self.cache_config.num_gpu_blocks
         assert isinstance(num_gpu_blocks, int) and num_gpu_blocks > 0
@@ -455,8 +452,8 @@ class Scheduler(SchedulerInterface):
         # 2. Wrap up all the KV cache load / save ops into an opaque object
         # 3. Clear the internal states of the connector
         if self.connector is not None:
-            scheduler_output = self.connector.attach_connector_meta(
-                scheduler_output)
+            meta = self.connector.build_connector_meta(scheduler_output)
+            scheduler_output.kv_connector_metadata = meta
 
         # Advance the number of computed tokens for the request AFTER
         # the request is scheduled.

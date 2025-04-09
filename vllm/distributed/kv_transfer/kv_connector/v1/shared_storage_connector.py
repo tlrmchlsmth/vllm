@@ -2,7 +2,7 @@
 import hashlib
 import os
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 import safetensors
 import torch
@@ -77,19 +77,14 @@ class SharedStorageConnector(KVConnectorBase_V1):
     # It does extra work which will overwrite the existing prefix-cache in GPU
     # - to remove the overhead, need to add some "mask" in the ReqMeta class
 
-    def __init__(self, rank: Optional[int], local_rank: Optional[int],
-                 config: "VllmConfig", role: KVConnectorRole):
-        super().__init__(
-            rank=rank,
-            local_rank=local_rank,
-            config=config,
-            role=role,
-        )
-        self._block_size = config.cache_config.block_size
+    def __init__(self, vllm_config: "VllmConfig", role: KVConnectorRole):
+        super().__init__(vllm_config=vllm_config, role=role)
+        self._block_size = vllm_config.cache_config.block_size
         self._requests_need_load: list[str] = []
-        self._storage_path = config.kv_transfer_config.get_from_extra_config(
+        transfer_config = vllm_config.kv_transfer_config
+        self._storage_path = transfer_config.get_from_extra_config(
             "shared_storage_path", "/tmp")
-        logger.info(config.kv_transfer_config)
+        logger.info(vllm_config.kv_transfer_config)
         logger.info("Shared storage path is %s", self._storage_path)
 
     def start_load_kv(self, forward_context: "ForwardContext",
@@ -196,6 +191,8 @@ class SharedStorageConnector(KVConnectorBase_V1):
 
             Assume the shape of the layer is (2, num_pages, page_size, xxx).
             """
+            # TODO: make this compatible with MLA.
+            assert layer.shape[0] == 2
             num_pages, page_size = layer.shape[1], layer.shape[2]
             return layer.reshape(2, num_pages * page_size, -1)[:, slot_mapping,
                                                                ...]
@@ -208,7 +205,7 @@ class SharedStorageConnector(KVConnectorBase_V1):
                     layer_name, request.token_ids)
                 kv_cache = extract_kv_from_layer(kv_layer,
                                                  request.slot_mapping)
-                tensors = {"kv_cache": kv_cache.cpu().detach()}
+                tensors = {"kv_cache": kv_cache.detach().cpu()}
                 safetensors.torch.save_file(tensors, filename)
 
     def wait_for_save(self):
@@ -224,7 +221,7 @@ class SharedStorageConnector(KVConnectorBase_V1):
         """Get the external prefix cache blocks from the connector.
 
         This function may change the state of the connector, which will be 
-        used by `attach_connector_meta` later.
+        used by `build_connector_meta` later.
 
         Args:
             request (Request): the request object.
@@ -286,12 +283,11 @@ class SharedStorageConnector(KVConnectorBase_V1):
         else:
             return computed_blocks
 
-    def attach_connector_meta(
-            self, scheduler_output: SchedulerOutput) -> SchedulerOutput:
-        """Attach the connector metadata to the request object.
+    def build_connector_meta(
+            self, scheduler_output: SchedulerOutput) -> KVConnectorMetadata:
+        """Build the connector metadata for this step.
 
-        This function should NOT modify other fields in the scheduler_output 
-        except the `kv_connector_metadata` field.
+        This function should NOT modify any fields in the scheduler_output.
         Also, calling this function will reset the state of the connector.
 
         Args:
@@ -299,7 +295,6 @@ class SharedStorageConnector(KVConnectorBase_V1):
         """
         meta = SharedStorageConnectorMetadata()
         for request in scheduler_output.scheduled_new_reqs:
-            # T^T, why there is both req_id and request_id????
             if request.req_id in self._requests_need_load:
                 meta.add_request(request, self._block_size, is_store=False)
             else:
@@ -308,10 +303,9 @@ class SharedStorageConnector(KVConnectorBase_V1):
                 # store and load status
                 if not self.found_match_for_request(request):
                     meta.add_request(request, self._block_size, is_store=True)
-        scheduler_output.kv_connector_metadata = meta
 
         self._requests_need_load.clear()
-        return scheduler_output
+        return meta
 
     # ==============================
     # Helper functions

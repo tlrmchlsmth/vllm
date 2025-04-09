@@ -1,15 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import importlib
-from typing import TYPE_CHECKING, Callable, Dict, Optional, Type, Union
+from typing import TYPE_CHECKING, Callable, Dict, Type, Union
 
 import vllm.envs as envs
-# NOTE(Kuntai): We prefer not to directly the classes with "_V1" suffix.
-# This makes it easier for us to deprecate code in v0 (which will happen soon).
-# yapf: disable
 from vllm.distributed.kv_transfer.kv_connector.v1 import (KVConnectorBase_V1,
                                                           KVConnectorRole)
-# yapf: enable
 from vllm.logger import init_logger
 
 from .base import KVConnectorBase
@@ -38,34 +34,43 @@ class KVConnectorFactory:
         cls._registry[name] = loader
 
     @classmethod
-    def create_connector(
-            cls, rank: Optional[int], local_rank: Optional[int],
-            config: "VllmConfig", role: KVConnectorRole
-    ) -> Union[KVConnectorBase, KVConnectorBase_V1]:
+    def create_connector_v0(cls, rank: int, local_rank: int,
+                            config: "VllmConfig") -> KVConnectorBase:
+        if envs.VLLM_USE_V1:
+            raise ValueError("Attempting to initialize a V0 Connector, "
+                             f"but found {envs.VLLM_USE_V1=}")
+
         connector_name = config.kv_transfer_config.kv_connector
         if connector_name not in cls._registry:
             raise ValueError(f"Unsupported connector type: {connector_name}")
 
-        if envs.VLLM_USE_V1:
-            # NOTE(Kuntai): v1 connector is explicitly separated into two roles.
-            # Scheduler connector:
-            # - Co-colate with scheduler process
-            # - Should only be used inside the Scheduler class
-            # Worker connector:
-            # - Co-locate with worker process
-            # - Should only be used inside the forward context & attention layer
-            # We build these two connectors separately to enforce strict
-            # separation
-            connector_cls_v1 = cls._registry[connector_name]()
-            assert issubclass(connector_cls_v1, KVConnectorBase_V1)
-            logger.info("Creating v1 connector with name: %s", connector_name)
-            return connector_cls_v1(rank, local_rank, config, role)
-        else:
-            assert rank is not None
-            assert local_rank is not None
-            connector_cls = cls._registry[connector_name]()
-            assert issubclass(connector_cls, KVConnectorBase)
-            return connector_cls(rank, local_rank, config)
+        connector_cls = cls._registry[connector_name]()
+        assert issubclass(connector_cls, KVConnectorBase)
+        return connector_cls(rank, local_rank, config)
+
+    @classmethod
+    def create_connector_v1(
+        cls,
+        config: "VllmConfig",
+        role: KVConnectorRole,
+    ) -> KVConnectorBase_V1:
+        if not envs.VLLM_USE_V1:
+            raise ValueError("Attempting to initialize a V1 Connector, "
+                             f"but found {envs.VLLM_USE_V1=}")
+
+        connector_name = config.kv_transfer_config.kv_connector
+        connector_cls = cls._registry[connector_name]()
+        assert issubclass(connector_cls, KVConnectorBase_V1)
+        logger.info("Creating v1 connector with name: %s", connector_name)
+        # NOTE(Kuntai): v1 connector is explicitly separated into two roles.
+        # Scheduler connector:
+        # - Co-colate with scheduler process
+        # - Should only be used inside the Scheduler class
+        # Worker connector:
+        # - Co-locate with worker process
+        # - Should only be used inside the forward context & attention layer
+        # We build separately to enforce strict separation
+        return connector_cls(config, role)
 
 
 # Register various connectors here.
