@@ -1,0 +1,8 @@
+CUDA_VISIBLE_DEVICES=4 \
+    vllm serve meta-llama/Llama-3.1-8B-Instruct \
+    --enforce-eager \
+    --gpu-memory-utilization 0.6 \
+    --max-model-len 8192 \
+    --max-num-batched-tokens 8192 \
+    --port 8300 \
+    --disable-log-requests 

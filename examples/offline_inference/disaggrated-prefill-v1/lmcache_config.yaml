@@ -1,0 +1,6 @@
+local_cpu: True
+max_local_cpu_size: 4
+#local_disk: "file://./lmcache_local/"
+#max_local_disk_size: 4
+remote_url: "lm://localhost:54321"
+remote_serde: "naive"
