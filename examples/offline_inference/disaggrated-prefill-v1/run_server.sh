@@ -18,6 +18,7 @@ if [[ $1 == "producer" ]]; then
         vllm serve meta-llama/Llama-3.1-8B-Instruct \
         --port 8100 \
         --disable-log-requests \
+        --max-num-seqs 160 \
         --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_producer","kv_connector_extra_config": {}}'
 
         #--enforce-eager \
@@ -35,6 +36,7 @@ elif [[ $1 == "consumer" ]]; then
         vllm serve meta-llama/Llama-3.1-8B-Instruct \
         --port 8200 \
         --disable-log-requests \
+        --max-num-seqs 160 \
         --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_consumer","kv_connector_extra_config": {}}'
 
         #--enforce-eager \

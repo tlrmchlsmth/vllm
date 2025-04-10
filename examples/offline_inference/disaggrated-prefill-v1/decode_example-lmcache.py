@@ -35,6 +35,7 @@ if __name__ == "__main__":
         gpu_memory_utilization=0.6,
         max_model_len=8192,
         max_num_batched_tokens=8192,
+        tensor_parallel_size=1,
         kv_transfer_config=KVTransferConfig.from_cli(
             '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_consumer",'
             '"kv_connector_extra_config": {}}')

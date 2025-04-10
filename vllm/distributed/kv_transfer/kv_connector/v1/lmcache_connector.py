@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+import os
 import threading
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
@@ -29,19 +30,37 @@ logger = init_logger(__name__)
 
 # FIXME: Use a different way to generate the rpc path in order
 # to avoid cross-vllm instance conflict
-def get_zmq_rpc_path_lmcache(kv_role: str):
+def determine_shared_pid(role: KVConnectorRole, is_tp: bool):
+    # If TP:
+    # - scheduler: use pid
+    # - worker: use ppid
+    # If non-TP:
+    # - scheduler: use ppid
+    # - worker: use ppid
+    # TODO: Change the hacky logic and have a better way
+    # to generate the rpc path
+    if is_tp:
+        return os.getpid(
+        ) if role == KVConnectorRole.SCHEDULER else os.getppid()
+    else:
+        return os.getppid()
+
+
+def get_zmq_rpc_path_lmcache(role: KVConnectorRole,
+                             is_tp: bool = False) -> str:
+    shared_pid = determine_shared_pid(role, is_tp)
     base_url = envs.VLLM_RPC_BASE_PATH
     logger.debug("Base URL: %s", base_url)
-    return f"ipc://{base_url}/lmcache_rpc_port_{kv_role}"
+    return f"ipc://{base_url}/lmcache_rpc_port_{shared_pid}"
 
 
 # TODO: move this to LMCache so that we can gracefully close it
 class LMCacheLookupClient:
 
-    def __init__(self, kv_role: str):
+    def __init__(self, role: KVConnectorRole, is_tp: bool):
         self.encoder = MsgpackEncoder()
         self.ctx = zmq.Context()
-        socket_path = get_zmq_rpc_path_lmcache(kv_role)
+        socket_path = get_zmq_rpc_path_lmcache(role, is_tp)
         self.socket = make_zmq_socket(self.ctx,
                                       socket_path,
                                       zmq.REQ,
@@ -50,7 +69,6 @@ class LMCacheLookupClient:
     def lookup(self, token_ids: torch.Tensor) -> int:
         request = self.encoder.encode(token_ids)
         self.socket.send(request)
-
         resp = self.socket.recv()
         result = int.from_bytes(resp, "big")
         return result
@@ -61,10 +79,11 @@ class LMCacheLookupClient:
 
 class LMCacheLookupServer:
 
-    def __init__(self, lmcache_engine: LMCacheEngine, kv_role: str):
+    def __init__(self, lmcache_engine: LMCacheEngine, role: KVConnectorRole,
+                 is_tp: bool):
         self.decoder = MsgpackDecoder(torch.Tensor)
         self.ctx = zmq.Context()
-        socket_path = get_zmq_rpc_path_lmcache(kv_role)
+        socket_path = get_zmq_rpc_path_lmcache(role, is_tp)
         self.socket = make_zmq_socket(self.ctx,
                                       socket_path,
                                       zmq.REP,
@@ -161,14 +180,18 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
         super().__init__(vllm_config=vllm_config, role=role)
 
         self.kv_role = vllm_config.kv_transfer_config.kv_role
+        is_tp = vllm_config.parallel_config.tensor_parallel_size > 1
         if role == KVConnectorRole.SCHEDULER:
-            self.lookup_client = LMCacheLookupClient(self.kv_role)
+            self.lookup_client = LMCacheLookupClient(role, is_tp)
         else:
             self.lmcache_engine = init_lmcache_engine(
                 vllm_config.model_config, vllm_config.parallel_config,
                 vllm_config.cache_config)
-            self.lookup_server = LMCacheLookupServer(self.lmcache_engine,
-                                                     self.kv_role)
+            # NOTE: Only create the KV lookup API server on worker rank 0
+            # when there are multiple workers
+            if vllm_config.parallel_config.rank == 0:
+                self.lookup_server = LMCacheLookupServer(
+                    self.lmcache_engine, role, is_tp)
 
         self.kv_caches: dict[str, torch.Tensor] = {}
 
