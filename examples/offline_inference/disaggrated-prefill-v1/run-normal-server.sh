@@ -1,4 +1,4 @@
-CUDA_VISIBLE_DEVICES=4 \
+CUDA_VISIBLE_DEVICES=3 \
     vllm serve meta-llama/Llama-3.1-8B-Instruct \
     --disable-log-requests \
     --enforce-eager \

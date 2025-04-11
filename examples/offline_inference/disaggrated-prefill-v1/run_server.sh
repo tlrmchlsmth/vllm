@@ -9,7 +9,6 @@ fi
 
 if [[ $1 == "producer" ]]; then
     UCX_TLS=cuda_ipc,cuda_copy,tcp \
-        LMCACHE_LOG_LEVEL=DEBUG \
         LMCACHE_CONFIG_FILE=lmcache_prefill_config.yaml \
         LMCACHE_USE_EXPERIMENTAL=True \
         VLLM_ENABLE_V1_MULTIPROCESSING=1 \
@@ -21,6 +20,7 @@ if [[ $1 == "producer" ]]; then
         --max-num-seqs 160 \
         --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_producer","kv_connector_extra_config": {}}'
 
+        #LMCACHE_LOG_LEVEL=DEBUG \
         #--enforce-eager \
         #--gpu-memory-utilization 0.6 \
         #--max-model-len 8192 \
@@ -28,7 +28,6 @@ if [[ $1 == "producer" ]]; then
 elif [[ $1 == "consumer" ]]; then
     UCX_TLS=cuda_ipc,cuda_copy,tcp \
         LMCACHE_CONFIG_FILE=lmcache_decode_config.yaml \
-        LMCACHE_LOG_LEVEL=DEBUG \
         LMCACHE_USE_EXPERIMENTAL=True \
         VLLM_ENABLE_V1_MULTIPROCESSING=1 \
         VLLM_WORKER_MULTIPROC_METHOD=spawn \
@@ -39,6 +38,7 @@ elif [[ $1 == "consumer" ]]; then
         --max-num-seqs 160 \
         --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_consumer","kv_connector_extra_config": {}}'
 
+        #LMCACHE_LOG_LEVEL=DEBUG \
         #--enforce-eager \
         #--gpu-memory-utilization 0.6 \
         #--max-model-len 8192 \

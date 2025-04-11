@@ -22,7 +22,6 @@ if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheManager
-    from vllm.v1.core.kv_cache_utils import KVCacheBlock
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
@@ -115,8 +114,15 @@ class LMCacheLookupServer:
 
 @dataclass
 class LoadSpec:
+    # Number of tokens cached in vLLM
     vllm_cached_tokens: int
+    # Number of tokens that are cached in LMCache
     lmcache_cached_tokens: int
+    # Number of tokens vLLM really want LMCache to load
+    # This is used to handle the vLLM fails to allocate
+    # enough blocks for LMCache to load and we want to
+    # avoid the memory out-of-bound access
+    lmcache_load_tokens: int
 
 
 @dataclass
@@ -156,6 +162,12 @@ class ReqMeta:
             logger.error("Num tokens: %d", valid_num_tokens)
             logger.error("Slot mapping: %s", str(slot_mapping))
             logger.error("Slot mapping len: %s", len(slot_mapping))
+        if load_spec is not None and len(
+                slot_mapping) < load_spec.lmcache_load_tokens:
+            logger.error("The slot mapping is shorter than the "
+                         "load spec! Which may access out-of-bound memory!")
+            logger.error("Slot mapping length: %d", len(slot_mapping))
+            logger.error("Load spec: %s", str(load_spec))
         return ReqMeta(token_ids, slot_mapping, load_spec)
 
 
@@ -278,6 +290,9 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
                 logger.warning(
                     "The number of retrieved tokens is not equal to the "
                     "expected number of tokens! This should not happen!")
+                logger.warning(
+                    "Num retrieved tokens: %d, num expected tokens: %d",
+                    num_retrieved_tokens, num_expected_tokens)
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         """Blocking until the KV for a specific layer is loaded into vLLM's
@@ -352,79 +367,56 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
     # Scheduler side APIs
     ####################
 
-    def get_external_prefix_cache_blocks(
+    def get_num_matched_tokens(
         self,
         request: "Request",
-        computed_blocks: list["KVCacheBlock"],
         num_computed_tokens: int,
-        kv_cache_manager: "KVCacheManager",
-    ) -> list["KVCacheBlock"]:
-        """Get the external prefix cache blocks from the connector.
-
-        This function may change the state of the connector, which will be 
-        used by `attach_connector_meta` later.
-
+    ) -> int:
+        """
+        Check for external KV cache hit.
+        
         Args:
             request (Request): the request object.
-            computed_blocks (list[KVCacheBlock]): the 'local' computed blocks.
-            num_computed_tokens (int): the number of 'local' computed tokens.
-            kv_cache_manager (KVCacheManager): the KV cache manager to 
-                allocate/free the blocks if needed.
+            num_computed_tokens (int): the number of locally
+                computed tokens for this request
 
         Returns:
-            The updated list of the computed blocks (appended with the remote
-            cached blocks)
+            the number of tokens that can be loaded from the 
+            external KV cache beyond what is already computed.
         """
         if self.kv_role == "kv_producer":
-            # Don't do lookup if the role is kv_producer
-            return computed_blocks
-
-        if self.kv_cache_manager is None:
-            self.kv_cache_manager = kv_cache_manager
+            return 0
 
         token_ids = torch.tensor(request.prompt_token_ids)
         num_external_hit_tokens = self.lookup_client.lookup(token_ids)
         logger.info("Num external hit tokens: %d", num_external_hit_tokens)
 
-        if num_external_hit_tokens <= num_computed_tokens:
-            # No need to load the KV cache from external
-            return computed_blocks
-
         need_to_allocate = num_external_hit_tokens - num_computed_tokens
-
-        # HACK: pre-allocate the blocks as a "temp" request
-        old_req_id = request.request_id
-        request.request_id = "temp-req-id-for-connector"
-        allocated_blocks = kv_cache_manager.allocate_slots(
-            request, need_to_allocate, computed_blocks, skip_preallocate=True)
-        if allocated_blocks is None:
-            logger.error("Failed to allocate slots for the connector")
-            # TODO: Need to process the allocation failure
-        request.request_id = old_req_id
-
-        self.kv_cache_manager.req_to_blocks.pop("temp-req-id-for-connector",
-                                                [])
-        self.kv_cache_manager.block_pool.free_blocks(
-            reversed(allocated_blocks))
-        self.kv_cache_manager.num_cached_block.pop("temp-req-id-for-connector",
-                                                   None)
-
-        # HACK: the scheduler should not see "all of the blocks" are
-        # already allocated. Therefore, we need to back up one block
-        num_expected_blocks = need_to_allocate // self._block_size
-        if len(allocated_blocks) > num_expected_blocks:
-            allocated_blocks = allocated_blocks[:num_expected_blocks]
-
-        if (len(allocated_blocks) + len(computed_blocks)) \
-                * self._block_size >= len(token_ids):
-            # HACK: back-off one block
-            allocated_blocks = allocated_blocks[:-1]
-
+        if need_to_allocate <= 0:
+            return 0
         self.load_specs[request.request_id] = LoadSpec(
             vllm_cached_tokens=num_computed_tokens,
-            lmcache_cached_tokens=num_external_hit_tokens)
+            lmcache_cached_tokens=num_external_hit_tokens,
+            lmcache_load_tokens=num_external_hit_tokens)
+        need_to_allocate = need_to_allocate // self._block_size * \
+                self._block_size
+        return need_to_allocate
 
-        return computed_blocks + allocated_blocks
+    def update_state_after_alloc(self, request: "Request",
+                                 num_allocated_blocks: int):
+        """
+        Update KVConnector state after temporary buffer alloc.
+
+        For SharedStorageConnector, update _request_needs_load
+        if the CacheManager this allocated blocks for us.
+        """
+        if request.request_id not in self.load_specs:
+            # No KV tokens from external KV cache, return
+            return
+
+        vllm_cached = self.load_specs[request.request_id].vllm_cached_tokens
+        self.load_specs[request.request_id].lmcache_load_tokens = \
+                vllm_cached + num_allocated_blocks * self._block_size
 
     def build_connector_meta(
             self, scheduler_output: SchedulerOutput) -> KVConnectorMetadata:
