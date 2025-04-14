@@ -15,9 +15,9 @@ if [[ $1 == "producer" ]]; then
         VLLM_WORKER_MULTIPROC_METHOD=spawn \
         CUDA_VISIBLE_DEVICES=0 \
         vllm serve meta-llama/Llama-3.1-8B-Instruct \
-        --port 8100 \
+        --port 9100 \
         --disable-log-requests \
-        --max-num-seqs 160 \
+        --max-num-seqs 50 \
         --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_producer","kv_connector_extra_config": {}}'
 
         #LMCACHE_LOG_LEVEL=DEBUG \
@@ -33,9 +33,9 @@ elif [[ $1 == "consumer" ]]; then
         VLLM_WORKER_MULTIPROC_METHOD=spawn \
         CUDA_VISIBLE_DEVICES=1 \
         vllm serve meta-llama/Llama-3.1-8B-Instruct \
-        --port 8200 \
+        --port 9200 \
         --disable-log-requests \
-        --max-num-seqs 160 \
+        --max-num-seqs 50 \
         --kv-transfer-config '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_consumer","kv_connector_extra_config": {}}'
 
         #LMCACHE_LOG_LEVEL=DEBUG \

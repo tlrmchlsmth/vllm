@@ -1,8 +1,8 @@
-CUDA_VISIBLE_DEVICES=3 \
+CUDA_VISIBLE_DEVICES=2 \
     vllm serve meta-llama/Llama-3.1-8B-Instruct \
     --disable-log-requests \
     --enforce-eager \
-    --port 8300 \
+    --port 9300 \
 
 #    --gpu-memory-utilization 0.6 \
 #    --max-model-len 8192 \
