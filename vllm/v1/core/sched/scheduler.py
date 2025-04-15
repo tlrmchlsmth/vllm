@@ -7,8 +7,10 @@ from collections import deque
 from collections.abc import Iterable
 from typing import Optional, Union
 
-from vllm.config import (CacheConfig, LoRAConfig, ModelConfig, SchedulerConfig,
-                         SpeculativeConfig)
+from vllm.config import VllmConfig
+from vllm.distributed.kv_transfer.kv_connector.factory import (
+    KVConnectorFactory)
+from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.v1.core.encoder_cache_manager import (EncoderCacheManager,
@@ -34,20 +36,17 @@ class Scheduler(SchedulerInterface):
 
     def __init__(
         self,
-        scheduler_config: SchedulerConfig,
-        model_config: ModelConfig,
-        cache_config: CacheConfig,
-        lora_config: Optional[LoRAConfig],
+        vllm_config: VllmConfig,
         kv_cache_config: KVCacheConfig,
         structured_output_manager: StructuredOutputManager,
-        speculative_config: SpeculativeConfig = None,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
         include_finished_set: bool = False,
         log_stats: bool = False,
     ) -> None:
-        self.scheduler_config = scheduler_config
-        self.cache_config = cache_config
-        self.lora_config = lora_config
+        self.vllm_config = vllm_config
+        self.scheduler_config = vllm_config.scheduler_config
+        self.cache_config = vllm_config.cache_config
+        self.lora_config = vllm_config.lora_config
         self.kv_cache_config = kv_cache_config
         self.log_stats = log_stats
         self.structured_output_manager = structured_output_manager
@@ -64,11 +63,22 @@ class Scheduler(SchedulerInterface):
             self.scheduler_config.max_num_batched_tokens
         self.max_model_len = self.scheduler_config.max_model_len
 
+        # Create KVConnector for the Scheduler. Note that each Worker
+        # will have a corresponding KVConnector with Role=WORKER.
+        # KV Connector pushes/pull of remote KVs for P/D and offloading.
+        self.connector = None
+        if self.vllm_config.kv_transfer_config is not None:
+            self.connector = KVConnectorFactory.create_connector_v1(
+                config=self.vllm_config, role=KVConnectorRole.SCHEDULER)
+
+        num_gpu_blocks = self.cache_config.num_gpu_blocks
+        assert num_gpu_blocks is not None and num_gpu_blocks > 0
+
         # Create the KV cache manager.
         self.kv_cache_manager = KVCacheManager(
             kv_cache_config=kv_cache_config,
             max_model_len=self.max_model_len,
-            enable_caching=cache_config.enable_prefix_caching,
+            enable_caching=self.cache_config.enable_prefix_caching,
             caching_hash_algo=self.cache_config.prefix_caching_hash_algo,
             log_stats=self.log_stats)
         self.block_size = self.cache_config.block_size
@@ -99,8 +109,8 @@ class Scheduler(SchedulerInterface):
         # This can be changed when we make encoder cache for embedding caching
         # across requests.
         encoder_compute_budget, encoder_cache_size = compute_encoder_budget(
-            model_config=model_config,
-            scheduler_config=scheduler_config,
+            model_config=vllm_config.model_config,
+            scheduler_config=vllm_config.scheduler_config,
             mm_registry=mm_registry,
         )
 
@@ -115,6 +125,7 @@ class Scheduler(SchedulerInterface):
             cache_size=encoder_cache_size)
 
         self.num_lookahead_tokens = 0
+        speculative_config = vllm_config.speculative_config
         if speculative_config and speculative_config.method == "eagle":
             self.num_lookahead_tokens = \
                 speculative_config.num_speculative_tokens
@@ -301,14 +312,26 @@ class Scheduler(SchedulerInterface):
                     skipped_waiting_requests.appendleft(request)
                     continue
 
-                # Get already-cached tokens.
+                # Get locally-cached tokens.
                 computed_blocks, num_computed_tokens = \
                     self.kv_cache_manager.get_computed_blocks(request)
+
+                # Get externally-cached tokens if using a KVConnector.
+                num_external_tokens = 0
+                if self.connector is not None:
+                    num_external_tokens += (
+                        self.connector.get_num_new_matched_tokens(
+                            request, num_computed_tokens))
+
+                # Total computed blocks (local + external).
+                num_total_computed_tokens = (num_computed_tokens +
+                                             num_external_tokens)
+
                 # Number of tokens to be scheduled.
                 # We use `request.num_tokens` instead of
                 # `request.num_prompt_tokens` to consider the resumed requests,
                 # which have output tokens.
-                num_new_tokens = request.num_tokens - num_computed_tokens
+                num_new_tokens = request.num_tokens - num_total_computed_tokens
                 if (0 < self.scheduler_config.long_prefill_token_threshold <
                         num_new_tokens):
                     num_new_tokens = (
@@ -320,7 +343,7 @@ class Scheduler(SchedulerInterface):
                 if request.has_encoder_inputs:
                     (encoder_inputs_to_schedule, num_new_tokens,
                      new_encoder_budget) = self._try_schedule_encoder_inputs(
-                         request, num_computed_tokens, num_new_tokens,
+                         request, num_total_computed_tokens, num_new_tokens,
                          encoder_budget)
                     if num_new_tokens == 0:
                         # The request cannot be scheduled.
@@ -330,10 +353,20 @@ class Scheduler(SchedulerInterface):
                     new_encoder_budget = encoder_budget
 
                 new_blocks = self.kv_cache_manager.allocate_slots(
-                    request, num_new_tokens, computed_blocks)
+                    request=request,
+                    num_tokens=num_new_tokens,
+                    new_computed_blocks=computed_blocks,
+                    num_external_tokens=num_external_tokens)
                 if new_blocks is None:
                     # The request cannot be scheduled.
                     break
+
+                # KVConnector: update internal state after allocation.
+                # This information is used to determine if a load is
+                # needed for this request.
+                if self.connector is not None:
+                    self.connector.update_state_after_alloc(
+                        request, num_external_tokens)
 
                 self.waiting.popleft()
                 if request.use_structured_output:
@@ -361,7 +394,7 @@ class Scheduler(SchedulerInterface):
                 num_scheduled_tokens[request.request_id] = num_new_tokens
                 token_budget -= num_new_tokens
                 request.status = RequestStatus.RUNNING
-                request.num_computed_tokens = num_computed_tokens
+                request.num_computed_tokens = num_total_computed_tokens
 
                 # Encoder-related.
                 if encoder_inputs_to_schedule:
@@ -443,6 +476,14 @@ class Scheduler(SchedulerInterface):
             grammar_bitmask=grammar_bitmask,
         )
 
+        # NOTE(Kuntai): this function is designed for multiple purposes:
+        # 1. Plan the KV cache store
+        # 2. Wrap up all the KV cache load / save ops into an opaque object
+        # 3. Clear the internal states of the connector
+        if self.connector is not None:
+            meta = self.connector.build_connector_meta(scheduler_output)
+            scheduler_output.kv_connector_metadata = meta
+
         # Advance the number of computed tokens for the request AFTER
         # the request is scheduled.
         # 1. The scheduler_output of the current step has to include the
@@ -489,7 +530,7 @@ class Scheduler(SchedulerInterface):
     def _try_schedule_encoder_inputs(
         self,
         request: Request,
-        num_computed_tokens: int,
+        num_total_computed_tokens: int,
         num_new_tokens: int,
         encoder_budget: int,
     ) -> tuple[list[int], int, int]:
@@ -500,7 +541,8 @@ class Scheduler(SchedulerInterface):
         An encoder input will be scheduled if:
         - Its output tokens overlap with the range of tokens being computed
         in this step, i.e.,
-        [num_computed_tokens, num_computed_tokens + num_new_tokens).
+        [num_total_computed_tokens, num_total_computed_tokens + num_new_tokens),
+        num_total_computed_tokens = num_computed_tokens + num_external_tokens
         - It is not already computed and stored in the encoder cache.
         - There is sufficient encoder token budget to process it.
         - The encoder cache has space to store it.
@@ -518,12 +560,12 @@ class Scheduler(SchedulerInterface):
             num_encoder_tokens = pos_info.length
 
             # The encoder output is needed if the two ranges overlap:
-            # [num_computed_tokens, num_computed_tokens + num_new_tokens) and
+            # [num_cached_tokens, num_cached_tokens + num_new_tokens) and
             # [start_pos, start_pos + num_encoder_tokens)
-            if start_pos >= num_computed_tokens + num_new_tokens:
+            if start_pos >= num_total_computed_tokens + num_new_tokens:
                 # The encoder input is not needed in this step.
                 break
-            if start_pos + num_encoder_tokens <= num_computed_tokens:
+            if start_pos + num_encoder_tokens <= num_total_computed_tokens:
                 # The encoder input is already computed and stored
                 # in the decoder's KV cache.
                 continue
@@ -536,10 +578,10 @@ class Scheduler(SchedulerInterface):
             # partially schedule a multimodal item. If the scheduled range would
             # only cover part of the mm input, roll back to before the mm item.
             if (self.scheduler_config.disable_chunked_mm_input
-                    and num_computed_tokens < start_pos
-                    and (num_computed_tokens + num_new_tokens)
+                    and num_total_computed_tokens < start_pos
+                    and (num_total_computed_tokens + num_new_tokens)
                     < (start_pos + num_encoder_tokens)):
-                num_new_tokens = start_pos - num_computed_tokens
+                num_new_tokens = start_pos - num_total_computed_tokens
                 break
 
             if (not self.encoder_cache_manager.can_allocate(request, i)
@@ -548,13 +590,13 @@ class Scheduler(SchedulerInterface):
                 # NOTE(woosuk): We assume that the encoder input tokens should
                 # be processed altogether, as the encoder usually uses
                 # bidirectional attention.
-                if num_computed_tokens < start_pos:
+                if num_total_computed_tokens < start_pos:
                     # We only schedule the decoder tokens just before the
                     # encoder input.
-                    num_new_tokens = start_pos - num_computed_tokens
+                    num_new_tokens = start_pos - num_total_computed_tokens
                 else:
-                    # Because of prefix caching, num_computed_tokens is greater
-                    # than start_pos even though its encoder input is not
+                    # Because of prefix caching, num_total_computed_tokens is
+                    # greater than start_pos even though encoder input is not
                     # available. In this case, we can't schedule any token for
                     # the request in this step.
                     num_new_tokens = 0

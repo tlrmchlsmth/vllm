@@ -166,6 +166,7 @@ class KVCacheManager:
         num_tokens: int,
         new_computed_blocks: Optional[list[KVCacheBlock]] = None,
         num_lookahead_tokens: int = 0,
+        num_external_tokens: int = 0,
     ) -> Optional[list[KVCacheBlock]]:
         """Add slots for a request with new tokens to append.
 
@@ -178,6 +179,9 @@ class KVCacheManager:
             num_lookahead_tokens: The number of speculative tokens to allocate.
                 This is used by spec decode proposers with kv-cache such 
                 as eagle.
+            num_external_tokens: The number of external tokens to allocate.
+                This is used by KVConnector for remote KV cache. KVConnector
+                injects external tokens into the blocks during execute_model.  
 
         Blocks layout:
         -----------------------------------------------------------------------
@@ -213,10 +217,15 @@ class KVCacheManager:
 
         # The number of computed tokens is the number of computed tokens plus
         # the new prefix caching hits
-        num_computed_tokens = (request.num_computed_tokens +
-                               len(new_computed_blocks) * self.block_size)
+        num_total_computed_tokens = (
+            request.num_computed_tokens +
+            len(new_computed_blocks) * self.block_size)
+        if num_external_tokens > 0:
+            num_total_computed_tokens += num_external_tokens
+            assert num_total_computed_tokens % self.block_size == 0
+
         num_required_blocks = cdiv(
-            num_computed_tokens + num_tokens + num_lookahead_tokens,
+            num_total_computed_tokens + num_tokens + num_lookahead_tokens,
             self.block_size)
         num_new_blocks = (num_required_blocks - len(req_blocks) -
                           len(new_computed_blocks))
@@ -262,7 +271,7 @@ class KVCacheManager:
                 # [..., max_num_blocks_per_req].
                 self.max_num_blocks_per_req - len(req_blocks),
             )
-            assert num_new_blocks > 0
+            assert num_new_blocks is not None and num_new_blocks > 0
 
             # Concatenate the computed block IDs and the new block IDs.
             new_blocks = self.block_pool.get_new_blocks(num_new_blocks)
@@ -278,8 +287,9 @@ class KVCacheManager:
         # Speculated tokens might be rejected in the future, so we does
         # not cache any speculated tokens. We only cache blocks with
         # generated (accepted) tokens.
-        num_full_blocks_after_append = (num_computed_tokens + num_tokens - len(
-            request.spec_token_ids)) // self.block_size
+        num_full_blocks_after_append = (
+            num_total_computed_tokens + num_tokens -
+            len(request.spec_token_ids)) // self.block_size
 
         self.block_pool.cache_full_blocks(
             request=request,
