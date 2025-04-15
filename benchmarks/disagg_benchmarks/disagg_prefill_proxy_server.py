@@ -27,7 +27,6 @@ async def forward_request(url, data):
                     content = await response.read()
                     yield content
 
-
 @app.route('/v1/completions', methods=['POST'])
 async def handle_request():
     try:
@@ -38,14 +37,22 @@ async def handle_request():
         prefill_request['max_tokens'] = 1
 
         # finish prefill
-        async for _ in forward_request('http://localhost:8100/v1/completions',
-                                       prefill_request):
+        async for _ in forward_request('http://localhost:9101/v1/completions',
+                                    prefill_request):
             continue
 
-        # return decode
-        generator = forward_request('http://localhost:8200/v1/completions',
-                                    original_request_data)
-        response = await make_response(generator)
+        # Collect all chunks from the generator
+        chunks = []
+        async for chunk in forward_request('http://localhost:9201/v1/completions',
+                                        original_request_data):
+            chunks.append(chunk)
+
+        # Combine chunks into a single response
+        full_response = b''.join(chunks)
+
+        # Create response with proper JSON content type
+        response = await make_response(full_response)
+        response.headers['Content-Type'] = 'application/json'
         response.timeout = None
 
         return response
@@ -58,6 +65,12 @@ async def handle_request():
         print(e)
         print("".join(traceback.format_exception(*exc_info)))
 
+        # Return a proper error response with JSON content type
+        error_response = {"error": str(e)}
+        response = await make_response(error_response)
+        response.headers['Content-Type'] = 'application/json'
+        response.status_code = 500
+        return response
 
 if __name__ == '__main__':
     app.run(port=8000)
