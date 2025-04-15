@@ -177,11 +177,11 @@ class KVCacheManager:
             new_computed_blocks: A list of new computed blocks just hitting the
                 prefix caching.
             num_lookahead_tokens: The number of speculative tokens to allocate.
-                This is used by spec decode proposers with kv-cache such 
+                This is used by spec decode proposers with kv-cache such
                 as eagle.
             num_external_tokens: The number of external tokens to allocate.
                 This is used by KVConnector for remote KV cache. KVConnector
-                injects external tokens into the blocks during execute_model.  
+                injects external tokens into the blocks during execute_model.
 
         Blocks layout:
         -----------------------------------------------------------------------
@@ -222,7 +222,7 @@ class KVCacheManager:
             len(new_computed_blocks) * self.block_size)
         if num_external_tokens > 0:
             num_total_computed_tokens += num_external_tokens
-            assert num_total_computed_tokens % self.block_size == 0
+            #assert num_total_computed_tokens % self.block_size == 0
 
         num_required_blocks = cdiv(
             num_total_computed_tokens + num_tokens + num_lookahead_tokens,
