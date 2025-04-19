@@ -175,10 +175,6 @@ class Scheduler(SchedulerInterface):
         # Check for new remote decode requests for P/D
         new_KV_requests_to_send: list[Request] = []
         if self.connector is not None:
-            # TODO: Receive request over ZMQ
-            #            self.receiving_KV_req_ids.update(
-            #                self.connector.receive_remote_decode_requests())
-
             # Check if any P/D requests have finished sending or receiving
             for req_id in list(self.waiting_to_send_KV_req_ids):
                 self.sending_KV_req_ids.add(req_id)
@@ -324,6 +320,18 @@ class Scheduler(SchedulerInterface):
                     if structured_output_req and structured_output_req.grammar:
                         request.status = RequestStatus.WAITING
                     else:
+                        self.waiting.popleft()
+                        skipped_waiting_requests.appendleft(request)
+                        continue
+
+                # Check whether the
+                # TODO(rob): we should do this after we allocate the blocks.
+                # TODO(rob): this logic is incorrect if the req was preempted.
+                if request.do_remote_decode:
+                    assert self.connector is not None
+                    if not self.connector.is_request_done_receiving(req_id):
+                        request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
+                        self.receiving_KV_req_ids.add(request.request_id)
                         self.waiting.popleft()
                         skipped_waiting_requests.appendleft(request)
                         continue
