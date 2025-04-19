@@ -65,10 +65,6 @@ class Request:
         self.do_remote_decode = (
             False if sampling_params.kv_transfer_params is None else
             sampling_params.kv_transfer_params.do_remote_decode)
-        self.do_remote_prefill = (
-            False if sampling_params.kv_transfer_params is None else
-            sampling_params.kv_transfer_params.do_remote_decode)
-        assert not (self.do_remote_decode and self.do_remote_prefill)
 
         # Sanity check
         assert len(self.mm_inputs) == len(self.mm_positions)
