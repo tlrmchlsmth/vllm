@@ -181,13 +181,10 @@ class OpenAIServingCompletion(OpenAIServing):
 
         # Similar to the OpenAI API, when n != best_of, we do not stream the
         # results. Noting that best_of is only supported in V0. In addition,
-        # we do not stream the results when use beam search or if the request
-        # should do the decode phase remotely.
-        do_remote_decode = (request.kv_transfer_params
-                            and request.kv_transfer_params.do_remote_decode)
+        # we do not stream the results when use beam search.
         stream = (request.stream
                   and (request.best_of is None or request.n == request.best_of)
-                  and not request.use_beam_search and not do_remote_decode)
+                  and not request.use_beam_search)
 
         # Streaming response
         if stream:
