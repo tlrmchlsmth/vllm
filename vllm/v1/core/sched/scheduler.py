@@ -324,8 +324,8 @@ class Scheduler(SchedulerInterface):
                         skipped_waiting_requests.appendleft(request)
                         continue
 
-                # Check whether the
-                # TODO(rob): we should do this after we allocate the blocks.
+                # TODO(rob): we should do this after we allocate the blocks if
+                # we want to write directly into the BlockTable (like Dynamo).
                 # TODO(rob): this logic is incorrect if the req was preempted.
                 if request.do_remote_decode:
                     assert self.connector is not None
@@ -749,8 +749,9 @@ class Scheduler(SchedulerInterface):
             # Get prompt logprobs for this request.
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
             if new_token_ids:
-                # If remote_decode, stop the request. Note that the request
-                # is not freed until the sending is complete.
+                # Stop request after the first token if doing a remote_decode.
+                # NOTE(rob): req is not freed (or preempted) in the EngineCore
+                # until the xfer is done to ensure we do not free the KV blocks.
                 kv_transfer_params = None
                 if request.do_remote_decode and not stopped:
                     stopped = True
@@ -758,7 +759,7 @@ class Scheduler(SchedulerInterface):
                     self.sending_KV_req_ids.add(req_id)
                     assert self.connector is not None
                     kv_transfer_params = self.connector.build_transfer_params(
-                        request=request, remote_decode=True)
+                        request)
 
                 # Add EngineCoreOutput for this Request.
                 outputs.append(
