@@ -32,13 +32,25 @@ class KVTransferParams(
         omit_defaults=True,  # type: ignore[call-arg]
         # required for @cached_property.
         dict=True):
-    request_id: str
     # TODO(rob): we can handle xPyD and direct KV block Xfer
-    # by passing these data.
     # remote_instance_id: Optional[str] = None
     # remote_block_ids: Optional[list[int]] = None
     do_remote_decode: bool = False
     do_remote_prefill: bool = False
+
+    @staticmethod
+    def from_optional(do_remote_decode: bool,
+                      do_remote_prefill: bool) -> Optional["KVTransferParams"]:
+        if do_remote_prefill and do_remote_prefill:
+            raise ValueError(
+                "Cannot do both remote prefill and remote decode.")
+        elif do_remote_decode or do_remote_prefill:
+            return KVTransferParams(
+                do_remote_decode=do_remote_decode,
+                do_remote_prefill=do_remote_prefill,
+            )
+        else:
+            return None
 
 
 # maybe make msgspec?

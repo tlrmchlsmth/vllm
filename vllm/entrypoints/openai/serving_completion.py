@@ -476,13 +476,16 @@ class OpenAIServingCompletion(OpenAIServing):
 
         request_metadata.final_usage_info = usage
 
+        do_remote_prefill = (
+            final_res_batch[0].kv_transfer_params
+            and final_res_batch[0].kv_transfer_params.do_remote_prefill)
         return CompletionResponse(
             id=request_id,
             created=created_time,
             model=model_name,
             choices=choices,
             usage=usage,
-            kv_transfer_params=final_res_batch[0].kv_transfer_params,
+            do_remote_prefill=do_remote_prefill,
         )
 
     def _create_completion_logprobs(

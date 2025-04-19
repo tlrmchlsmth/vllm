@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse
+import json
 import os
 import time
 from contextlib import asynccontextmanager
@@ -88,9 +89,10 @@ async def send_request_to_service(client: httpx.AsyncClient, endpoint: str,
     Send a request to a service using a persistent client.
     """
     req_data = req_data.copy()
-    req_data['max_tokens'] = 1
-    if 'max_completion_tokens' in req_data:
-        req_data['max_completion_tokens'] = 1
+    req_data['kv_transfer_params'] = json.dumps({
+        "do_remote_decode": True,
+    })
+    req_data["stream"] = False
 
     headers = {"Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}"}
     response = await client.post(endpoint, json=req_data, headers=headers)
@@ -121,8 +123,9 @@ async def handle_completions(request: Request):
         req_data = await request.json()
 
         # Send request to prefill service, ignore the response
-        await send_request_to_service(app.state.prefill_client, "/completions",
-                                      req_data)
+        response = await send_request_to_service(app.state.prefill_client,
+                                                 "/completions", req_data)
+        print(response)
 
         et = time.time()
         stats_calculator.add(et - st)

@@ -764,10 +764,7 @@ class Scheduler(SchedulerInterface):
                     # DWorker. From the POV of the DWorker, it should be a
                     # remote Prefill.
                     kv_transfer_params = KVTransferParams(
-                        request_id=request.request_id,
-                        do_remote_prefill=True,
-                        do_remote_decode=False,
-                    )
+                        do_remote_prefill=True, )
 
                 # Add EngineCoreOutput for this Request.
                 outputs.append(

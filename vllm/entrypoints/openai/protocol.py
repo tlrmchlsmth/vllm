@@ -808,8 +808,12 @@ class CompletionRequest(OpenAIBaseModel):
             " as strings of the form 'token_id:{token_id}' so that tokens "
             "that are not JSON-encodable can be identified."))
 
-    kv_transfer_params: Optional[KVTransferParams] = Field(
-        default=None,
+    do_remote_decode: bool = Field(
+        default=False,
+        description="KVTransfer parameters used for disaggregated serving.")
+
+    do_remote_prefill: bool = Field(
+        default=False,
         description="KVTransfer parameters used for disaggregated serving.")
 
     # doc: end-completion-extra-params
@@ -909,6 +913,11 @@ class CompletionRequest(OpenAIBaseModel):
             whitespace_pattern=self.guided_whitespace_pattern,
         )
 
+        kv_transfer_params = KVTransferParams.from_optional(
+            do_remote_decode=self.do_remote_decode,
+            do_remote_prefill=self.do_remote_prefill,
+        )
+
         return SamplingParams.from_optional(
             n=self.n,
             best_of=self.best_of,
@@ -938,7 +947,7 @@ class CompletionRequest(OpenAIBaseModel):
             guided_decoding=guided_decoding,
             logit_bias=self.logit_bias,
             allowed_token_ids=self.allowed_token_ids,
-            kv_transfer_params=self.kv_transfer_params,
+            kv_transfer_params=kv_transfer_params,
         )
 
     @model_validator(mode="before")
@@ -1189,7 +1198,8 @@ class CompletionResponse(OpenAIBaseModel):
     model: str
     choices: list[CompletionResponseChoice]
     usage: UsageInfo
-    kv_transfer_params: Optional[KVTransferParams] = Field(default=None)
+    # TODO: make this into a pydanic object
+    do_remote_prefill: Optional[bool] = Field(default=None)
 
 
 class CompletionResponseStreamChoice(OpenAIBaseModel):
