@@ -61,7 +61,7 @@ class Request:
         self.num_encoder_inputs = len(self.mm_inputs)
         self.has_encoder_inputs = self.num_encoder_inputs > 0
 
-        # P/D disagg related
+        # Disaggregated serving related
         self.do_remote_decode = (
             False if sampling_params.kv_transfer_params is None else
             sampling_params.kv_transfer_params.do_remote_decode)
