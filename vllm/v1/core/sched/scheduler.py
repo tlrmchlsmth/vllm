@@ -757,7 +757,7 @@ class Scheduler(SchedulerInterface):
                 if request.do_remote_decode and not stopped:
                     stopped = True
                     request.status = RequestStatus.FINISHED_REMOTE_DECODE
-                    self.sending_KV_req_ids.add(req_id)
+                    self.waiting_to_send_KV_req_ids.add(req_id)
                     assert self.connector is not None
                     # TODO(rob): do this on a per-Connector basis.
                     kv_transfer_params = KVTransferParams(
