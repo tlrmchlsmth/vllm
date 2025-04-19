@@ -13,7 +13,6 @@ from vllm.v1.core.sched.output import SchedulerOutput
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
     from vllm.forward_context import ForwardContext
-    from vllm.sampling_params import KVTransferParams
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
@@ -130,18 +129,6 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
             scheduler_output (SchedulerOutput): the scheduler output object.
         """
         return self._lmcache_engine.build_connector_meta(scheduler_output)
-
-    def build_transfer_params(self, request: "Request") -> "KVTransferParams":
-        """
-        Build the KVTransferParams for the request.
-        """
-
-        return KVTransferParams(
-            request_id=request.request_id,
-            remote_instance_id=self.instance_id,
-            remote_block_ids=request.block_ids,
-            do_remote_prefill=True,
-        )
 
     # These return true for now since they are not async
     def is_request_done_sending(self, req_id: str) -> bool:

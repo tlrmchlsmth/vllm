@@ -13,6 +13,7 @@ from vllm.distributed.kv_transfer.kv_connector.factory import (
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
+from vllm.sampling_params import KVTransferParams
 from vllm.v1.core.encoder_cache_manager import (EncoderCacheManager,
                                                 compute_encoder_budget)
 from vllm.v1.core.kv_cache_manager import KVCacheManager
@@ -758,8 +759,11 @@ class Scheduler(SchedulerInterface):
                     request.status = RequestStatus.FINISHED_REMOTE_DECODE
                     self.sending_KV_req_ids.add(req_id)
                     assert self.connector is not None
-                    kv_transfer_params = self.connector.build_transfer_params(
-                        request)
+                    # TODO(rob): do this on a per-Connector basis.
+                    kv_transfer_params = KVTransferParams(
+                        request_id=request.request_id,
+                        do_remote_prefill=True,
+                    )
 
                 # Add EngineCoreOutput for this Request.
                 outputs.append(
