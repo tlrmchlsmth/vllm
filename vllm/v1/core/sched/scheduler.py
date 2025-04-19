@@ -740,8 +740,6 @@ class Scheduler(SchedulerInterface):
 
             # Get prompt logprobs for this request.
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
-
-            # NOTE: new_token_ids is None if we have a partial prefill.
             if new_token_ids:
                 # If remote_decode, stop the request in the engine and add
                 # it to the sending KVs state. We hold onto this request in the
