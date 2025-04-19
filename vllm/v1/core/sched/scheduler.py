@@ -741,16 +741,15 @@ class Scheduler(SchedulerInterface):
             # Get prompt logprobs for this request.
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
             if new_token_ids:
-                # If remote_decode, stop the request in the engine and add
-                # it to the sending KVs state. We hold onto this request in the
-                # engine until the sending is done.
+                # If remote_decode, stop the request. Note that the request
+                # is not freed until the sending is complete.
                 kv_transfer_params = None
                 if request.do_remote_decode and not stopped:
-                    assert self.connector is not None
                     stopped = True
                     request.status = RequestStatus.FINISHED_REMOTE_DECODE
                     self.sending_KV_req_ids.add(req_id)
-                    kv_transfer_params = self.connector.make_transfer_params(
+                    assert self.connector is not None
+                    kv_transfer_params = self.connector.build_transfer_params(
                         request=request, remote_decode=True)
 
                 # Add EngineCoreOutput for this Request.
