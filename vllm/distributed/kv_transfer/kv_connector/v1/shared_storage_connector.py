@@ -333,7 +333,7 @@ class SharedStorageConnector(KVConnectorBase_V1):
     def is_request_done_sending(self, req_id: str) -> bool:
         return True
 
-    def is_request_done_receiving(self, req_id: str) -> bool:
+    def is_request_done_receiving(self, request: "Request") -> bool:
         return True
 
     # ==============================

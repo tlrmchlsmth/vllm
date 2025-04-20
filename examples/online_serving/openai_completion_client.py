@@ -18,7 +18,7 @@ def main():
     # model = models.data[0].id
 
     # Completion API
-    stream = False
+    stream = True
     completion = client.completions.create(
         model="meta-llama/Llama-3.1-8B-Instruct",
         prompt=

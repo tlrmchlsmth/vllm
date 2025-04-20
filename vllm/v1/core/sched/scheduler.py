@@ -102,7 +102,6 @@ class Scheduler(SchedulerInterface):
         # Requests in states for tracking KV transfers for P/D disagg
         self.waiting_to_send_KV_req_ids: set[str] = set()
         self.sending_KV_req_ids: set[str] = set()
-        self.receiving_KV_req_ids: set[str] = set()
 
         # OPTIMIZATION: Cache the CachedRequestData objects to avoid creating
         # them at each scheduling step.
@@ -180,10 +179,6 @@ class Scheduler(SchedulerInterface):
                 if self.connector.is_request_done_sending(req_id):
                     self.sending_KV_req_ids.remove(req_id)
                     self.finished_req_ids.add(req_id)
-            for req_id in list(self.receiving_KV_req_ids):
-                if self.connector.is_request_done_receiving(req_id):
-                    self.receiving_KV_req_ids.remove(req_id)
-                    self.waiting.append(self.requests[req_id])
             for req_id in list(self.waiting_to_send_KV_req_ids):
                 self.sending_KV_req_ids.add(req_id)
                 self.waiting_to_send_KV_req_ids.remove(req_id)
@@ -326,15 +321,19 @@ class Scheduler(SchedulerInterface):
                 # TODO(rob): we should do this after we allocate the blocks if
                 # we want to write directly into the BlockTable (like Dynamo).
                 # TODO(rob): this logic is incorrect if the req was preempted.
-                if request.do_remote_decode:
+                if request.do_remote_prefill:
                     assert self.connector is not None
-                    if not self.connector.is_request_done_receiving(
-                            request.request_id):
+                    # NOTE(rob): this returning false causes busy waiting
+                    # if there is no other work to do. This is "functional"
+                    # but not ideal. Also, if the transfer fails for any
+                    # reason we will spin in this state.
+                    if not self.connector.is_request_done_receiving(request):
                         request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
-                        self.receiving_KV_req_ids.add(request.request_id)
                         self.waiting.popleft()
                         skipped_waiting_requests.appendleft(request)
                         continue
+                    elif request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
+                        request.status = RequestStatus.WAITING
 
                 # Check that adding the request still respects the max_loras
                 # constraint.
@@ -516,7 +515,6 @@ class Scheduler(SchedulerInterface):
         if self.connector is not None:
             # TODO: encapsulate these in the KV connector metadata
             scheduler_output.sending_KV_req_ids = self.sending_KV_req_ids
-            scheduler_output.receiving_KV_req_ids = self.receiving_KV_req_ids
             scheduler_output.new_KV_req_ids_to_send = new_KV_req_ids_to_send
 
             meta = self.connector.build_connector_meta(scheduler_output)
@@ -839,7 +837,8 @@ class Scheduler(SchedulerInterface):
         self.finished_req_ids.add(request.request_id)
 
     def get_num_unfinished_requests(self) -> int:
-        return len(self.waiting) + len(self.running)
+        return len(self.waiting) + len(self.running) + len(
+            self.waiting_to_send_KV_req_ids)
 
     def has_finished_requests(self) -> bool:
         return len(self.finished_req_ids) > 0

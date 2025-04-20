@@ -41,7 +41,7 @@ class KVTransferParams(
     @staticmethod
     def from_optional(do_remote_decode: bool,
                       do_remote_prefill: bool) -> Optional["KVTransferParams"]:
-        if do_remote_prefill and do_remote_prefill:
+        if do_remote_decode and do_remote_prefill:
             raise ValueError(
                 "Cannot do both remote prefill and remote decode.")
         elif do_remote_decode or do_remote_prefill:
