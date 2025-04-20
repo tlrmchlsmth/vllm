@@ -326,8 +326,8 @@ class Scheduler(SchedulerInterface):
                     assert self.connector is not None
                     # NOTE(rob): this returning false causes busy waiting
                     # if there is no other work to do. This is "functional"
-                    # but not ideal. Also, if the transfer fails for any reason
-                    # we will spin in this state.
+                    # but not ideal. Also, if the transfer fails for any
+                    # reason we will spin in this state.
                     if not self.connector.is_request_done_receiving(request):
                         request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
                         self.receiving_KV_req_ids.add(request.request_id)
