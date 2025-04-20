@@ -1016,6 +1016,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 if get_forward_context().attn_metadata is not None:
                     kv_connector.start_load_kv(get_forward_context())
 
+        def maybe_wait_for_save():
+            if has_kv_transfer_group():
+                kv_connector = get_kv_transfer_group()
+                kv_connector.wait_for_save()
+
         self._update_states(scheduler_output)
         if not scheduler_output.total_num_scheduled_tokens:
             # Return empty ModelRunnerOutput if there's no work to do.
@@ -1094,6 +1099,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 intermediate_tensors=intermediate_tensors,
                 inputs_embeds=inputs_embeds,
             )
+            maybe_wait_for_save()
         if not get_pp_group().is_last_rank:
             # For mid-pipeline stages, return the hidden states.
             return hidden_states

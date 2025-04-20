@@ -128,4 +128,4 @@ class SchedulerOutput:
     kv_connector_metadata: Optional[KVConnectorMetadata] = None
     sending_KV_req_ids: set[str] = field(default_factory=set)
     receiving_KV_req_ids: set[str] = field(default_factory=set)
-    new_KV_requests_to_send: list[NewRequestData] = field(default_factory=list)
+    new_KV_req_ids_to_send: list[str] = field(default_factory=list)

@@ -13,6 +13,7 @@ from vllm.distributed.kv_transfer.kv_connector.factory import (
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
+from vllm.sampling_params import KVTransferParams
 from vllm.v1.core.encoder_cache_manager import (EncoderCacheManager,
                                                 compute_encoder_budget)
 from vllm.v1.core.kv_cache_manager import KVCacheManager
@@ -173,18 +174,8 @@ class Scheduler(SchedulerInterface):
         scheduled_timestamp = time.monotonic()
 
         # Check for new remote decode requests for P/D
-        new_KV_requests_to_send: list[Request] = []
+        new_KV_req_ids_to_send: list[str] = []
         if self.connector is not None:
-            # TODO: Receive request over ZMQ
-            #            self.receiving_KV_req_ids.update(
-            #                self.connector.receive_remote_decode_requests())
-
-            # Check if any P/D requests have finished sending or receiving
-            for req_id in list(self.waiting_to_send_KV_req_ids):
-                self.sending_KV_req_ids.add(req_id)
-                self.waiting_to_send_KV_req_ids.remove(req_id)
-                new_KV_requests_to_send.append(self.requests[req_id])
-
             for req_id in list(self.sending_KV_req_ids):
                 if self.connector.is_request_done_sending(req_id):
                     self.sending_KV_req_ids.remove(req_id)
@@ -193,6 +184,10 @@ class Scheduler(SchedulerInterface):
                 if self.connector.is_request_done_receiving(req_id):
                     self.receiving_KV_req_ids.remove(req_id)
                     self.waiting.append(self.requests[req_id])
+            for req_id in list(self.waiting_to_send_KV_req_ids):
+                self.sending_KV_req_ids.add(req_id)
+                self.waiting_to_send_KV_req_ids.remove(req_id)
+                new_KV_req_ids_to_send.append(req_id)
 
         # First, schedule the RUNNING requests.
         req_index = 0
@@ -324,6 +319,19 @@ class Scheduler(SchedulerInterface):
                     if structured_output_req and structured_output_req.grammar:
                         request.status = RequestStatus.WAITING
                     else:
+                        self.waiting.popleft()
+                        skipped_waiting_requests.appendleft(request)
+                        continue
+
+                # TODO(rob): we should do this after we allocate the blocks if
+                # we want to write directly into the BlockTable (like Dynamo).
+                # TODO(rob): this logic is incorrect if the req was preempted.
+                if request.do_remote_decode:
+                    assert self.connector is not None
+                    if not self.connector.is_request_done_receiving(
+                            request.request_id):
+                        request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
+                        self.receiving_KV_req_ids.add(request.request_id)
                         self.waiting.popleft()
                         skipped_waiting_requests.appendleft(request)
                         continue
@@ -506,18 +514,13 @@ class Scheduler(SchedulerInterface):
         # 2. Wrap up all the KV cache load / save ops into an opaque object
         # 3. Clear the internal states of the connector
         if self.connector is not None:
-            meta = self.connector.build_connector_meta(scheduler_output)
-            scheduler_output.kv_connector_metadata = meta
-
             # TODO: encapsulate these in the KV connector metadata
             scheduler_output.sending_KV_req_ids = self.sending_KV_req_ids
             scheduler_output.receiving_KV_req_ids = self.receiving_KV_req_ids
-            new_KV_to_send_reqs_data = [
-                NewRequestData.from_request(
-                    req, req_to_new_block_ids[req.request_id])
-                for req in new_KV_requests_to_send
-            ]
-            scheduler_output.new_KV_requests_to_send = new_KV_to_send_reqs_data
+            scheduler_output.new_KV_req_ids_to_send = new_KV_req_ids_to_send
+
+            meta = self.connector.build_connector_meta(scheduler_output)
+            scheduler_output.kv_connector_metadata = meta
 
         # Advance the number of computed tokens for the request AFTER
         # the request is scheduled.
@@ -719,7 +722,6 @@ class Scheduler(SchedulerInterface):
 
                 # Check for stop and update request state.
                 # This must be called before we make the EngineCoreOutput.
-                # TODO: What if we detect we're done here when doing P/D disagg?
                 stopped = check_stop(request, self.max_model_len)
                 if stopped:
                     self._free_request(request)
@@ -742,6 +744,22 @@ class Scheduler(SchedulerInterface):
             # Get prompt logprobs for this request.
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
             if new_token_ids:
+                # Stop request after the first token if doing a remote_decode.
+                # NOTE(rob): req is not freed (or preempted) in the EngineCore
+                # until the xfer is done to ensure we do not free the KV blocks.
+                kv_transfer_params = None
+                if request.do_remote_decode and not stopped:
+                    stopped = True
+                    request.status = RequestStatus.FINISHED_REMOTE_DECODE
+                    self.waiting_to_send_KV_req_ids.add(req_id)
+                    assert self.connector is not None
+                    # TODO(rob): do this on a per-Connector basis.
+                    # NOTE(rob): this KVTransferParams will be sent to the
+                    # DWorker. From the POV of the DWorker, it should be a
+                    # remote Prefill.
+                    kv_transfer_params = KVTransferParams(
+                        do_remote_prefill=True)
+
                 # Add EngineCoreOutput for this Request.
                 outputs.append(
                     EngineCoreOutput(
@@ -751,17 +769,13 @@ class Scheduler(SchedulerInterface):
                         new_logprobs=new_logprobs,
                         new_prompt_logprobs_tensors=prompt_logprobs_tensors,
                         stop_reason=request.stop_reason,
-                        events=request.take_events()))
+                        events=request.take_events(),
+                        kv_transfer_params=kv_transfer_params,
+                    ))
+
             else:
                 # Invariant: EngineCore returns no partial prefill outputs.
                 assert not prompt_logprobs_tensors
-
-            if self.connector is not None and request.do_remote_decode:
-                stopped = True
-                self.waiting_to_send_KV_req_ids.add(req_id)
-                # TODO: Add ZMQ request
-                #self.connector.send_remote_decode_request(
-                #    self.kv_cache_manager.req_to_blocks[req_id])
 
             self.scheduled_req_ids.remove(req_id)
             if not stopped:
