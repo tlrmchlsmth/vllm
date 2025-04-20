@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse
-import json
 import os
 import time
 from contextlib import asynccontextmanager
@@ -89,9 +88,7 @@ async def send_request_to_service(client: httpx.AsyncClient, endpoint: str,
     Send a request to a service using a persistent client.
     """
     req_data = req_data.copy()
-    req_data['kv_transfer_params'] = json.dumps({
-        "do_remote_decode": True,
-    })
+    req_data['do_remote_decode'] = True
     req_data["stream"] = False
 
     headers = {"Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}"}

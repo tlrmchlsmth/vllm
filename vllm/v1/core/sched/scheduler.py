@@ -68,9 +68,11 @@ class Scheduler(SchedulerInterface):
         # will have a corresponding KVConnector with Role=WORKER.
         # KV Connector pushes/pull of remote KVs for P/D and offloading.
         self.connector = None
+        print("================== START CREATE CONNECTOR ==================")
         if self.vllm_config.kv_transfer_config is not None:
             self.connector = KVConnectorFactory.create_connector_v1(
                 config=self.vllm_config, role=KVConnectorRole.SCHEDULER)
+        print("================== END CREATE CONNECTOR ==================")
 
         num_gpu_blocks = self.cache_config.num_gpu_blocks
         assert num_gpu_blocks is not None and num_gpu_blocks > 0
@@ -174,13 +176,13 @@ class Scheduler(SchedulerInterface):
         scheduled_timestamp = time.monotonic()
 
         # Check for new remote decode requests for P/D
-        new_KV_requests_to_send: list[Request] = []
+        new_KV_req_ids_to_send: list[str] = []
         if self.connector is not None:
             # Check if any P/D requests have finished sending or receiving
             for req_id in list(self.waiting_to_send_KV_req_ids):
                 self.sending_KV_req_ids.add(req_id)
                 self.waiting_to_send_KV_req_ids.remove(req_id)
-                new_KV_requests_to_send.append(self.requests[req_id])
+                new_KV_req_ids_to_send.append(req_id)
 
             for req_id in list(self.sending_KV_req_ids):
                 if self.connector.is_request_done_sending(req_id):
@@ -330,7 +332,8 @@ class Scheduler(SchedulerInterface):
                 # TODO(rob): this logic is incorrect if the req was preempted.
                 if request.do_remote_decode:
                     assert self.connector is not None
-                    if not self.connector.is_request_done_receiving(req_id):
+                    if not self.connector.is_request_done_receiving(
+                            request.request_id):
                         request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
                         self.receiving_KV_req_ids.add(request.request_id)
                         self.waiting.popleft()
@@ -521,12 +524,7 @@ class Scheduler(SchedulerInterface):
             # TODO: encapsulate these in the KV connector metadata
             scheduler_output.sending_KV_req_ids = self.sending_KV_req_ids
             scheduler_output.receiving_KV_req_ids = self.receiving_KV_req_ids
-            new_KV_to_send_reqs_data = [
-                NewRequestData.from_request(
-                    req, req_to_new_block_ids[req.request_id])
-                for req in new_KV_requests_to_send
-            ]
-            scheduler_output.new_KV_requests_to_send = new_KV_to_send_reqs_data
+            scheduler_output.new_KV_req_ids_to_send = new_KV_req_ids_to_send
 
         # Advance the number of computed tokens for the request AFTER
         # the request is scheduled.
@@ -764,7 +762,7 @@ class Scheduler(SchedulerInterface):
                     # DWorker. From the POV of the DWorker, it should be a
                     # remote Prefill.
                     kv_transfer_params = KVTransferParams(
-                        do_remote_prefill=True, )
+                        do_remote_prefill=True)
 
                 # Add EngineCoreOutput for this Request.
                 outputs.append(
