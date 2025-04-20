@@ -756,9 +756,8 @@ class Scheduler(SchedulerInterface):
                     self.waiting_to_send_KV_req_ids.add(req_id)
                     assert self.connector is not None
                     # TODO(rob): do this on a per-Connector basis.
-                    # NOTE(rob): this KVTransferParams will be sent to the
-                    # DWorker. From the POV of the DWorker, it should be a
-                    # remote Prefill.
+                    # NOTE(rob): this KVTransferParams is sent to DWorker.
+                    # From the POV of the DWorker, it is a remote Prefill.
                     kv_transfer_params = KVTransferParams(
                         do_remote_prefill=True)
 
