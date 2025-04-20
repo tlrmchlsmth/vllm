@@ -49,8 +49,8 @@ elif [[ $1 == "decoder" ]]; then
         CUDA_VISIBLE_DEVICES=1 \
         vllm serve $MODEL \
         --port 8200 \
-        --enforce-eager \
         --disable-log-requests \
+        --enforce-eager \
         --kv-transfer-config \
         '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_consumer","kv_connector_extra_config": {"discard_partial_chunks": false, "lmcache_rpc_port": "consumer1"}}'
 

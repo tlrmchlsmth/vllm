@@ -93,7 +93,6 @@ async def send_request_to_service(client: httpx.AsyncClient, endpoint: str,
     headers = {"Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}"}
     response = await client.post(endpoint, json=req_data, headers=headers)
     response.raise_for_status()
-
     return response
 
 
