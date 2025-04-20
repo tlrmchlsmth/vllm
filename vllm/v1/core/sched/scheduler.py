@@ -178,12 +178,6 @@ class Scheduler(SchedulerInterface):
         # Check for new remote decode requests for P/D
         new_KV_req_ids_to_send: list[str] = []
         if self.connector is not None:
-            # Check if any P/D requests have finished sending or receiving
-            for req_id in list(self.waiting_to_send_KV_req_ids):
-                self.sending_KV_req_ids.add(req_id)
-                self.waiting_to_send_KV_req_ids.remove(req_id)
-                new_KV_req_ids_to_send.append(req_id)
-
             for req_id in list(self.sending_KV_req_ids):
                 if self.connector.is_request_done_sending(req_id):
                     self.sending_KV_req_ids.remove(req_id)
@@ -192,6 +186,10 @@ class Scheduler(SchedulerInterface):
                 if self.connector.is_request_done_receiving(req_id):
                     self.receiving_KV_req_ids.remove(req_id)
                     self.waiting.append(self.requests[req_id])
+            for req_id in list(self.waiting_to_send_KV_req_ids):
+                self.sending_KV_req_ids.add(req_id)
+                self.waiting_to_send_KV_req_ids.remove(req_id)
+                new_KV_req_ids_to_send.append(req_id)
 
         # First, schedule the RUNNING requests.
         req_index = 0
@@ -518,13 +516,13 @@ class Scheduler(SchedulerInterface):
         # 2. Wrap up all the KV cache load / save ops into an opaque object
         # 3. Clear the internal states of the connector
         if self.connector is not None:
-            meta = self.connector.build_connector_meta(scheduler_output)
-            scheduler_output.kv_connector_metadata = meta
-
             # TODO: encapsulate these in the KV connector metadata
             scheduler_output.sending_KV_req_ids = self.sending_KV_req_ids
             scheduler_output.receiving_KV_req_ids = self.receiving_KV_req_ids
             scheduler_output.new_KV_req_ids_to_send = new_KV_req_ids_to_send
+
+            meta = self.connector.build_connector_meta(scheduler_output)
+            scheduler_output.kv_connector_metadata = meta
 
         # Advance the number of computed tokens for the request AFTER
         # the request is scheduled.

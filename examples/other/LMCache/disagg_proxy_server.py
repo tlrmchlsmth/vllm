@@ -104,7 +104,7 @@ async def stream_service_response(client: httpx.AsyncClient, endpoint: str,
     Asynchronously stream the response from a service using a persistent client.
     """
     headers = {"Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}"}
-    req_data['do_remote_prefill'] = True
+    # req_data['do_remote_prefill'] = True
     async with client.stream("POST", endpoint, json=req_data,
                              headers=headers) as response:
         response.raise_for_status()
