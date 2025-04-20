@@ -102,7 +102,6 @@ class Scheduler(SchedulerInterface):
         # Requests in states for tracking KV transfers for P/D disagg
         self.waiting_to_send_KV_req_ids: set[str] = set()
         self.sending_KV_req_ids: set[str] = set()
-        self.receiving_KV_req_ids: set[str] = set()
 
         # OPTIMIZATION: Cache the CachedRequestData objects to avoid creating
         # them at each scheduling step.
@@ -330,7 +329,6 @@ class Scheduler(SchedulerInterface):
                     # reason we will spin in this state.
                     if not self.connector.is_request_done_receiving(request):
                         request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
-                        self.receiving_KV_req_ids.add(request.request_id)
                         self.waiting.popleft()
                         skipped_waiting_requests.appendleft(request)
                         continue
@@ -517,7 +515,6 @@ class Scheduler(SchedulerInterface):
         if self.connector is not None:
             # TODO: encapsulate these in the KV connector metadata
             scheduler_output.sending_KV_req_ids = self.sending_KV_req_ids
-            scheduler_output.receiving_KV_req_ids = self.receiving_KV_req_ids
             scheduler_output.new_KV_req_ids_to_send = new_KV_req_ids_to_send
 
             meta = self.connector.build_connector_meta(scheduler_output)
