@@ -744,8 +744,6 @@ class Scheduler(SchedulerInterface):
 
             # Get prompt logprobs for this request.
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
-
-            # NOTE: new_token_ids is None if we have a partial prefill.
             if new_token_ids:
                 # Stop request after the first token if doing a remote_decode.
                 # NOTE(rob): req is not freed (or preempted) in the EngineCore
