@@ -180,10 +180,6 @@ class Scheduler(SchedulerInterface):
                 if self.connector.is_request_done_sending(req_id):
                     self.sending_KV_req_ids.remove(req_id)
                     self.finished_req_ids.add(req_id)
-            for req_id in list(self.receiving_KV_req_ids):
-                if self.connector.is_request_done_receiving(req_id):
-                    self.receiving_KV_req_ids.remove(req_id)
-                    self.waiting.append(self.requests[req_id])
             for req_id in list(self.waiting_to_send_KV_req_ids):
                 self.sending_KV_req_ids.add(req_id)
                 self.waiting_to_send_KV_req_ids.remove(req_id)
@@ -326,15 +322,17 @@ class Scheduler(SchedulerInterface):
                 # TODO(rob): we should do this after we allocate the blocks if
                 # we want to write directly into the BlockTable (like Dynamo).
                 # TODO(rob): this logic is incorrect if the req was preempted.
-                if request.do_remote_decode:
+                if request.do_remote_prefill:
                     assert self.connector is not None
-                    if not self.connector.is_request_done_receiving(
-                            request.request_id):
+                    # NOTE(rob): we should have a timeout on this.
+                    if not self.connector.is_request_done_receiving(request):
                         request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
                         self.receiving_KV_req_ids.add(request.request_id)
                         self.waiting.popleft()
                         skipped_waiting_requests.appendleft(request)
                         continue
+                    else:
+                        request.status = RequestStatus.WAITING
 
                 # Check that adding the request still respects the max_loras
                 # constraint.

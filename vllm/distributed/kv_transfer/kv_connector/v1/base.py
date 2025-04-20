@@ -214,5 +214,5 @@ class KVConnectorBase_V1(ABC):
     def is_request_done_sending(self, req_id: str) -> bool:
         raise NotImplementedError
 
-    def is_request_done_receiving(self, req_id: str) -> bool:
+    def is_request_done_receiving(self, request: "Request") -> bool:
         raise NotImplementedError

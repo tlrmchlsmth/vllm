@@ -134,5 +134,5 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
     def is_request_done_sending(self, req_id: str) -> bool:
         return True
 
-    def is_request_done_receiving(self, req_id: str) -> bool:
-        return True
+    def is_request_done_receiving(self, request: "Request") -> bool:
+        return self._lmcache_engine.is_request_done_receiving(request)
