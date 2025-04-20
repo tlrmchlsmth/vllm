@@ -1198,8 +1198,6 @@ class CompletionResponse(OpenAIBaseModel):
     model: str
     choices: list[CompletionResponseChoice]
     usage: UsageInfo
-    # TODO: make this into a pydanic object
-    do_remote_prefill: Optional[bool] = Field(default=None)
 
 
 class CompletionResponseStreamChoice(OpenAIBaseModel):
