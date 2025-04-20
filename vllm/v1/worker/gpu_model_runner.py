@@ -1023,8 +1023,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         self._update_states(scheduler_output)
         if not scheduler_output.total_num_scheduled_tokens:
-            # HACK to handle case where KV is sending but
-            # not work left to do.
+            # KV send/recv even if no work to do.
             with set_forward_context(None, self.vllm_config):
                 maybe_setup_kv_connector()
                 maybe_wait_for_save()
