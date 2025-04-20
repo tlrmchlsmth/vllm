@@ -326,7 +326,8 @@ class Scheduler(SchedulerInterface):
                     assert self.connector is not None
                     # NOTE(rob): this should have a timeout.
                     # NOTE(rob): this returning false causes busy waiting
-                    # if there are no other active requests to do.
+                    # if there is no other work to do. This is "functional"
+                    # but not ideal.
                     if not self.connector.is_request_done_receiving(request):
                         request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
                         self.receiving_KV_req_ids.add(request.request_id)
