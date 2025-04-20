@@ -324,7 +324,6 @@ class Scheduler(SchedulerInterface):
                 # TODO(rob): this logic is incorrect if the req was preempted.
                 if request.do_remote_prefill:
                     assert self.connector is not None
-                    # NOTE(rob): this should have a timeout.
                     # NOTE(rob): this returning false causes busy waiting
                     # if there is no other work to do. This is "functional"
                     # but not ideal.
