@@ -840,7 +840,8 @@ class Scheduler(SchedulerInterface):
         self.finished_req_ids.add(request.request_id)
 
     def get_num_unfinished_requests(self) -> int:
-        return len(self.waiting) + len(self.running)
+        return len(self.waiting) + len(self.running) + len(
+            self.waiting_to_send_KV_req_ids)
 
     def has_finished_requests(self) -> bool:
         return len(self.finished_req_ids) > 0
