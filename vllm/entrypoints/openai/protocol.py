@@ -19,6 +19,9 @@ from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import (BeamSearchParams, GuidedDecodingParams,
                                   KVTransferParams, RequestOutputKind,
                                   SamplingParams)
+
+                                  KVTransferParams, RequestOutputKind,
+                                  SamplingParams)
 from vllm.sequence import Logprob
 from vllm.utils import random_uuid, resolve_obj_by_qualname
 
@@ -947,7 +950,7 @@ class CompletionRequest(OpenAIBaseModel):
             guided_decoding=guided_decoding,
             logit_bias=self.logit_bias,
             allowed_token_ids=self.allowed_token_ids,
-            kv_transfer_params=kv_transfer_params,
+            kv_transfer_params=self.kv_transfer_params,
         )
 
     @model_validator(mode="before")
@@ -1198,6 +1201,7 @@ class CompletionResponse(OpenAIBaseModel):
     model: str
     choices: list[CompletionResponseChoice]
     usage: UsageInfo
+    kv_transfer_params: Optional[KVTransferParams] = Field(default=None)
 
 
 class CompletionResponseStreamChoice(OpenAIBaseModel):

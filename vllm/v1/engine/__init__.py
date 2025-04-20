@@ -106,6 +106,9 @@ class EngineCoreOutput(
     events: Optional[list[EngineCoreEvent]] = None
     kv_transfer_params: Optional[KVTransferParams] = None
 
+    # In P/D case, used to trigger remote decode
+    kv_transfer_params: Optional[KVTransferParams] = None
+
     @property
     def finished(self) -> bool:
         return self.finish_reason is not None

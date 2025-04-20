@@ -264,7 +264,7 @@ class SamplingParams(
     bad_words: Optional[list[str]] = None
     _bad_words_token_ids: Optional[list[list[int]]] = None
 
-    # Fields used for KVTransfer in disaggregated serving.
+    # Fields used for kv cache transfer
     kv_transfer_params: Optional[KVTransferParams] = None
 
     @staticmethod

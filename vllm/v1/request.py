@@ -166,6 +166,7 @@ class RequestStatus(enum.IntEnum):
     FINISHED_ABORTED = enum.auto()
     FINISHED_IGNORED = enum.auto()
     FINISHED_REMOTE_DECODE = enum.auto()
+    FINISHED_REMOTE_DECODE = enum.auto()
 
     @staticmethod
     def is_finished(status: "RequestStatus") -> bool:
