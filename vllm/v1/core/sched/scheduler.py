@@ -324,7 +324,9 @@ class Scheduler(SchedulerInterface):
                 # TODO(rob): this logic is incorrect if the req was preempted.
                 if request.do_remote_prefill:
                     assert self.connector is not None
-                    # NOTE(rob): we should have a timeout on this.
+                    # NOTE(rob): this should have a timeout.
+                    # NOTE(rob): this returning false causes busy waiting
+                    # if there are no other active requests to do.
                     if not self.connector.is_request_done_receiving(request):
                         request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
                         self.receiving_KV_req_ids.add(request.request_id)
