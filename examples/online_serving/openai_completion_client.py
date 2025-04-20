@@ -12,7 +12,6 @@ def main():
         # defaults to os.environ.get("OPENAI_API_KEY")
         api_key=openai_api_key,
         base_url=openai_api_base,
-        max_retries=0,
     )
 
     # models = client.models.list()
