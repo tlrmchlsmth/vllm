@@ -333,7 +333,7 @@ class Scheduler(SchedulerInterface):
                         self.waiting.popleft()
                         skipped_waiting_requests.appendleft(request)
                         continue
-                    else:
+                    elif request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
                         request.status = RequestStatus.WAITING
 
                 # Check that adding the request still respects the max_loras
