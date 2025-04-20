@@ -14,16 +14,15 @@ def main():
         base_url=openai_api_base,
     )
 
-    # models = client.models.list()
-    # model = models.data[0].id
+    models = client.models.list()
+    model = models.data[0].id
 
     # Completion API
     stream = False
-    completion = client.completions.create(
-        model="meta-llama/Llama-3.1-8B-Instruct",
-        prompt="The quick brown job jumped",
-        echo=False,
-        stream=stream)
+    completion = client.completions.create(model=model,
+                                           prompt="The quick brown fox jumped",
+                                           echo=False,
+                                           stream=stream)
 
     print("-" * 50)
     print("Completion results:")
