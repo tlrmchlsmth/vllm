@@ -94,6 +94,7 @@ async def send_request_to_service(client: httpx.AsyncClient, endpoint: str,
     headers = {"Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}"}
     response = await client.post(endpoint, json=req_data, headers=headers)
     response.raise_for_status()
+
     return response
 
 
@@ -103,6 +104,7 @@ async def stream_service_response(client: httpx.AsyncClient, endpoint: str,
     Asynchronously stream the response from a service using a persistent client.
     """
     headers = {"Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}"}
+    req_data['do_remote_prefill'] = True
     async with client.stream("POST", endpoint, json=req_data,
                              headers=headers) as response:
         response.raise_for_status()
@@ -120,9 +122,8 @@ async def handle_completions(request: Request):
         req_data = await request.json()
 
         # Send request to prefill service, ignore the response
-        response = await send_request_to_service(app.state.prefill_client,
-                                                 "/completions", req_data)
-        print(response)
+        await send_request_to_service(app.state.prefill_client, "/completions",
+                                      req_data)
 
         et = time.time()
         stats_calculator.add(et - st)
