@@ -506,6 +506,7 @@ class Scheduler(SchedulerInterface):
             free_encoder_input_ids=self.encoder_cache_manager.get_freed_ids(),
             structured_output_request_ids=structured_output_request_ids,
             grammar_bitmask=grammar_bitmask,
+            new_KV_req_ids_to_send=new_KV_req_ids_to_send,
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
@@ -513,10 +514,6 @@ class Scheduler(SchedulerInterface):
         # 2. Wrap up all the KV cache load / save ops into an opaque object
         # 3. Clear the internal states of the connector
         if self.connector is not None:
-            # TODO: encapsulate these in the KV connector metadata
-            scheduler_output.sending_KV_req_ids = self.sending_KV_req_ids
-            scheduler_output.new_KV_req_ids_to_send = new_KV_req_ids_to_send
-
             meta = self.connector.build_connector_meta(scheduler_output)
             scheduler_output.kv_connector_metadata = meta
 
