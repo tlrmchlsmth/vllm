@@ -45,7 +45,7 @@ elif [[ $1 == "decoder" ]]; then
         LMCACHE_USE_EXPERIMENTAL=True \
         VLLM_ENABLE_V1_MULTIPROCESSING=1 \
         VLLM_WORKER_MULTIPROC_METHOD=spawn \
-        CUDA_VISIBLE_DEVICES=1 \
+        CUDA_VISIBLE_DEVICES=7 \
         vllm serve $MODEL \
         --port 8200 \
         --enforce-eager \
