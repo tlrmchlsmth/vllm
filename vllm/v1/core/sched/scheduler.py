@@ -176,8 +176,9 @@ class Scheduler(SchedulerInterface):
         req_index = 0
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
-            if request.request_id in self.recving_KV_req_ids:
-                # P/D: This request is still waiting for KVs.
+            if (request.request_id in self.recving_KV_req_ids
+                    or request.request_id in self.sending_KV_req_ids):
+                # P/D: This request is still recv/sending KVs.
                 req_index += 1
                 continue
             if request.request_id in self.scheduled_req_ids:
@@ -755,7 +756,7 @@ class Scheduler(SchedulerInterface):
                     kv_transfer_params = KVTransferParams(
                         do_remote_prefill=True,
                         # put the remote block ids here
-                        remote_block_ids=[1,2,3],
+                        remote_block_ids=[1, 2, 3],
                         # put the enigne id here
                         remote_engine_id="abcdefg",
                     )
