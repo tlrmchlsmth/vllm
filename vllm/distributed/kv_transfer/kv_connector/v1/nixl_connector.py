@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 
 import msgspec
 import torch
+import zmq
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -75,7 +76,6 @@ class NixlConnectorMetadata(KVConnectorMetadata):
 class NixlConnector(KVConnectorBase_V1):
 
     def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole):
-
         self.engine_id = uuid.uuid4()
 
         if role == KVConnectorRole.SCHEDULER:
@@ -231,7 +231,7 @@ class NixlConnectorWorker:
 
         # In progress transfers.
         # [req_id -> list[handle]]
-        self._recving_transfers = defaultdict(list[any])
+        self._recving_transfers = defaultdict(list[any])        
 
     def register_kv_caches(self, kv_caches: list[tuple[torch.Tensor,
                                                        torch.Tensor]]):
@@ -261,8 +261,38 @@ class NixlConnectorWorker:
         self._registered_descs.append(descs)
         self.nixl_wrapper.register_kv_caches(kv_caches)
 
+        # THIS IS FOR DEBUG and INSECURE
+        import os
+        _ctx = zmq.Context()  # type: ignore
+        _side_channel = _ctx.socket(zmq.PAIR)  # type: ignore
+        NIXL_ROLE = os.getenv("NIXL_ROLE")
+        if NIXL_ROLE == "SENDER":
+            _side_channel.bind("tcp://localhost:5555")
+            _side_channel.setsockopt(zmq.LINGER, 0)  # type: ignore
+            metadata = NixlAgentMetadata(
+                self.engine_id,
+                agent_metadata=self.nixl_wrapper.get_agent_metadata(),
+                kv_caches_base_addr=self.v_
+            )
+            encoder = msgspec.msgpack.Encoder()
+            _side_channel.send(encoder.encode(metadata))
+
+        elif NIXL_ROLE == "RECVER":
+            _side_channel.bind("tcp://localhost:5555")
+            _side_channel.setsockopt(zmq.LINGER, 0)  # type: ignore
+            decoder = msgspec.msgpack.Decoder(NixlAgentMetadata)
+            metadata_bytes = _side_channel.recv()
+            metadata = decoder.decode(metadata_bytes)
+            self.add_remote_agent(metadata)
+
+        else:
+            raise Exception("SET NIXL_ROLE to SENDER OR RECVER")
+
     def add_remote_agent(self, nixl_agent_meta: NixlAgentMetadata):
         engine_id = nixl_agent_meta.engine_id
+        if engine_id in self._remote_agents:
+            return
+
         num_blocks = nixl_agent_meta.num_blocks
 
         agent_names = []
@@ -274,8 +304,8 @@ class NixlConnectorWorker:
         self.kv_caches_base_addr[
             engine_id] = nixl_agent_meta.kv_caches_base_addr
 
-        # NOTE: once we support heterogeneous TP, we will need maintain the src
-        # for each TP multiplier.
+        # NOTE: once we support heterogeneous TP, we will need maintain the
+        # src for each TP multiplier.
         # NOTE(rob): Dynamo only supports D TP size > P TP size.
         # https://github.com/vllm-project/vllm/pull/16124/files#diff-876efa5533f5dcff3fba850e8684a47d53c112e287988957c115b11691374f4bR331 # noqa: E501
         # Create descs and xfer side handles.
