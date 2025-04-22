@@ -158,7 +158,6 @@ class RequestStatus(enum.IntEnum):
     """Status of a request."""
     WAITING = enum.auto()
     WAITING_FOR_FSM = enum.auto()
-    WAITING_FOR_REMOTE_KVS = enum.auto()
     RUNNING = enum.auto()
     PREEMPTED = enum.auto()
     # Note: anything after PREEMPTED will be considered

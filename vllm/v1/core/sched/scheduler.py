@@ -331,7 +331,6 @@ class Scheduler(SchedulerInterface):
                     self.kv_cache_manager.get_computed_blocks(request)
 
                 # Get externally-cached tokens if using a KVConnector.
-                # NOTE(rob): this returns the full prompt length for nixl
                 num_external_tokens = (
                     0 if self.connector is None else
                     self.connector.get_num_new_matched_tokens(
@@ -784,7 +783,6 @@ class Scheduler(SchedulerInterface):
             self.recving_KV_req_ids.remove(req_id)
             self.scheduled_req_ids.remove(req_id)
         for req_id in list(model_runner_output.finished_sending):
-            self.sending_KV_req_ids.remove(req_id)
             self._free_request(self.requests[req_id])
 
         self.running = new_running
@@ -842,7 +840,7 @@ class Scheduler(SchedulerInterface):
         self.encoder_cache_manager.free(request)
         self._cached_reqs_data.pop(request.request_id, None)
         del self.requests[request.request_id]
-        self.sending_KV_req_ids.remove(request.request_id)
+        self.sending_KV_req_ids.discard(request.request_id)
         self.finished_req_ids.add(request.request_id)
 
     def get_num_unfinished_requests(self) -> int:
