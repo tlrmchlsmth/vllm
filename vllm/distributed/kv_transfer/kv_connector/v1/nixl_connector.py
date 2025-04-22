@@ -519,16 +519,3 @@ class NixlConnectorWorker:
                         descs_ids.append(layer_id * 2 * num_blocks +
                                          is_value * num_blocks + block_id)
         return descs_ids
-
-    def _shutdown(self):
-        """Shutdown all the NIXL related items."""
-        for descs_list in self._registered_descs:
-            self.nixl_wrapper.deregister_memory(descs_list)
-        for agent_names in self._remote_agents.values():
-            for agent_name in agent_names:
-                self.nixl_wrapper.remove_remote_agent(agent_name)
-        for src_xfer_side_handle in self.src_xfer_side_handles.values():
-            self.nixl_wrapper.release_dlist_handle(src_xfer_side_handle)
-        for dst_xfer_side_handles in self.dst_xfer_side_handles.values():
-            for dst_xfer_side_handle in dst_xfer_side_handles.values():
-                self.nixl_wrapper.delete_xfer_side(dst_xfer_side_handle)
