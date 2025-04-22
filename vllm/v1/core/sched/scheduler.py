@@ -400,7 +400,9 @@ class Scheduler(SchedulerInterface):
                 # needed for this request.
                 if self.connector is not None:
                     self.connector.update_state_after_alloc(
-                        request, num_external_tokens)
+                        request,
+                        num_external_tokens,
+                    )
 
                 self.waiting.popleft()
                 if request.use_structured_output:
