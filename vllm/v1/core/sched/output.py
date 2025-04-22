@@ -126,4 +126,3 @@ class SchedulerOutput:
 
     # KV Cache Connector metadata.
     kv_connector_metadata: Optional[KVConnectorMetadata] = None
-    new_KV_req_ids_to_send: list[str] = field(default_factory=list)

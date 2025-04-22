@@ -7,11 +7,13 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-    KVConnectorBase_V1)
+    KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
 from vllm.logger import init_logger
+from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
     from vllm.v1.request import Request
+    
 
 logger = init_logger(__name__)
 
@@ -22,6 +24,18 @@ try:
 except ImportError:
     logger.warning("NIXL is not available")
     NixlWrapper = None
+
+
+class NixlConnectorMetadata(KVConnectorMetadata):
+    def __init__(self):
+        self.block_ids: dict[str, list[int]] = {}
+    
+    def add_new_req(
+        self,
+        req_id: str,
+        block_ids: list[int],
+    ):
+        self.block_ids[req_id] = block_ids
 
 
 class NixlConnector(KVConnectorBase_V1):
@@ -52,6 +66,9 @@ class NixlConnector(KVConnectorBase_V1):
         self.dst_xfer_side_handles = defaultdict(dict)
         self.dst_num_blocks = {}
 
+        # req_ids that need to start loading.
+        self._req_ids_to_load: set[str] = set()
+        
         # [req_id -> list[handle]]
         self._recving_transfers = defaultdict(list)
 
@@ -70,11 +87,45 @@ class NixlConnector(KVConnectorBase_V1):
         if request.do_remote_prefill:
             return len(request.prompt_token_ids) - num_computed_tokens
 
+    def update_state_after_alloc(
+        self,
+        request: "Request",
+        num_external_tokens: int
+    ):
+        if request.do_remote_decode:
+            pass
+        if request.do_remote_prefill and num_external_tokens > 0:
+            self._req_ids_to_load.add(request.request_id)
+
+    def build_connector_meta(
+        self,
+        scheduler_output: SchedulerOutput,
+    ) -> KVConnectorMetadata:
+        """
+        Build the connector metadata for this step.
+
+        This function should NOT modify fields in the scheduler_output.
+        Also, calling this function will reset the state of the connector.
+
+        Args:
+            scheduler_output (SchedulerOutput): the scheduler output object.
+        """
+
+        meta = NixlConnectorMetadata()
+
+        for req in scheduler_output.scheduled_new_reqs:
+            if req.req_id in self._req_ids_to_load:
+                meta.add_new_req(req.req_id, req.block_ids)
+
+        return meta
+
+
     def get_finished(self) -> tuple[set[str], set[str]]:
         """Get the finished requests and the requests that are still in progress."""
         done_sending = self._get_new_notifs()
         done_recving = self._update_transfers(self._recving_transfers)
         return done_sending, done_recving
+
 
     def _get_new_notifs(self) -> set[str]:
         """
@@ -88,6 +139,7 @@ class NixlConnector(KVConnectorBase_V1):
                 assert req_id not in notified_req_ids
                 notified_req_ids.add(req_id)
         return notified_req_ids
+
 
     def _update_transfers(self, transfers: dict[str, list[str]]) -> set[str]:
         """
@@ -119,6 +171,7 @@ class NixlConnector(KVConnectorBase_V1):
             else:
                 transfers[req_id] = running_reqs
         return done_req_ids
+
 
     def read_blocks(
         self,
@@ -192,6 +245,7 @@ class NixlConnector(KVConnectorBase_V1):
         #                               cache[staging_range[0]:staging_range[1] + 1],
         #                               tp_multiplier, "read")
 
+
     def shutdown(self):
         for descs_list in self._registered_descs:
             self.nixl_wrapper.deregister_memory(descs_list)
@@ -203,6 +257,7 @@ class NixlConnector(KVConnectorBase_V1):
         for dst_xfer_side_handles in self.dst_xfer_side_handles.values():
             for dst_xfer_side_handle in dst_xfer_side_handles.values():
                 self.nixl_wrapper.delete_xfer_side(dst_xfer_side_handle)
+
 
     def register_kv_caches(self, kv_caches: list[torch.Tensor]):
         _, num_blocks, block_size, num_heads, head_dim = kv_caches[0].shape
@@ -229,6 +284,7 @@ class NixlConnector(KVConnectorBase_V1):
         self.nixl_wrapper.register_memory(descs)
         self._registered_descs.append(descs)
 
+
     def _get_ranges(self, block_ids):
         # This function should return a list of ranges of block ids that are contiguous
         # For example, if block_ids is [0, 1, 2, 4, 5, 6], the function should return [[0, 2], [4, 6]]
@@ -242,6 +298,7 @@ class NixlConnector(KVConnectorBase_V1):
             else:
                 ranges[-1][1] = block_ids[i]
         return ranges
+
 
     def _get_block_descs_ids(self,
                              engine_id,
@@ -284,3 +341,4 @@ class NixlConnector(KVConnectorBase_V1):
                         descs_ids.append(layer_id * 2 * num_blocks +
                                          is_value * num_blocks + block_id)
         return descs_ids
+
