@@ -342,6 +342,7 @@ class Scheduler(SchedulerInterface):
 
                 # TODO: how can we make this code clean?
                 if not request.do_remote_prefill:
+
                     # Number of tokens to be scheduled.
                     # We use `request.num_tokens` instead of
                     # `request.num_prompt_tokens` to consider the resumed reqs,
