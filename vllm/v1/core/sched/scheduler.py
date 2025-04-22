@@ -341,27 +341,7 @@ class Scheduler(SchedulerInterface):
                 num_computed_tokens += num_external_tokens
 
                 # TODO: how can we make this code clean?
-                if request.do_remote_prefill:
-                    # TODO: handle preempted state.
-                    assert request.status != RequestStatus.PREEMPTED
-                    assert self.connector is not None
-
-                    # Schedule 0 tokens until the recv is done.
-                    num_new_tokens = 0
-
-                    # Allocate slots for the external tokens, but skip
-                    # caching until after the KV transfer is done.
-                    new_blocks = self.kv_cache_manager.allocate_slots(
-                        request,
-                        num_external_tokens,
-                        computed_blocks,
-                        skip_cache_blocks=True)
-                    if new_blocks is None:
-                        # Request cannot be scheduled.
-                        break
-                    self.recving_KV_req_ids.add(request.request_id)
-
-                else:
+                if not request.do_remote_prefill:
                     # Number of tokens to be scheduled.
                     # We use `request.num_tokens` instead of
                     # `request.num_prompt_tokens` to consider the resumed reqs,
@@ -394,6 +374,25 @@ class Scheduler(SchedulerInterface):
                     if new_blocks is None:
                         # The request cannot be scheduled.
                         break
+                else:
+                    # TODO: handle preempted state.
+                    assert request.status != RequestStatus.PREEMPTED
+                    assert self.connector is not None
+
+                    # Schedule 0 tokens until the recv is done.
+                    num_new_tokens = 0
+
+                    # Allocate slots for the external tokens, but skip
+                    # caching until after the KV transfer is done.
+                    new_blocks = self.kv_cache_manager.allocate_slots(
+                        request,
+                        num_external_tokens,
+                        computed_blocks,
+                        skip_cache_blocks=True)
+                    if new_blocks is None:
+                        # Request cannot be scheduled.
+                        break
+                    self.recving_KV_req_ids.add(request.request_id)
 
                 # KVConnector: update internal state after allocation.
                 # This information is used to determine if a load is
