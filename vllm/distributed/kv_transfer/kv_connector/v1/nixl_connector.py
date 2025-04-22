@@ -76,12 +76,15 @@ class NixlConnector(KVConnectorBase_V1):
 
     def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole):
 
+        self.engine_id = uuid.uuid4()
+
         if role == KVConnectorRole.SCHEDULER:
-            self.connector_scheduler = NixlConnectorScheduler(vllm_config)
+            self.connector_scheduler = NixlConnectorScheduler(
+                vllm_config, self.engine_id)
             self.connector_worker = None
         elif role == KVConnectorRole.WORKER:
             self.connector_scheduler = None
-            self.connector_worker = NixlConnectorWorker()
+            self.connector_worker = NixlConnectorWorker(self.engine_id)
 
     ############################################################
     # Scheduler Side Methods
@@ -118,17 +121,6 @@ class NixlConnector(KVConnectorBase_V1):
         assert self.connector_worker is not None
         return self.connector_worker.get_finished()
 
-    # def shutdown(self):
-    #     for descs_list in self._registered_descs:
-    #         self.nixl_wrapper.deregister_memory(descs_list)
-    #     for agent_names in self._remote_agents.values():
-    #         for agent_name in agent_names:
-    #             self.nixl_wrapper.remove_remote_agent(agent_name)
-    #     for src_xfer_side_handle in self.src_xfer_side_handles.values():
-    #         self.nixl_wrapper.release_dlist_handle(src_xfer_side_handle)
-    #     for dst_xfer_side_handles in self.dst_xfer_side_handles.values():
-    #         for dst_xfer_side_handle in dst_xfer_side_handles.values():
-    #             self.nixl_wrapper.delete_xfer_side(dst_xfer_side_handle)
     def start_load_kv(self, forward_context: "ForwardContext",
                       **kwargs) -> None:
         assert self.connector_worker is not None
@@ -151,8 +143,9 @@ class NixlConnector(KVConnectorBase_V1):
 class NixlConnectorScheduler:
     """Implementation of Scheduler side methods"""
 
-    def __init__(self, vllm_config: VllmConfig):
+    def __init__(self, vllm_config: VllmConfig, engine_id: str):
         self.vllm_config = vllm_config
+        self.engine_id = engine_id
 
         # Requests that need to start recv.
         # New requests are added by update_state_after_alloc in
@@ -197,7 +190,7 @@ class NixlConnectorScheduler:
 class NixlConnectorWorker:
     """Implementation of Worker side methods"""
 
-    def __init__(self):
+    def __init__(self, engine_id: str):
         if NixlWrapper is None:
             logger.error("NIXL is not available")
             raise RuntimeError("NIXL is not available")
@@ -209,7 +202,7 @@ class NixlConnectorWorker:
         self._remote_agents: dict[str, list[str]] = {}
 
         # Metadata.
-        self.engine_id = "123"
+        self.engine_id = engine_id
         self.rank = 1
 
         # KV Caches and nixl tracking data.
@@ -240,7 +233,8 @@ class NixlConnectorWorker:
         # [req_id -> list[handle]]
         self._recving_transfers = defaultdict(list[any])
 
-    def register_kv_caches(self, kv_caches: tuple[torch.Tensor, torch.Tensor]):
+    def register_kv_caches(self, kv_caches: list[tuple[torch.Tensor,
+                                                       torch.Tensor]]):
         """Register the KV Cache data in nixl."""
         _, num_blocks, block_size, num_heads, head_dim = kv_caches[0].shape
         self.block_len = block_size * num_heads * head_dim * kv_caches[
@@ -425,9 +419,8 @@ class NixlConnectorWorker:
         _, staging_rearranging_ranges = self._get_same_length_ranges(
             local_ranges, staging_ranges)
 
-        # TODO(rob): understand tp multiplier.
-        tp_multiplier = self._tp_size[dst_engine_id] // self._tp_size[
-            self.engine_id]
+        # TODO: support TP multipliers.
+        tp_multiplier = 1
         remote_block_descs_ids = self._get_block_descs_ids(
             dst_engine_id, "all", remote_block_ids)
         local_xfer_side_handle = self.src_xfer_side_handles[tp_multiplier]
@@ -446,7 +439,7 @@ class NixlConnectorWorker:
                 dst_engine_id][i]
 
             # NOTE(rob): we use the request_id as the notify msg, so we
-            # must use the aem request_id in both the p and d workers.
+            # must use the same request_id in both the p and d workers.
             handle = self.nixl_wrapper.make_prepped_xfer(
                 "READ",
                 local_xfer_side_handle,
@@ -526,3 +519,16 @@ class NixlConnectorWorker:
                         descs_ids.append(layer_id * 2 * num_blocks +
                                          is_value * num_blocks + block_id)
         return descs_ids
+
+    def _shutdown(self):
+        """Shutdown all the NIXL related items."""
+        for descs_list in self._registered_descs:
+            self.nixl_wrapper.deregister_memory(descs_list)
+        for agent_names in self._remote_agents.values():
+            for agent_name in agent_names:
+                self.nixl_wrapper.remove_remote_agent(agent_name)
+        for src_xfer_side_handle in self.src_xfer_side_handles.values():
+            self.nixl_wrapper.release_dlist_handle(src_xfer_side_handle)
+        for dst_xfer_side_handles in self.dst_xfer_side_handles.values():
+            for dst_xfer_side_handle in dst_xfer_side_handles.values():
+                self.nixl_wrapper.delete_xfer_side(dst_xfer_side_handle)
