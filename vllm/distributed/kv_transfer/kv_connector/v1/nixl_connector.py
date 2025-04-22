@@ -274,9 +274,11 @@ class NixlConnectorWorker:
             _side_channel.bind("tcp://localhost:5555")
             _side_channel.setsockopt(zmq.LINGER, 0)  # type: ignore
             metadata = NixlAgentMetadata(
-                self.engine_id,
+                engine_id=self.engine_id,
                 agent_metadata=self.nixl_wrapper.get_agent_metadata(),
-                kv_caches_base_addr=self.v_)
+                kv_caches_base_addr=self.kv_caches_base_addr[self.engine_id],
+                num_blocks=self.num_blocks,
+            )
             encoder = msgspec.msgpack.Encoder()
             _side_channel.send(encoder.encode(metadata))
 
