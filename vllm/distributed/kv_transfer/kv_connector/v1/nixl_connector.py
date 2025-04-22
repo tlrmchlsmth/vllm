@@ -203,14 +203,13 @@ class NixlConnectorWorker:
 
         # Metadata.
         self.engine_id = engine_id
-        self.rank = 1
+        self.rank = 0
 
         # KV Caches and nixl tracking data.
         self.num_layers: int = 0
         self.num_layers: int = 0
         self.num_heads: int = 0
-        self.kv_caches: tuple[torch.Tensor,
-                              torch.Tensor] = (torch.empty(), torch.empty())
+        self.kv_caches: tuple[torch.Tensor, torch.Tensor] = None
 
         # Map of engine_id -> kv_caches_base_addr
         # For Local: base addr for *this* rank, each layer for K,V
@@ -231,22 +230,28 @@ class NixlConnectorWorker:
 
         # In progress transfers.
         # [req_id -> list[handle]]
-        self._recving_transfers = defaultdict(list[any])        
+        self._recving_transfers = defaultdict(list[any])
 
-    def register_kv_caches(self, kv_caches: list[tuple[torch.Tensor,
-                                                       torch.Tensor]]):
+    def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in nixl."""
-        _, num_blocks, block_size, num_heads, head_dim = kv_caches[0].shape
-        self.block_len = block_size * num_heads * head_dim * kv_caches[
+
+        first_layer_name = next(iter(kv_caches))
+        first_kv_cache = kv_caches[first_layer_name]
+
+        # [2 (k and v), num_blocks, ...]
+        _, num_blocks, block_size, num_heads, head_dim = first_kv_cache.shape
+        self.block_len = block_size * num_heads * head_dim * first_kv_cache[
             0].element_size()
-        logger.debug("Per layer kv cache size: %s", kv_caches[0].shape)
+        logger.debug("Per layer kv cache size: %s", first_kv_cache[0].shape)
         self.num_layers = len(kv_caches)
         self.num_blocks = num_blocks
         self.num_heads = num_heads
         self.kv_caches = kv_caches
         kv_caches_base_addr = []
         caches_data = []
-        for key_cache, value_cache in kv_caches:
+        for layer_name in kv_caches:
+            kv_cache = kv_caches[layer_name]
+            key_cache, value_cache = kv_cache[0], kv_cache[1]
             base_addr = key_cache.data_ptr()
             region_len = 2 * num_blocks * self.block_len
             caches_data.append((base_addr, region_len, self.rank, ""))
@@ -259,7 +264,6 @@ class NixlConnectorWorker:
         logger.debug("Registering descs: %s", caches_data)
         self.nixl_wrapper.register_memory(descs)
         self._registered_descs.append(descs)
-        self.nixl_wrapper.register_kv_caches(kv_caches)
 
         # THIS IS FOR DEBUG and INSECURE
         import os
@@ -272,8 +276,7 @@ class NixlConnectorWorker:
             metadata = NixlAgentMetadata(
                 self.engine_id,
                 agent_metadata=self.nixl_wrapper.get_agent_metadata(),
-                kv_caches_base_addr=self.v_
-            )
+                kv_caches_base_addr=self.v_)
             encoder = msgspec.msgpack.Encoder()
             _side_channel.send(encoder.encode(metadata))
 
