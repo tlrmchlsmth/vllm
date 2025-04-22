@@ -12,11 +12,10 @@ from vllm.logger import init_logger
 from vllm.sampling_params import KVTransferParams
 from vllm.v1.core.sched.output import SchedulerOutput
 
-
 if TYPE_CHECKING:
-    from vllm.v1.request import Request
     from vllm.attention.backends.abstract import AttentionMetadata
-    
+    from vllm.forward_context import ForwardContext
+    from vllm.v1.request import Request
 
 logger = init_logger(__name__)
 
@@ -28,7 +27,9 @@ except ImportError:
     logger.warning("NIXL is not available")
     NixlWrapper = None
 
+
 class ReqMeta:
+
     def __init__(
         self,
         block_ids: list[int],
@@ -39,10 +40,12 @@ class ReqMeta:
         self.remote_block_ids = remote_block_ids
         self.remote_engine_id = remote_engine_id
 
+
 class NixlConnectorMetadata(KVConnectorMetadata):
+
     def __init__(self):
         self.requests: dict[str, ReqMeta] = {}
-    
+
     def add_new_req(
         self,
         req_id: str,
@@ -53,8 +56,8 @@ class NixlConnectorMetadata(KVConnectorMetadata):
         self.requests[req_id] = ReqMeta(
             block_ids,
             remote_block_ids=kv_transfer_params.remote_block_ids,
-            remote_engine_id=kv_transfer_params.remote_engine_id
-        )
+            remote_engine_id=kv_transfer_params.remote_engine_id)
+
 
 class NixlConnector(KVConnectorBase_V1):
 
@@ -85,8 +88,8 @@ class NixlConnector(KVConnectorBase_V1):
         self.dst_num_blocks = {}
 
         # req_ids that need to start loading.
-        self._reqs_to_load: dict[str, "Request"] = {}
-        
+        self._reqs_to_load: dict[str, Request] = {}
+
         # [req_id -> list[handle]]
         self._recving_transfers = defaultdict(list)
 
@@ -105,11 +108,8 @@ class NixlConnector(KVConnectorBase_V1):
         if request.do_remote_prefill:
             return len(request.prompt_token_ids) - num_computed_tokens
 
-    def update_state_after_alloc(
-        self,
-        request: "Request",
-        num_external_tokens: int
-    ):
+    def update_state_after_alloc(self, request: "Request",
+                                 num_external_tokens: int):
         if request.do_remote_decode:
             pass
         if request.do_remote_prefill and num_external_tokens > 0:
@@ -160,7 +160,6 @@ class NixlConnector(KVConnectorBase_V1):
                 assert req_id not in notified_req_ids
                 notified_req_ids.add(req_id)
         return notified_req_ids
-
 
     def _update_transfers(self, transfers: dict[str, list[str]]) -> set[str]:
         """
@@ -378,16 +377,20 @@ class NixlConnector(KVConnectorBase_V1):
 
         if metadata is None:
             logger.warning(
-                "In connector.start_load_kv, but the connector metadata is None")
+                "In connector.start_load_kv, but the connector metadata is None"
+            )
             return
-        
-        for req_id in metadata.block_ids:
-            local_block_ids = metadata.block_ids[req_id]
-            # TODO: actually do staging blocks once we support different TP
-            staging_block_ids = metadata.block_ids[req_id]
-            remote_block_ids = metadata.remote_block_ids[req_id]
 
-        
+        for req_id, meta in metadata.requests.items():
+            # this is non-blocking
+            self.read_blocks(
+                local_block_ids=meta.block_ids,
+                # TODO: support staging once we do heterogenous TP
+                staging_block_ids=meta.block_ids,
+                remote_block_ids=meta.remote_block_ids,
+                dst_engine_id=meta.remote_engine_id,
+                request_id=req_id,
+            )
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         """NixlConnector does not do layerwise saving."""
