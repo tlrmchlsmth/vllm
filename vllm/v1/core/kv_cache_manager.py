@@ -166,12 +166,16 @@ class KVCacheManager:
         num_computed_tokens = len(computed_blocks) * self.block_size
         return computed_blocks, num_computed_tokens
 
+    def cache_blocks(self, request: Request):
+        pass
+    
     def allocate_slots(
         self,
         request: Request,
         num_tokens: int,
         new_computed_blocks: Optional[list[KVCacheBlock]] = None,
         num_lookahead_tokens: int = 0,
+        skip_cache_blocks: bool = False,
     ) -> Optional[list[KVCacheBlock]]:
         """Add slots for a request with new tokens to append.
 
@@ -185,6 +189,9 @@ class KVCacheManager:
             num_lookahead_tokens: The number of speculative tokens to allocate.
                 This is used by spec decode proposers with kv-cache such 
                 as eagle.
+            skip_cache_blocks: Whether to skip cachings the blocks. This is
+                used by P/D when allocating blocks that used in KV transfer
+                which will complete in a future step.
 
         Blocks layout:
         -----------------------------------------------------------------------
@@ -275,7 +282,7 @@ class KVCacheManager:
             new_blocks = self.block_pool.get_new_blocks(num_new_blocks)
             req_blocks.extend(new_blocks)
 
-        if not self.enable_caching:
+        if not self.enable_caching or skip_cache_blocks:
             return new_blocks
 
         # Use `new_computed_blocks` for a new request, and `num_cached_block`
