@@ -205,6 +205,11 @@ class NixlConnector(KVConnectorBase_V1):
         # after we detect the txn is complete (which means we cannot make the
         # read trxn async easily). If we want to make "READ" happen cleanly, then
         # we will need to have the staging blocks on the remote side.
+
+        # NOTE(rob): according to nvidia the staging blocks are used to
+        # saturate IB with heterogenous TP sizes. We should remove the staging
+        # blocks until we are ready.
+
         # NOTE(rob): we could potentially do the rearranging during the load_kv!
 
         assert len(local_block_ids) == len(staging_block_ids) == len(
@@ -382,7 +387,7 @@ class NixlConnector(KVConnectorBase_V1):
             return
 
         for req_id, meta in metadata.requests.items():
-            # this is non-blocking
+            # NOTE: this is non-blocking
             self.read_blocks(
                 local_block_ids=meta.block_ids,
                 # TODO: support staging once we do heterogenous TP
