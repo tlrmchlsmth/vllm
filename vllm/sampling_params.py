@@ -33,8 +33,8 @@ class KVTransferParams(
         # required for @cached_property.
         dict=True):
     # TODO(rob): we can handle xPyD and direct KV block Xfer
-    # remote_instance_id: Optional[str] = None
-    # remote_block_ids: Optional[list[int]] = None
+    remote_engine_id: Optional[str] = None
+    remote_block_ids: Optional[list[int]] = None
     do_remote_decode: bool = False
     do_remote_prefill: bool = False
 

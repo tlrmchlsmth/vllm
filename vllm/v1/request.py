@@ -68,6 +68,7 @@ class Request:
         self.do_remote_prefill = (
             False if sampling_params.kv_transfer_params is None else
             sampling_params.kv_transfer_params.do_remote_prefill)
+        self.kv_transfer_params = sampling_params.kv_transfer_params
 
         # Sanity check
         assert len(self.mm_inputs) == len(self.mm_positions)
