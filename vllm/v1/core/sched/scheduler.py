@@ -745,14 +745,20 @@ class Scheduler(SchedulerInterface):
                 # NOTE(rob): req is not freed (or preempted) in the EngineCore
                 # until the xfer is done to ensure we do not free the KV blocks.
                 kv_transfer_params = None
+                # TODO(rob): edge case where we get a stop for stop_strings
+                # inside AsyncLLM.
                 if request.do_remote_decode and not stopped:
-                    stopped = True
                     request.status = RequestStatus.FINISHED_REMOTE_DECODE
                     self.sending_KV_req_ids.add(req_id)
                     # TODO(rob): do this on a per-Connector basis.
                     # From POV of DWorker, this is a remote prefill.
                     kv_transfer_params = KVTransferParams(
-                        do_remote_prefill=True)
+                        do_remote_prefill=True,
+                        # put the remote block ids here
+                        remote_block_ids=[1,2,3],
+                        # put the enigne id here
+                        remote_engine_id="abcdefg",
+                    )
 
                 # Add EngineCoreOutput for this Request.
                 outputs.append(
@@ -781,7 +787,6 @@ class Scheduler(SchedulerInterface):
             # Cache blocks for APC after KVs have been recv'ed.
             self.kv_cache_manager.cache_blocks(req_id)
             self.recving_KV_req_ids.remove(req_id)
-            self.scheduled_req_ids.remove(req_id)
         for req_id in list(model_runner_output.finished_sending):
             self._free_request(self.requests[req_id])
 
