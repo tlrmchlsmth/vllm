@@ -3204,7 +3204,7 @@ class KVTransferConfig(BaseModel):
     kv_buffer_size: float = 1e9
 
     # Whether this vLLM instance produces, consumes KV cache, or both. Choices
-    # are 'kv_producer', 'kv_consumer', and 'both'.
+    # are 'kv_producer', 'kv_consumer', and 'kv_both'.
     kv_role: Optional[str] = None
 
     # The rank of this vLLM instance in the KV cache transfer. Typical value:

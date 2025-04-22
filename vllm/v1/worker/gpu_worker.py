@@ -14,7 +14,9 @@ from vllm.device_allocator.cumem import CuMemAllocator
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment,
                               set_custom_all_reduce)
-from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized
+from vllm.distributed.kv_transfer import (ensure_kv_transfer_initialized,
+                                          has_kv_transfer_group,
+                                          get_kv_transfer_group)
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -199,6 +201,7 @@ class Worker(WorkerBase):
             context = nullcontext()
         with context:
             self.model_runner.initialize_kv_cache(kv_cache_config)
+
 
     def compile_or_warm_up_model(self) -> None:
         # warm up sizes that are not in cudagraph capture sizes,

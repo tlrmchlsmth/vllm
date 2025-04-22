@@ -61,6 +61,13 @@ class KVConnectorBase_V1(ABC):
         self._connector_metadata = KVConnectorMetadata()
         self._vllm_config = vllm_config
         self._role = role
+    
+    def init_with_kv_caches(self, kv_caches: tuple[torch.Tensor, torch.Tensor]):
+        """
+        Initialize with the KV caches. Useful for pre-registering the
+        KV Caches in the KVConnector (e.g. for NIXL).
+        """
+        pass
 
     @property
     def role(self) -> KVConnectorRole:

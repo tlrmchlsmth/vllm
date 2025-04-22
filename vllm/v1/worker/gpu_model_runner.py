@@ -1730,6 +1730,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.vllm_config.compilation_config.static_forward_context,
             self.kv_caches)
 
+        if has_kv_transfer_group():
+            get_kv_transfer_group().register_kv_caches(kv_caches)
+
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         """
         Generates the KVCacheSpec by parsing the kv cache format from each
