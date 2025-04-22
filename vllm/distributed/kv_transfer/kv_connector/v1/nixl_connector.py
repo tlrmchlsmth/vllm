@@ -1,0 +1,286 @@
+# SPDX-License-Identifier: Apache-2.0
+import uuid
+from collections import defaultdict
+from typing import TYPE_CHECKING
+
+import torch
+
+from vllm.config import VllmConfig
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorBase_V1)
+from vllm.logger import init_logger
+
+if TYPE_CHECKING:
+    from vllm.v1.request import Request
+
+logger = init_logger(__name__)
+
+# Lazy import nixl_wrapper to avoid loading nixl_bindings if nixl is not used
+try:
+    from nixl._api import nixl_agent as NixlWrapper
+    logger.info("NIXL is available")
+except ImportError:
+    logger.warning("NIXL is not available")
+    NixlWrapper = None
+
+
+class NixlConnector(KVConnectorBase_V1):
+
+    def __init__(self, vllm_config: VllmConfig, engine_id: str, rank: int):
+        self.vllm_config = vllm_config
+        if NixlWrapper is None:
+            logger.error("NIXL is not available")
+            raise RuntimeError("NIXL is not available")
+        logger.info("Initializing NIXL wrapper")
+        self.nixl_wrapper = NixlWrapper(str(uuid.uuid4()), None)
+
+        self.use_prepped_xfer = vllm_config.kv_transfer_config.use_prepped_xfer
+
+        self.num_layers = None
+        self.num_blocks = None
+        self.num_heads = None
+        self.block_len = None
+        self.kv_caches = None
+        self.kv_caches_base_addr = {}
+        self.kv_cache_shape = {}
+
+        self._registered_descs = []
+        self._remote_agents = {}
+        self.engine_id = engine_id
+        self.rank = rank
+        self.src_xfer_side_handles = {}
+        self.dst_xfer_side_handles = defaultdict(dict)
+        self.dst_num_blocks = {}
+
+        # [req_id -> list[handle]]
+        self._recving_transfers = defaultdict(list)
+
+    def get_agent_metadata(self):
+        return self.nixl_wrapper.get_agent_metadata()
+
+    def get_num_new_matched_tokens(
+        self,
+        request: "Request",
+        num_computed_tokens: int,
+    ) -> int:
+        """
+        For remote prefill, we allocate for all tokens.
+        """
+        # Allocate space for external tokens.
+        if request.do_remote_prefill:
+            return len(request.prompt_token_ids) - num_computed_tokens
+
+    def get_finished(self) -> tuple[set[str], set[str]]:
+        """Get the finished requests and the requests that are still in progress."""
+        done_sending = self._get_new_notifs()
+        done_recving = self._update_transfers(self._recving_transfers)
+        return done_sending, done_recving
+
+    def _get_new_notifs(self) -> set[str]:
+        """
+        Get set of req_id that got a new notification.
+        """
+        notified_req_ids: set[str] = set()
+        # TODO: handle the TP case (N notifies for TP=N).
+        # vllm/worker/worker_base.py L476 in DynamoPR.
+        for req_ids in self.nixl_wrapper.get_new_notifs().values():
+            for req_id in req_ids:
+                assert req_id not in notified_req_ids
+                notified_req_ids.add(req_id)
+        return notified_req_ids
+
+    def _update_transfers(self, transfers: dict[str, list[str]]) -> set[str]:
+        """
+        Update the list of transfers that are running by checking
+        the nixl_xfer_state and removing those in "DONE" state.
+
+        Args:
+            transfers: dictionary of req_id -> list[running_xfer]
+
+        Returns:
+            set of req_ids that have all done xfers
+        """
+        done_req_ids: str[str] = set()
+        for req_id, handles in transfers.items():
+            running_reqs = []
+            for handle in handles:
+                xfer_state = self.nixl_wrapper.check_xfer_state(handle)
+                if xfer_state == "DONE":
+                    # TODO ptarasiewicz: why abort is throwing errors?
+                    # self.nixl_wrapper.release_xfer_handle(handle)
+                    continue
+                if xfer_state == "PROC":
+                    running_reqs.append(handle)
+                else:
+                    raise RuntimeError("Transfer failed with state %s",
+                                       xfer_state)
+            if len(running_reqs) == 0:
+                done_req_ids.add(req_id)
+            else:
+                transfers[req_id] = running_reqs
+        return done_req_ids
+
+    def read_blocks(
+        self,
+        local_block_ids: list[int],
+        staging_block_ids: list[int],
+        remote_block_ids: list[int],
+        dst_engine_id: str,
+        request_id: str,
+    ):
+        # NOTE(rob): having the staging blocks be on the READER side is
+        # not going to work well (since we will have to call rearrange tensors).
+        # after we detect the txn is complete (which means we cannot make the
+        # read trxn async easily). If we want to make "READ" happen cleanly, then
+        # we will need to have the staging blocks on the remote side.
+        # NOTE(rob): we could potentially do the rearranging during the load_kv!
+
+        assert len(local_block_ids) == len(staging_block_ids) == len(
+            remote_block_ids)
+        if len(local_block_ids) == 0:
+            return
+
+        # TODO(rob): understand ranges code.
+        local_ranges = self._get_ranges(local_block_ids)
+        staging_ranges = self._get_ranges(staging_block_ids)
+        local_rearranging_ranges, staging_rearranging_ranges = self._get_same_length_ranges(
+            local_ranges, staging_ranges)
+
+        # TODO(rob): understand tp multiplier.
+        tp_multiplier = self._tp_size[dst_engine_id] // self._tp_size[
+            self.engine_id]
+        remote_block_descs_ids = self._get_block_descs_ids(
+            dst_engine_id, "all", remote_block_ids)
+        local_xfer_side_handle = self.src_xfer_side_handles[tp_multiplier]
+
+        # Read the data from the remote.
+        for i in range(tp_multiplier):
+            staging_block_descs_ids = self._get_block_descs_ids(
+                self.engine_id,
+                "all",
+                staging_block_ids,
+                i=i,
+                tp_multiplier=tp_multiplier,
+                staging_ranges=staging_rearranging_ranges)
+            assert len(staging_block_descs_ids) == len(remote_block_descs_ids)
+            remote_xfer_side_handle = self.dst_xfer_side_handles[
+                dst_engine_id][i]
+
+            # NOTE(rob): we use the request_id as the notify msg, so we
+            # must use the aem request_id in both the p and d workers.
+            handle = self.nixl_wrapper.make_prepped_xfer(
+                "READ",
+                local_xfer_side_handle,
+                staging_block_descs_ids,
+                remote_xfer_side_handle,
+                remote_block_descs_ids,
+                notif_msg=request_id,
+            )
+            # NOTE(rob): we will check this is done in the next forward pass.
+            self._recving_transfers[request_id].append(handle)
+
+        # NOTE(rob): this is actually pretty serious problem.
+        # We need to figure out if we can put the staging blocks on the P worker side.
+        # The staging blocks need to be on the side that sends.
+
+        # for local_range, staging_range in zip(local_rearranging_ranges, staging_rearranging_ranges):
+        #     logger.debug("Rearranging tensors for cache: %s, local_range: %s, staging_range: %s",
+        #                  self.kv_caches[0].shape, local_range, staging_range)
+        #     for kv_cache in self.kv_caches:
+        #         for cache in kv_cache:
+        #             rearrange_tensors(cache[local_range[0]:local_range[1] + 1],
+        #                               cache[staging_range[0]:staging_range[1] + 1],
+        #                               tp_multiplier, "read")
+
+    def shutdown(self):
+        for descs_list in self._registered_descs:
+            self.nixl_wrapper.deregister_memory(descs_list)
+        for agent_names in self._remote_agents.values():
+            for agent_name in agent_names:
+                self.nixl_wrapper.remove_remote_agent(agent_name)
+        for src_xfer_side_handle in self.src_xfer_side_handles.values():
+            self.nixl_wrapper.release_dlist_handle(src_xfer_side_handle)
+        for dst_xfer_side_handles in self.dst_xfer_side_handles.values():
+            for dst_xfer_side_handle in dst_xfer_side_handles.values():
+                self.nixl_wrapper.delete_xfer_side(dst_xfer_side_handle)
+
+    def register_kv_caches(self, kv_caches: list[torch.Tensor]):
+        _, num_blocks, block_size, num_heads, head_dim = kv_caches[0].shape
+        self.block_len = block_size * num_heads * head_dim * kv_caches[
+            0].element_size()
+        logger.debug("Per layer kv cache size: %s", kv_caches[0].shape)
+        self.num_layers = len(kv_caches)
+        self.num_blocks = num_blocks
+        self.num_heads = num_heads
+        self.kv_caches = kv_caches
+        kv_caches_base_addr = []
+        caches_data = []
+        for key_cache, value_cache in kv_caches:
+            base_addr = key_cache.data_ptr()
+            region_len = 2 * num_blocks * self.block_len
+            caches_data.append((base_addr, region_len, self.rank, ""))
+            kv_caches_base_addr.append(
+                (key_cache.data_ptr(), value_cache.data_ptr()))
+
+        self.kv_caches_base_addr[self.engine_id] = kv_caches_base_addr
+
+        descs = self.nixl_wrapper.get_reg_descs(caches_data, "VRAM")
+        logger.debug("Registering descs: %s", caches_data)
+        self.nixl_wrapper.register_memory(descs)
+        self._registered_descs.append(descs)
+
+    def _get_ranges(self, block_ids):
+        # This function should return a list of ranges of block ids that are contiguous
+        # For example, if block_ids is [0, 1, 2, 4, 5, 6], the function should return [[0, 2], [4, 6]]
+        # The ranges are sorted by the starting block id
+        # The function should also make sure that the block ids are contiguous
+        # If the block ids are not contiguous, the function should raise an error
+        ranges = []
+        for i in range(len(block_ids)):
+            if i == 0 or block_ids[i] != block_ids[i - 1] + 1:
+                ranges.append([block_ids[i], block_ids[i]])
+            else:
+                ranges[-1][1] = block_ids[i]
+        return ranges
+
+    def _get_block_descs_ids(self,
+                             engine_id,
+                             layer_ids,
+                             block_ids,
+                             i=None,
+                             tp_multiplier=1,
+                             staging_ranges=None):
+
+        if layer_ids == "all":
+            layer_ids = list(range(self.num_layers))
+        if block_ids == "all":
+            block_ids = list(range(self.num_blocks))
+
+        descs_ids = []
+
+        if i is not None:
+            num_blocks = self.num_blocks
+            for layer_id in layer_ids:
+                for is_value in [0, 1]:
+                    staging_range_idx = 0
+                    for block_id in block_ids:
+                        if block_id > staging_ranges[staging_range_idx][
+                                1] or block_id < staging_ranges[
+                                    staging_range_idx][0]:
+                            staging_range_idx += 1
+                        start_offset = staging_ranges[staging_range_idx][0]
+                        i_offset = i * (staging_ranges[staging_range_idx][-1] -
+                                        start_offset + 1)
+                        descs_ids.append(
+                            layer_id * 2 * num_blocks * tp_multiplier +
+                            is_value * num_blocks * tp_multiplier +
+                            start_offset * tp_multiplier + i_offset +
+                            (block_id - start_offset))
+        else:
+            num_blocks = self.dst_num_blocks[engine_id]
+            for layer_id in layer_ids:
+                for is_value in [0, 1]:
+                    for block_id in block_ids:
+                        descs_ids.append(layer_id * 2 * num_blocks +
+                                         is_value * num_blocks + block_id)
+        return descs_ids
