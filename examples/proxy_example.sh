@@ -17,8 +17,13 @@ fi
 
 
 if [[ $1 == "prefill" ]]; then
-    # Prefiller listens on port 8100
-    prefill_config_file=$SCRIPT_DIR/configs/lmcache-prefiller-config.yaml
+
+    UCX_TLS=cuda_ipc,cuda_copy,tcp \
+        VLLM_WORKER_MULTIPROC_METHOD=spawn \
+        vllm serve Qwen/Qwen2.5-1.5B-Instruct \
+        --port 8100 \
+        --enforce-eager \
+        --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
 
     UCX_TLS=cuda_ipc,cuda_copy,tcp \
         LMCACHE_CONFIG_FILE=$prefill_config_file \
@@ -30,7 +35,6 @@ if [[ $1 == "prefill" ]]; then
         --enforce-eager \
         --kv-transfer-config \
         '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_producer","kv_connector_extra_config": {"discard_partial_chunks": false, "lmcache_rpc_port": "producer1"}}'
-
     # Potential Env vars and cmdline options
     # LMCACHE_LOG_LEVEL=DEBUG -- Set log level to DEBUG
     # --enforce-eager -- Enforce eager mode
