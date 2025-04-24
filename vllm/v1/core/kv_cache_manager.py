@@ -283,13 +283,22 @@ class KVCacheManager:
             new_blocks = self.block_pool.get_new_blocks(num_new_blocks)
             req_blocks.extend(new_blocks)
 
-        if not self.enable_caching or skip_cache_blocks:
+        if not self.enable_caching:
             return new_blocks
 
         # Use `new_computed_blocks` for a new request, and `num_cached_block`
         # for a running request.
         num_cached_blocks = self.num_cached_block.get(request.request_id,
                                                       len(new_computed_blocks))
+        
+        # Skip performing the actual caching 
+        # This is useful for P/D such that we do not prematurely cache
+        # blocks which are being filled over multiple steps.
+        if skip_cache_blocks:
+            self.num_cached_block[
+            request.request_id] = num_cached_blocks
+            return new_blocks
+
         # Speculated tokens might be rejected in the future, so we does
         # not cache any speculated tokens. We only cache blocks with
         # generated (accepted) tokens.
