@@ -147,10 +147,15 @@ def test_remote_prefill_lifecycle():
     assert len(scheduler.running) == 1
     assert len(scheduler.recving_KV_req_ids) == 1
     assert len(scheduler_output.scheduled_new_reqs) == 1
+
     scheduled_req = scheduler_output.scheduled_new_reqs[0]
-    # We compute
     assert scheduled_req.num_computed_tokens == NUM_TOKENS - 1
     assert scheduler_output.num_scheduled_tokens[scheduled_req.req_id] == 0
+
+    # We should not cache blocks until the kvs are recved.
+    cache = scheduler.kv_cache_manager.block_pool.cached_block_hash_to_block
+    assert len(cache) == 0
+    assert request_id not in scheduler.kv_cache_manager.num_cached_block
 
     engine_core_outputs = scheduler.update_from_output(
         scheduler_output, EMPTY_MODEL_RUNNER_OUTPUT)
