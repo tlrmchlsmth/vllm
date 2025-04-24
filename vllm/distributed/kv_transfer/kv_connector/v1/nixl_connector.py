@@ -203,7 +203,8 @@ class NixlConnectorWorker:
         logger.info("Initializing NIXL wrapper")
 
         # Agent.
-        self.nixl_wrapper = NixlWrapper(str(uuid.uuid4()), None)
+        # self.nixl_wrapper = NixlWrapper(str(uuid.uuid4()), None)
+        self.nixl_wrapper = None
         # Map of engine_id -> list[agent_names] (1 per rank).
         self._remote_agents: dict[str, list[str]] = {}
 

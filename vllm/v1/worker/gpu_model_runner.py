@@ -38,8 +38,8 @@ from vllm.v1.kv_cache_interface import (AttentionSpec, FullAttentionSpec,
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
                              ModelRunnerOutput)
 from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.sample.rejection_sampler import RejectionSampler
-from vllm.v1.spec_decode.eagle import EagleProposer
+# from vllm.v1.sample.rejection_sampler import RejectionSampler
+# from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.spec_decode.utils import is_spec_decode_supported
@@ -199,8 +199,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.vllm_config.compilation_config.cudagraph_capture_sizes))
 
         # Cache the device properties.
-        self.device_properties = torch.cuda.get_device_properties(self.device)
-        self.num_sms = self.device_properties.multi_processor_count
+        # self.device_properties = torch.cuda.get_device_properties(self.device)
+        # self.num_sms = self.device_properties.multi_processor_count
+        self.num_sms = 0
 
         # Persistent buffers for CUDA graphs.
         self.input_ids = torch.zeros(self.max_num_tokens,

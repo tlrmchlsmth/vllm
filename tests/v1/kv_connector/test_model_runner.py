@@ -9,7 +9,7 @@ def test_basic_remote_prefill():
     vllm_config = create_vllm_config()
     scheduler = create_scheduler(vllm_config)
     model_runner = create_model_runner(vllm_config=vllm_config,
-                                       device=torch.device(type="cuda"))
+                                       device=torch.device(type="cpu"))
 
     NUM_TOKENS = 16
 

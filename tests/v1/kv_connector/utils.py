@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 import torch
 
-from vllm.config import (CacheConfig, KVTransferConfig, ModelConfig,
-                         SchedulerConfig, VllmConfig)
+from vllm.config import (CacheConfig, DeviceConfig, KVTransferConfig,
+                         ModelConfig, SchedulerConfig, VllmConfig)
 from vllm.sampling_params import KVTransferParams, SamplingParams
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
@@ -18,7 +18,7 @@ def create_vllm_config(
     model: str = "facebook/opt-125m",
     max_num_seqs: int = 16,
     max_num_batched_tokens: int = 64,
-    block_size: int = 8,
+    block_size: int = 16,
 ) -> VllmConfig:
     scheduler_config = SchedulerConfig(
         max_num_seqs=max_num_seqs,
@@ -51,6 +51,7 @@ def create_vllm_config(
         model_config=model_config,
         cache_config=cache_config,
         kv_transfer_config=kv_transfer_config,
+        device_config=DeviceConfig("cpu")
     )
 
 

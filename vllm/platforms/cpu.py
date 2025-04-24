@@ -43,7 +43,8 @@ class CpuPlatform(Platform):
             logger.info("Using CPU MLA backend.")
             return "vllm.attention.backends.cpu_mla.CPUMLABackend"
         logger.info("Using Torch SDPA backend.")
-        return "vllm.attention.backends.torch_sdpa.TorchSDPABackend"
+        return "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"
+        # return "vllm.attention.backends.torch_sdpa.TorchSDPABackend"
 
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
