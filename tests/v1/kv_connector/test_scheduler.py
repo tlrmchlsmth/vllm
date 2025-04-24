@@ -193,6 +193,7 @@ def test_basic_remote_prefill():
     # Remote Prefill: the request should now have scheduled tokens.
     scheduler_output = scheduler.schedule()
     assert (len(scheduler_output.scheduled_cached_reqs)) == 1
+    print(f"{scheduler_output=}")
 
     # req_to_index = {
     #     request.request_id: i
