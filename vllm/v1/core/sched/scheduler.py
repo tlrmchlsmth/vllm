@@ -395,6 +395,10 @@ class Scheduler(SchedulerInterface):
                         break
                     self.recving_KV_req_ids.add(request.request_id)
 
+                    # TODO: clean up code
+                    encoder_inputs_to_schedule = None
+                    new_encoder_budget = encoder_budget
+
                 # KVConnector: update internal state after allocation.
                 # This information is used to determine if a load is
                 # needed for this request.
@@ -785,12 +789,14 @@ class Scheduler(SchedulerInterface):
                 new_running.append(request)
 
         # P/D: update recv and send status from last step.
-        for req_id in list(model_runner_output.finished_recving):
+        for req_id in (model_runner_output.finished_recving or []):
             # TODO(rob): Implement this method.
             # Cache blocks for APC after KVs have been recv'ed.
-            self.kv_cache_manager.cache_blocks(req_id)
+            # self.kv_cache_manager.cache_blocks(req_id)
+            self.scheduled_req_ids.remove(req_id)
             self.recving_KV_req_ids.remove(req_id)
-        for req_id in list(model_runner_output.finished_sending):
+            print(f"{self.requests[req_id].num_computed_tokens=}")
+        for req_id in (model_runner_output.finished_sending or []):
             self._free_request(self.requests[req_id])
 
         self.running = new_running

@@ -47,11 +47,11 @@ class ReqMeta:
 
     def __init__(
         self,
-        block_ids: list[int],
+        local_block_ids: list[int],
         remote_block_ids: list[int],
         remote_engine_id: list[int],
     ):
-        self.block_ids = block_ids
+        self.local_block_ids = local_block_ids
         self.remote_block_ids = remote_block_ids
         self.remote_engine_id = remote_engine_id
 
@@ -63,13 +63,13 @@ class NixlConnectorMetadata(KVConnectorMetadata):
 
     def add_new_req(
         self,
-        req_id: str,
-        block_ids: list[int],
+        request_id: str,
+        local_block_ids: list[int],
         kv_transfer_params: KVTransferParams,
     ):
-        assert req_id not in self.requests
-        self.requests[req_id] = ReqMeta(
-            block_ids,
+        assert request_id not in self.requests
+        self.requests[request_id] = ReqMeta(
+            local_block_ids=local_block_ids,
             remote_block_ids=kv_transfer_params.remote_block_ids,
             remote_engine_id=kv_transfer_params.remote_engine_id)
 
@@ -157,7 +157,10 @@ class NixlConnectorScheduler:
                                    num_computed_tokens: int) -> int:
         """For remote prefill, allocate for all tokens."""
         if request.do_remote_prefill:
-            return len(request.prompt_token_ids) - num_computed_tokens
+            # Subtract 1 since we do not compute the last prompt
+            # token so that we can sample the first token here.
+            num_external_tokens = len(request.prompt_token_ids) - 1
+            return num_external_tokens - num_computed_tokens
 
     def update_state_after_alloc(self, request: "Request",
                                  num_external_tokens: int):
@@ -331,7 +334,9 @@ class NixlConnectorWorker:
             for layer_id in range(self.num_layers):
                 # Both K and V.
                 print(f"{len(self.kv_caches_base_addr[self.engine_id])=}")
-                print(f"{len(self.kv_caches_base_addr[self.engine_id][layer_id])=}")
+                print(
+                    f"{len(self.kv_caches_base_addr[self.engine_id][layer_id])=}"
+                )
                 print(f"{self.kv_caches_base_addr[self.engine_id][layer_id]=}")
                 for base_addr in self.kv_caches_base_addr[
                         self.engine_id][layer_id]:
@@ -360,16 +365,16 @@ class NixlConnectorWorker:
                     block_offset = block_id * dst_block_len
                     blocks_data.append(
                         (base_addr + block_offset, dst_block_len,
-                            self.rank * tp_multiplier))
+                         self.rank * tp_multiplier))
         logger.debug("Created %s blocks for dst engine %s and rank %s",
-                        len(blocks_data), engine_id,
-                        self.rank * tp_multiplier + i)
+                     len(blocks_data), engine_id,
+                     self.rank * tp_multiplier + i)
         # Register with NIXL.
         descs = self.nixl_wrapper.get_xfer_descs(blocks_data, "VRAM")
         self.dst_xfer_side_handles[engine_id][i] = (
             self.nixl_wrapper.prep_xfer_dlist(
-                self._remote_agents[engine_id][self.rank * tp_multiplier +
-                                                i], descs))
+                self._remote_agents[engine_id][self.rank * tp_multiplier + i],
+                descs))
 
     def get_finished(self) -> tuple[set[str], set[str]]:
         """Get requests that are done sending or recving."""
@@ -377,16 +382,15 @@ class NixlConnectorWorker:
         done_recving = self._pop_done_transfers(self._recving_transfers)
         return done_sending, done_recving
 
-    def _get_new_notifs(self) -> set[str]:
+    def _get_new_notifs(self) -> list[str]:
         """Get req_ids which got a remote xfer message."""
 
-        notified_req_ids: set[str] = set()
+        notified_req_ids: list[str] = []
         # TODO: handle the TP case (N notifies for TP=N).
         # See: vllm/worker/worker_base.py L476 in DynamoPR.
         for req_ids in self.nixl_wrapper.get_new_notifs().values():
             for req_id in req_ids:
-                assert req_id not in notified_req_ids
-                notified_req_ids.add(req_id)
+                notified_req_ids.append(req_id)
         return notified_req_ids
 
     def _pop_done_transfers(self, transfers: dict[str, list[str]]) -> set[str]:
@@ -397,7 +401,7 @@ class NixlConnectorWorker:
         Returns:
             set of req_ids that have all done xfers
         """
-        done_req_ids: str[str] = set()
+        done_req_ids: list[str] = []
         for req_id, handles in transfers.items():
             running_reqs = []
             for handle in handles:
@@ -412,7 +416,7 @@ class NixlConnectorWorker:
                     raise RuntimeError("Transfer failed with state %s",
                                        xfer_state)
             if len(running_reqs) == 0:
-                done_req_ids.add(req_id)
+                done_req_ids.append(req_id)
             else:
                 transfers[req_id] = running_reqs
         return done_req_ids
