@@ -5,12 +5,11 @@ from unittest.mock import Mock
 import pytest
 
 from vllm.multimodal.inputs import PlaceholderRange
+from vllm.tests.v1.utils import EOS_TOKEN_ID, create_requests, create_scheduler
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import RequestStatus
-
-from ..utils import EOS_TOKEN_ID, create_requests, create_scheduler
 
 
 def test_add_requests():
