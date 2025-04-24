@@ -161,6 +161,8 @@ class NixlConnectorScheduler:
             # token so that we can sample the first token here.
             num_external_tokens = len(request.prompt_token_ids) - 1
             return num_external_tokens - num_computed_tokens
+        else:
+            return 0
 
     def update_state_after_alloc(self, request: "Request",
                                  num_external_tokens: int):

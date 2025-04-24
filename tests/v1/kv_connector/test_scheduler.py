@@ -2,7 +2,7 @@ import copy
 
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
 
-from .utils import create_requests, create_scheduler, create_vllm_config
+from .utils import create_request, create_scheduler, create_vllm_config
 
 # SPDX-License-Identifier: Apache-2.0
 
@@ -14,9 +14,9 @@ def test_basic_remote_prefill():
     START_FREE_BLOCK_QUEUE_SIZE = (
         scheduler.kv_cache_manager.block_pool.free_block_queue.num_free_blocks)
     NUM_TOKENS = 16
-    request = create_requests(num_requests=1,
-                              num_tokens=NUM_TOKENS,
-                              do_remote_prefill=True)[0]
+    request = create_request(request_id=1,
+                             num_tokens=NUM_TOKENS,
+                             do_remote_prefill=True)
 
     scheduler.add_request(request)
     request_id = request.request_id
