@@ -294,15 +294,24 @@ class Scheduler(SchedulerInterface):
 
                 request = self.waiting[0]
 
+                # Skip request if the remote KV recv is still waiting
+                # for the requests to arrive.
                 if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
-                    if request.request_id in self.finished_recving_req_ids:
-                        # We delayed caching the blocks until after they
-                        # are recved to avoid cache hits from other reqs
-                        # before the KVs are written.
-                        self.kv_cache_manager.cache_blocks(request)
-                        # TODO: how can we do a better job with this?
-                        request.num_computed_tokens = len(request.all_token_ids) - 1
+                    if request.request_id in self.finished_recving_KV_req_ids:
+                        assert self.kv_cache_manager.enable_caching
+                        # Now that the KVs have been recved, we can cache
+                        # them and set num_computed_tokens.
+                        self.kv_cache_manager.cache_blocks(
+                            request,
+                            num_tokens=0,
+                            num_computed_tokens=(len(request.all_token_ids) - 1)
+                        )
                         request.status = RequestStatus.WAITING
+                        self.kv_cache_manager.free(request)
+                    else:
+                        self.waiting.popleft()
+                        skipped_waiting_requests.appendleft(request)
+                        continue
 
                 # Skip request if the structured output request is still waiting
                 # for FSM compilation.
@@ -335,15 +344,12 @@ class Scheduler(SchedulerInterface):
                     0 if self.connector is None else
                     self.connector.get_num_new_matched_tokens(
                         request, num_computed_tokens))
+                print(f"{num_external_tokens=}")
 
                 # Total computed tokens (local + external).
                 num_computed_tokens += num_external_tokens
 
-                if (request.do_remote_prefill and
-                    num_external_tokens > 0):
-                    # Schedule 0 tokens until the recv is done.
-                    num_new_tokens = 0
-
+                if (request.do_remote_prefill and num_external_tokens > 0):
                     # Allocate slots for the external tokens, but skip
                     # caching until after the KV transfer is done.
                     new_blocks = self.kv_cache_manager.allocate_slots(
@@ -352,8 +358,9 @@ class Scheduler(SchedulerInterface):
                         computed_blocks,
                         skip_cache_blocks=True)
                     if new_blocks is None:
-                        # Blocked cannot be allocated.
+                        # Requests cannot be scheduled
                         break
+
                     self.waiting.popleft()
                     skipped_waiting_requests.appendleft(request)
                     request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
@@ -842,9 +849,7 @@ class Scheduler(SchedulerInterface):
         self.finished_req_ids.add(request.request_id)
 
         if not skip_free_blocks:
-            self.kv_cache_manager.free(request)
-            self.kv_cache_manager.free_block_hashes(request)
-            del self.requests[request.request_id]
+            self._free_blocks(request)
     
     def _free_blocks(self, request: Request):
         assert request.is_finished()

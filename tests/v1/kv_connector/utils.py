@@ -40,7 +40,7 @@ def create_vllm_config(
         gpu_memory_utilization=0.9,
         swap_space=0,
         cache_dtype="auto",
-        enable_prefix_caching=False,
+        enable_prefix_caching=True,
     )
     kv_transfer_config = KVTransferConfig(
         kv_connector="NixlConnector",

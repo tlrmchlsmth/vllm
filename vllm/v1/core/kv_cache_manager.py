@@ -166,10 +166,6 @@ class KVCacheManager:
         num_computed_tokens = len(computed_blocks) * self.block_size
         return computed_blocks, num_computed_tokens
 
-    def cache_blocks(self, request: Request):
-        # TODO: implement this.
-        pass
-
     def allocate_slots(
         self,
         request: Request,
@@ -283,28 +279,47 @@ class KVCacheManager:
             new_blocks = self.block_pool.get_new_blocks(num_new_blocks)
             req_blocks.extend(new_blocks)
 
-        if not self.enable_caching:
+        if not self.enable_caching or skip_cache_blocks:
+            # If self.enable_caching, this is true since can only
+            # get to this codepath when we have never been scheduled.
+            assert request.request_id not in self.num_cached_block
             return new_blocks
+
+        self.cache_blocks(
+            request=request,
+            num_tokens=num_tokens,
+            num_computed_tokens=num_computed_tokens,
+            new_computed_blocks=new_computed_blocks,
+        )
+        return new_blocks
+
+    def cache_blocks(
+        self,
+        request: Request,
+        num_tokens: int,
+        num_computed_tokens: int,
+        new_computed_blocks: Optional[list[KVCacheBlock]] = None,
+    ):
+        if new_computed_blocks is None:
+            new_computed_blocks = []    
+
+        req_blocks = self.req_to_blocks[request.request_id]
 
         # Use `new_computed_blocks` for a new request, and `num_cached_block`
         # for a running request.
         num_cached_blocks = self.num_cached_block.get(request.request_id,
                                                       len(new_computed_blocks))
-        
-        # Skip performing the actual caching 
-        # This is useful for P/D such that we do not prematurely cache
-        # blocks which are being filled over multiple steps.
-        if skip_cache_blocks:
-            self.num_cached_block[
-            request.request_id] = num_cached_blocks
-            return new_blocks
 
-        # Speculated tokens might be rejected in the future, so we does
+        # Speculated tokens might be rejected in the future, so we do
         # not cache any speculated tokens. We only cache blocks with
         # generated (accepted) tokens.
-        num_full_blocks_after_append = (num_computed_tokens + num_tokens - len(
-            request.spec_token_ids)) // self.block_size
+        num_full_blocks_after_append = (
+            num_computed_tokens + num_tokens - len(request.spec_token_ids)) // self.block_size
 
+        print(f"{req_blocks=}")
+        print(f"{self.req_to_block_hashes[request.request_id]=}")
+        print(f"{num_cached_blocks=}")
+        print(f"{num_full_blocks_after_append=}")
         self.block_pool.cache_full_blocks(
             request=request,
             blocks=req_blocks,
@@ -317,7 +332,6 @@ class KVCacheManager:
 
         self.num_cached_block[
             request.request_id] = num_full_blocks_after_append
-        return new_blocks
 
     def free(self, request: Request) -> None:
         """Free the blocks allocated for the request.

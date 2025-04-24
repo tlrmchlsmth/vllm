@@ -146,6 +146,7 @@ class NixlConnectorScheduler:
 
     def __init__(self, vllm_config: VllmConfig, engine_id: str):
         self.vllm_config = vllm_config
+        self.block_size = vllm_config.cache_config.block_size
         self.engine_id = engine_id
 
         # Requests that need to start recv.
@@ -156,11 +157,20 @@ class NixlConnectorScheduler:
     def get_num_new_matched_tokens(self, request: "Request",
                                    num_computed_tokens: int) -> int:
         """For remote prefill, allocate for all tokens."""
+        
+        # NOTE: this function is called in the WAITING loop.
+        # So we should only have full blocks of computed tokens.
+        assert num_computed_tokens % self.block_size == 0
+
         if request.do_remote_prefill:
-            # Subtract 1 since we do not compute the last prompt
-            # token so that we can sample the first token here.
-            num_external_tokens = len(request.prompt_token_ids) - 1
-            return num_external_tokens - num_computed_tokens
+            # NOTE: subtract 1 since we compute the last token
+            # here so that we can sample the first token.
+            num_prompt_tokens = len(request.prompt_token_ids) - 1
+
+            # Round down to a full block shape.
+            num_external_blocks = num_prompt_tokens // self.block_size
+            rounded_num_prompt_tokens = num_external_blocks * self.block_size
+            return max(rounded_num_prompt_tokens - num_computed_tokens, 0)
         else:
             return 0
 
