@@ -17,26 +17,12 @@ from vllm.v1.structured_output import StructuredOutputManager
 EOS_TOKEN_ID = 50256
 
 
-def create_scheduler(
+def create_vllm_config(
     model: str = "facebook/opt-125m",
     max_num_seqs: int = 16,
     max_num_batched_tokens: int = 64,
-    num_blocks: int = 10000,
     block_size: int = 8,
-) -> Scheduler:
-    '''Create scheduler under test.
-
-    Args:
-      model: model under test
-      max_num_seqs: max sequences to schedule
-      max_num_batch_tokens: max num tokens to batch
-      enable_prefix_caching: optionally force APC config
-                             (True/False) or use default
-                             (None)
-
-    Returns:
-      :class:`Scheduler` instance
-    '''
+) -> VllmConfig:
     scheduler_config = SchedulerConfig(
         max_num_seqs=max_num_seqs,
         max_num_batched_tokens=max_num_batched_tokens,
@@ -63,12 +49,32 @@ def create_scheduler(
         kv_connector="NixlConnector",
         kv_role="kv_both",
     )
-    vllm_config = VllmConfig(
+    return VllmConfig(
         scheduler_config=scheduler_config,
         model_config=model_config,
         cache_config=cache_config,
         kv_transfer_config=kv_transfer_config,
     )
+
+
+def create_scheduler(
+    vllm_config: VllmConfig,
+    num_blocks: int = 10000,
+) -> Scheduler:
+    '''Create scheduler under test.
+
+    Args:
+      model: model under test
+      max_num_seqs: max sequences to schedule
+      max_num_batch_tokens: max num tokens to batch
+      enable_prefix_caching: optionally force APC config
+                             (True/False) or use default
+                             (None)
+
+    Returns:
+      :class:`Scheduler` instance
+    '''
+    block_size = vllm_config.cache_config.block_size
     kv_cache_config = KVCacheConfig(
         num_blocks=num_blocks,  # A large number of blocks to hold all requests
         tensors={},
@@ -78,7 +84,7 @@ def create_scheduler(
                                                False))
         ],
     )
-    cache_config.num_gpu_blocks = num_blocks
+    vllm_config.cache_config.num_gpu_blocks = num_blocks
     return Scheduler(
         vllm_config=vllm_config,
         kv_cache_config=kv_cache_config,
@@ -128,7 +134,8 @@ def create_requests(
 
 
 def test_basic_remote_prefill():
-    scheduler = create_scheduler()
+    vllm_config = create_vllm_config()
+    scheduler = create_scheduler(vllm_config)
     START_FREE_BLOCK_QUEUE_SIZE = (
         scheduler.kv_cache_manager.block_pool.free_block_queue.num_free_blocks)
     NUM_TOKENS = 16
