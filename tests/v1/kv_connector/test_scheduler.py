@@ -127,9 +127,10 @@ def create_requests(
     return requests
 
 
-def test_remote_prefill_lifecycle():
+def test_basic_remote_prefill():
     scheduler = create_scheduler()
-
+    START_FREE_BLOCK_QUEUE_SIZE = (
+        scheduler.kv_cache_manager.block_pool.free_block_queue.num_free_blocks)
     NUM_TOKENS = 16
     request = create_requests(num_requests=1,
                               num_tokens=NUM_TOKENS,
@@ -152,9 +153,12 @@ def test_remote_prefill_lifecycle():
     assert scheduled_req.num_computed_tokens == NUM_TOKENS - 1
     assert scheduler_output.num_scheduled_tokens[scheduled_req.req_id] == 0
 
-    # We should not cache blocks until the kvs are recved.
-    cache = scheduler.kv_cache_manager.block_pool.cached_block_hash_to_block
-    assert len(cache) == 0
+    # Blocks should not be cached until the KVs are recv,
+    # but they should be touched so that they are not preempted.
+    block_pool = scheduler.kv_cache_manager.block_pool
+    assert len(block_pool.cached_block_hash_to_block) == 0
+    assert (block_pool.free_block_queue.num_free_blocks
+            < START_FREE_BLOCK_QUEUE_SIZE)
     assert request_id not in scheduler.kv_cache_manager.num_cached_block
 
     engine_core_outputs = scheduler.update_from_output(
