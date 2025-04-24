@@ -186,6 +186,9 @@ def test_basic_remote_prefill():
     assert len(scheduler.recving_KV_req_ids) == 0
     assert len(engine_core_outputs.outputs) == 0
 
+    # TODO(rob): once we support caching, we should check that the
+    # blocks are cached here.
+
     # STEP (3):
     # Remote Prefill: the request should now have scheduled tokens.
     scheduler_output = scheduler.schedule()
