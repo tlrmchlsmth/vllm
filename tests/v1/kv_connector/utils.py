@@ -94,6 +94,7 @@ def create_request(
     max_tokens: int = 16,
     do_remote_decode: bool = False,
     do_remote_prefill: bool = False,
+    use_all_1s_for_prompt_tokens: bool = False,
 ) -> list[Request]:
     if do_remote_decode:
         assert not do_remote_prefill
@@ -111,10 +112,19 @@ def create_request(
         max_tokens=max_tokens,
         kv_transfer_params=kv_transfer_params,
     )
+
+
+    if use_all_1s_for_prompt_tokens:
+        prompt_token_ids = [1] * num_tokens
+    else:
+        prompt_token_ids = [
+            i * request_id for i in range(num_tokens)
+        ]
+        
     return Request(
         request_id=f"id-{request_id}",
         prompt=None,
-        prompt_token_ids=[i * request_id for i in range(num_tokens)],
+        prompt_token_ids=prompt_token_ids,
         sampling_params=sampling_params,
         multi_modal_inputs=None,
         multi_modal_placeholders=None,
