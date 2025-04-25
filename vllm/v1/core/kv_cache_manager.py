@@ -316,10 +316,6 @@ class KVCacheManager:
         num_full_blocks_after_append = (
             num_computed_tokens + num_tokens - len(request.spec_token_ids)) // self.block_size
 
-        print(f"{req_blocks=}")
-        print(f"{self.req_to_block_hashes[request.request_id]=}")
-        print(f"{num_cached_blocks=}")
-        print(f"{num_full_blocks_after_append=}")
         self.block_pool.cache_full_blocks(
             request=request,
             blocks=req_blocks,

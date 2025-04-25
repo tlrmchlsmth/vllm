@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 import copy
 
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
@@ -5,16 +6,16 @@ from vllm.v1.request import Request, RequestStatus
 
 from .utils import create_request, create_scheduler, create_vllm_config
 
-# SPDX-License-Identifier: Apache-2.0
-
-
 def test_single_remote_prefill():
     vllm_config = create_vllm_config()
     scheduler = create_scheduler(vllm_config)
-
+    
+    # 2 and a half full external blocks.
+    NUM_EXTERNAL_FULL_BLOCKS = 2
+    NUM_TOKENS = int(vllm_config.cache_config.block_size * (NUM_EXTERNAL_FULL_BLOCKS + 0.5))
     START_FREE_BLOCK_QUEUE_SIZE = (
         scheduler.kv_cache_manager.block_pool.free_block_queue.num_free_blocks)
-    NUM_TOKENS = 32
+    
     request = create_request(request_id=1,
                              num_tokens=NUM_TOKENS,
                              do_remote_prefill=True)
@@ -45,6 +46,8 @@ def test_single_remote_prefill():
     assert (block_pool.free_block_queue.num_free_blocks
             < START_FREE_BLOCK_QUEUE_SIZE)
     assert len(block_pool.cached_block_hash_to_block) == 0
+    for block in scheduler.kv_cache_manager.req_to_blocks[request_id]:
+        assert block._block_hash is None
 
     # (1b): forward()
     model_runner_output = EMPTY_MODEL_RUNNER_OUTPUT
@@ -74,6 +77,13 @@ def test_single_remote_prefill():
     # (3a): schedule(): this should actually schedule.
     scheduler_output = scheduler.schedule()
     assert len(scheduler.running) == 1
+    
+    # Confirm the block are actually allocated.
+    num_hashed_blocks = 0
+    for block in scheduler.kv_cache_manager.req_to_blocks[request_id]:
+        assert block.ref_cnt == 1
+        num_hashed_blocks += (1 if block._block_hash is not None else 0)
+    assert num_hashed_blocks == NUM_EXTERNAL_FULL_BLOCKS
 
 
     # # Request should be out of the recving state.

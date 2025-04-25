@@ -307,6 +307,7 @@ class Scheduler(SchedulerInterface):
                             num_computed_tokens=(len(request.all_token_ids) - 1)
                         )
                         request.status = RequestStatus.WAITING
+                        print(f"{self.kv_cache_manager.req_to_blocks[request.request_id]=}")
                         self.kv_cache_manager.free(request)
                     else:
                         self.waiting.popleft()

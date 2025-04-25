@@ -114,7 +114,7 @@ def create_request(
     return Request(
         request_id=f"id-{request_id}",
         prompt=None,
-        prompt_token_ids=[request_id] * num_tokens,
+        prompt_token_ids=[i * request_id for i in range(num_tokens)],
         sampling_params=sampling_params,
         multi_modal_inputs=None,
         multi_modal_placeholders=None,
