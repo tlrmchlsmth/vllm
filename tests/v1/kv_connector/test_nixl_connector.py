@@ -85,14 +85,12 @@ def test_single_remote_prefill():
         num_hashed_blocks += (1 if block._block_hash is not None else 0)
     assert num_hashed_blocks == NUM_EXTERNAL_FULL_BLOCKS
 
-
+    # Confirm the rest of the prompt is scheduled.
+    print(f"{scheduler_output=}")
     # # Request should be out of the recving state.
     # assert len(scheduler.running) == 1
     # assert len(scheduler.recving_KV_req_ids) == 0
     # assert len(engine_core_outputs.outputs) == 0
-
-    # # TODO(rob): once we support caching, we should check that the
-    # # blocks are cached here.
 
     # # STEP (3):
     # # Remote Prefill: the request should now have scheduled tokens.

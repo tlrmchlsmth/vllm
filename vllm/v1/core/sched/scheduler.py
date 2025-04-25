@@ -307,7 +307,6 @@ class Scheduler(SchedulerInterface):
                             num_computed_tokens=(len(request.all_token_ids) - 1)
                         )
                         request.status = RequestStatus.WAITING
-                        print(f"{self.kv_cache_manager.req_to_blocks[request.request_id]=}")
                         self.kv_cache_manager.free(request)
                     else:
                         self.waiting.popleft()
@@ -345,7 +344,6 @@ class Scheduler(SchedulerInterface):
                     0 if self.connector is None else
                     self.connector.get_num_new_matched_tokens(
                         request, num_computed_tokens))
-                print(f"{num_external_tokens=}")
 
                 # Total computed tokens (local + external).
                 num_computed_tokens += num_external_tokens
