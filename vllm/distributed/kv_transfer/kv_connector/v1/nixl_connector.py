@@ -276,8 +276,6 @@ class NixlConnectorWorker:
                 (key_cache.data_ptr(), value_cache.data_ptr()))
 
         self.kv_caches_base_addr[self.engine_id] = kv_caches_base_addr
-        print(f"{len(self.kv_caches_base_addr[self.engine_id])=}")
-        print(f"{self.kv_caches_base_addr[self.engine_id][0]=}")
 
         descs = self.nixl_wrapper.get_reg_descs(caches_data, "VRAM")
         logger.debug("Registering descs: %s", caches_data)

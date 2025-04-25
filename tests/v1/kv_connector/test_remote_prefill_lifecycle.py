@@ -1,16 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 import copy
+from typing import Optional
 
-from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
-from vllm.v1.request import RequestStatus
+from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
+from vllm.v1.request import RequestStatus, Request
 
 from .utils import create_request, create_scheduler, create_vllm_config
 
-def test_single_remote_prefill():
-    """
-    Test that the request lifecycle for a remote prefill
-    works as expected.
-    """
+def test_basic_remote_prefill_cycle():
+    """Test Remote Prefills Lifecycle."""
+
     vllm_config = create_vllm_config()
     scheduler = create_scheduler(vllm_config)
     
@@ -96,6 +95,115 @@ def test_single_remote_prefill():
     num_computed_tokens = scheduled_req.num_computed_tokens
     total_prompt_tokens = len(scheduled_req.prompt_token_ids)
     assert (num_scheduled_tokens == total_prompt_tokens - num_computed_tokens)
+
+
+def make_model_runner_output(
+    reqs: list[Request],
+    finished_sending: Optional[list[str]] = None,
+    finished_recving: Optional[list[str]] = None,
+) -> ModelRunnerOutput:
+    req_ids = [req.request_id for req in reqs]
+    req_id_to_index = {
+        req_id: idx for idx, req_id in enumerate(req_ids)
+    }
+    sampled_token_ids = [[0] for _ in req_ids]
+    
+    return ModelRunnerOutput(
+        req_ids=req_ids,
+        req_id_to_index=req_id_to_index,
+        sampled_token_ids=sampled_token_ids,
+        spec_token_ids=None,
+        logprobs=None,
+        prompt_logprobs_dict={},
+        finished_sending=finished_sending,
+        finished_recving=finished_recving,
+    )
+
+def test_interleaved_remote_prefill_cycle():
+    """Test Remote Prefills Work Well With Other Requests."""
+
+    vllm_config = create_vllm_config()
+    scheduler = create_scheduler(vllm_config)
+    
+    # 2 Full Blocks and 1 Half Block.
+    BLOCK_SIZE = vllm_config.cache_config.block_size
+    NUM_EXTERNAL_FULL_BLOCKS = 2
+    NUM_TOKENS = int(BLOCK_SIZE * (NUM_EXTERNAL_FULL_BLOCKS + 0.5))
+    
+    request_remote = create_request(
+        request_id=1,
+        num_tokens=NUM_TOKENS,
+        do_remote_prefill=True
+    )
+    request_local_a = create_request(
+        request_id=2,
+        num_tokens=NUM_TOKENS,
+    )
+    request_local_b = create_request(
+        request_id=3,
+        num_tokens=NUM_TOKENS,
+    )
+
+    # STEP 1: Regular request is running.
+    scheduler.add_request(request_local_a)
+    scheduler_output = scheduler.schedule()
+    assert len(scheduler.running) == 1
+
+    model_runner_output = make_model_runner_output(
+        [request_local_a])
+    scheduler.update_from_output(scheduler_output,
+                                 model_runner_output)
+    
+    # STEP 2: Add a local and remote request.
+    scheduler.add_request(request_local_b)
+    scheduler.add_request(request_remote)
+    scheduler_output = scheduler.schedule()
+    assert len(scheduler.running) == 2
+    assert len(scheduler.waiting) == 1
+    assert len(scheduler_output.scheduled_new_reqs) == 1
+    assert len(scheduler_output.scheduled_cached_reqs) == 1
+
+    model_runner_output = make_model_runner_output(
+        [request_local_a, request_local_b])
+    scheduler.update_from_output(scheduler_output,
+                                 model_runner_output)
+
+    # STEP 3: continue running, KVs not arrived yet.
+    scheduler_output = scheduler.schedule()
+    assert len(scheduler.running) == 2
+    assert len(scheduler.waiting) == 1
+    assert len(scheduler_output.scheduled_new_reqs) == 0
+    assert len(scheduler_output.scheduled_cached_reqs) == 2
+
+    model_runner_output = make_model_runner_output(
+        reqs=[request_local_a, request_local_b])
+    scheduler.update_from_output(scheduler_output,
+                                 model_runner_output)
+    assert len(scheduler.running) == 2
+    assert len(scheduler.waiting) == 1
+    assert len(scheduler_output.scheduled_new_reqs) == 0
+    assert len(scheduler_output.scheduled_cached_reqs) == 2
+
+    # STEP 4: KVs arrive.
+    scheduler_output = scheduler.schedule()
+    assert len(scheduler.running) == 2
+    assert len(scheduler.waiting) == 1
+    assert len(scheduler_output.scheduled_new_reqs) == 0
+    assert len(scheduler_output.scheduled_cached_reqs) == 2
+
+    model_runner_output = make_model_runner_output(
+        [request_local_a, request_local_b],
+        finished_recving=[request_remote.request_id]
+    )
+    scheduler.update_from_output(scheduler_output,
+                                 model_runner_output)
+
+    # STEP 5: RECVed KVs are sent to ModelRunner.
+    scheduler_output = scheduler.schedule()
+    assert len(scheduler.running) == 3
+    assert len(scheduler.waiting) == 0
+    assert len(scheduler_output.scheduled_new_reqs) == 1
+    assert len(scheduler_output.scheduled_cached_reqs) == 2
 
 
 def test_remote_prefill_no_prefix_cache_uncomputed_blocks():
