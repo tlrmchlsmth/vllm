@@ -127,7 +127,8 @@ class NixlConnector(KVConnectorBase_V1):
     def start_load_kv(self, forward_context: "ForwardContext",
                       **kwargs) -> None:
         assert self.connector_worker is not None
-        self.connector_worker.start_load_kv()
+        assert isinstance(self._connector_metadata, NixlConnectorMetadata)
+        self.connector_worker.start_load_kv(self._connector_metadata)
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         """NixlConnector does not do layerwise saving."""
@@ -328,6 +329,9 @@ class NixlConnectorWorker:
         else:
             raise Exception("SET NIXL_ROLE to SENDER OR RECVER")
 
+        # Very, very hacky
+        self.remote_engine_id = metadata.engine_id
+
         # FOR DEBUG: try to send some shit
 
         if NIXL_ROLE == "RECVER":
@@ -370,9 +374,7 @@ class NixlConnectorWorker:
             start_time = time.time()
             while (not done):
                 finished = self.get_finished()
-                # NOTE: Should fix discrepancy between bytes/str finished sets
-                # Here we have bytes. For receiver we have str.
-                done = b'tms' in finished[0]
+                done = "tms" in finished[0]
                 time.sleep(1e-5)
             end_time = time.time()
             execution_time = end_time - start_time
@@ -457,6 +459,11 @@ class NixlConnectorWorker:
         """Get requests that are done sending or recving."""
         done_sending = self._get_new_notifs()
         done_recving = self._pop_done_transfers(self._recving_transfers)
+        if len(done_sending) > 0 or len(done_recving) > 0:
+            logger.debug(
+                "get_finished: %s requests done sending "
+                "and %s requests done recving", len(done_sending),
+                len(done_recving))
         return done_sending, done_recving
 
     def _get_new_notifs(self) -> set[str]:
@@ -468,7 +475,7 @@ class NixlConnectorWorker:
         for req_ids in self.nixl_wrapper.get_new_notifs().values():
             for req_id in req_ids:
                 assert req_id not in notified_req_ids
-                notified_req_ids.add(req_id)
+                notified_req_ids.add(req_id.decode('utf-8'))
         return notified_req_ids
 
     def _pop_done_transfers(self, transfers: dict[str, list[int]]) -> set[str]:
@@ -507,12 +514,16 @@ class NixlConnectorWorker:
         """
         for req_id, meta in metadata.requests.items():
             # NOTE: this is non-blocking
+            logger.debug("start_load_kv for request " + req_id)
             self._read_blocks(
                 local_block_ids=meta.block_ids,
                 # TODO: support staging once we do heterogeneous TP
                 staging_block_ids=meta.block_ids,
-                remote_block_ids=meta.remote_block_ids,
-                dst_engine_id=meta.remote_engine_id,
+                # DISGUSTING HACKs
+                #remote_block_ids=meta.remote_block_ids,
+                #dst_engine_id=meta.remote_engine_id,
+                remote_block_ids=meta.block_ids,
+                dst_engine_id=self.remote_engine_id,
                 request_id=req_id,
             )
 

@@ -32,6 +32,30 @@ from vllm.v1.structured_output import StructuredOutputManager
 
 logger = init_logger(__name__)
 
+import sys
+import traceback
+
+
+def print_last_3_stack_levels():
+    try:
+        # Either raise an exception or get the current stack
+        stack = traceback.extract_stack()
+        # Print only the last 3 levels
+        for frame in stack[-6:-3]:
+            print(
+                f"File: {frame.filename}, Line: {frame.lineno}, Function: {frame.name}"
+            )
+            print(f"  {frame.line}")
+    except Exception:
+        # Get the exception's traceback
+        tb_list = traceback.extract_tb(sys.exc_info()[2])
+        # Print only the last 3 levels
+        for frame in tb_list[-3:]:
+            print(
+                f"File: {frame.filename}, Line: {frame.lineno}, Function: {frame.name}"
+            )
+            print(f"  {frame.line}")
+
 
 class Scheduler(SchedulerInterface):
 
@@ -433,13 +457,14 @@ class Scheduler(SchedulerInterface):
                 request.num_computed_tokens = num_computed_tokens
 
                 # Encoder-related.
-                if encoder_inputs_to_schedule:
-                    scheduled_encoder_inputs[request.request_id] = (
-                        encoder_inputs_to_schedule)
-                    # Allocate the encoder cache.
-                    for i in encoder_inputs_to_schedule:
-                        self.encoder_cache_manager.allocate(request, i)
-                    encoder_budget = new_encoder_budget
+                if not request.do_remote_prefill:
+                    if encoder_inputs_to_schedule:
+                        scheduled_encoder_inputs[request.request_id] = (
+                            encoder_inputs_to_schedule)
+                        # Allocate the encoder cache.
+                        for i in encoder_inputs_to_schedule:
+                            self.encoder_cache_manager.allocate(request, i)
+                        encoder_budget = new_encoder_budget
 
         # Put back any skipped requests at the head of the waiting queue
         if skipped_waiting_requests:
@@ -530,7 +555,9 @@ class Scheduler(SchedulerInterface):
         # 3. If some tokens (e.g. spec tokens) are rejected later, the number of
         #    computed tokens will be adjusted in update_from_output.
         for req_id, num_scheduled_token in num_scheduled_tokens.items():
-            self.requests[req_id].num_computed_tokens += num_scheduled_token
+            if req_id in self.requests:
+                self.requests[
+                    req_id].num_computed_tokens += num_scheduled_token
 
         self.finished_req_ids = set()
         return scheduler_output
@@ -808,6 +835,7 @@ class Scheduler(SchedulerInterface):
     def add_request(self, request: Request) -> None:
         self.waiting.append(request)
         self.requests[request.request_id] = request
+        print(f"Adding {request.request_id} to requests")
         if self.log_stats:
             request.record_event(EngineCoreEventType.QUEUED)
 
@@ -839,9 +867,13 @@ class Scheduler(SchedulerInterface):
             else:
                 self.waiting.remove(request)
             request.status = finished_status
+            print(f"freeing request {req_id}")
             self._free_request(request)
 
     def _free_request(self, request: Request) -> None:
+        logger.debug(f"Freeing request {request.request_id}")
+        print_last_3_stack_levels()
+
         assert request.is_finished()
         self.kv_cache_manager.free(request)
         self.kv_cache_manager.free_block_hashes(request)

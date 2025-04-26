@@ -393,6 +393,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Update the states of the running/resumed requests.
         for req_data in scheduler_output.scheduled_cached_reqs:
             req_id = req_data.req_id
+            if req_id not in self.requests:
+                print(f"{req_id} {self.requests}")
+                continue
             req_state = self.requests[req_id]
 
             # Update the cached states.
@@ -1013,8 +1016,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 # These transfers are designed to be async and the requests
                 # involved may be disjoint from the running requests.
                 # Do this here to save a collective_rpc.
-                if get_forward_context().attn_metadata is not None:
-                    kv_connector.start_load_kv(get_forward_context())
+                kv_connector.start_load_kv(get_forward_context())
 
         def maybe_wait_for_save():
             if has_kv_transfer_group():
