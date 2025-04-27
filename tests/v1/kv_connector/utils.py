@@ -15,7 +15,7 @@ from vllm.v1.structured_output import StructuredOutputManager
 EOS_TOKEN_ID = 50256
 
 def assert_scheduler_empty(scheduler: Scheduler):
-    """Assert Scheduler Is Empty."""
+    """Confirm the scheduler is "empty" - i.e. no leaks."""
     # Scheduler Metadata.
     assert len(scheduler.requests) == 0
     assert len(scheduler.waiting) == 0
