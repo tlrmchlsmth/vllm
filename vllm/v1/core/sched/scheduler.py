@@ -32,7 +32,6 @@ from vllm.v1.structured_output import StructuredOutputManager
 
 logger = init_logger(__name__)
 
-
 class Scheduler(SchedulerInterface):
 
     def __init__(
@@ -768,12 +767,17 @@ class Scheduler(SchedulerInterface):
                     request.status = RequestStatus.FINISHED_REMOTE_DECODE
                     self._free_request(request, skip_free_blocks=True)
                     # TODO(rob): do this on a per-Connector basis.
+                    remote_blocks = [
+                        block.block_id for block in
+                        self.kv_cache_manager.req_to_blocks[request.request_id]
+                    ]
+                        
                     kv_transfer_params = KVTransferParams(
                         do_remote_prefill=True,
                         # put the remote block ids here
-                        remote_block_ids=[1, 2, 3],
+                        remote_block_ids=remote_blocks,
                         # put the enigne id here
-                        remote_engine_id="abcdefg",
+                        remote_engine_id=self.connector.engine_id,
                     )
 
                 # Add EngineCoreOutput for this Request.
