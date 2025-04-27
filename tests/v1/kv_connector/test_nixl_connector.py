@@ -34,5 +34,9 @@ def test_scheduler_worker_inferface():
     
     assert len(kv_connector_metadata.requests) == 1
     assert request_id in kv_connector_metadata.requests
-    print(f"{kv_connector_metadata.requests=}")
-
+    req_meta = kv_connector_metadata.requests[request_id]
+    
+    for block_id, block in zip(
+        req_meta.local_block_ids,
+        scheduler.kv_cache_manager.req_to_blocks[request_id]):
+        assert block_id == block.block_id
