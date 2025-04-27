@@ -136,7 +136,6 @@ async def handle_completions(request: Request):
         # Add these to the request data for the decoder
         req_data['remote_block_ids'] = remote_block_ids
         req_data['remote_engine_id'] = remote_engine_id
-        print(f"{req_data}")
 
         et = time.time()
         stats_calculator.add(et - st)
