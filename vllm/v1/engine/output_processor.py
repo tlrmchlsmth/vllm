@@ -187,8 +187,6 @@ class RequestState:
         else:
             prompt_logprobs = self.logprobs_processor.prompt_logprobs
 
-        print(f"Creating request output with kv_transfer_params {kv_transfer_params.remote_engine_id}")
-
         return RequestOutput(
             request_id=request_id,
             prompt=self.prompt,

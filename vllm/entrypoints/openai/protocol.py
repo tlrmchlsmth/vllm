@@ -819,7 +819,7 @@ class CompletionRequest(OpenAIBaseModel):
     remote_engine_id: Optional[str] = Field(
         default=None,
         description="Remote engine id.")
-    
+
     remote_block_ids: Optional[list[int]] = Field(
         default=None,
         description="Remote block ids.")
@@ -927,11 +927,6 @@ class CompletionRequest(OpenAIBaseModel):
             remote_engine_id=self.remote_engine_id,
             remote_block_ids=self.remote_block_ids,
         )
-
-        import os
-        print("Setting sampling params in protocol.py")
-        NIXL_ROLE = os.getenv("NIXL_ROLE")
-        kv_transfer_params.remote_engine_id = str(NIXL_ROLE) + " set_in_protocol.py"
 
         return SamplingParams.from_optional(
             n=self.n,
@@ -1361,10 +1356,6 @@ class ChatCompletionResponse(OpenAIBaseModel):
     choices: list[ChatCompletionResponseChoice]
     usage: UsageInfo
     prompt_logprobs: Optional[list[Optional[dict[int, Logprob]]]] = None
-
-    # Add these fields for KV transfer
-    remote_engine_id: Optional[str] = None
-    remote_block_ids: Optional[list[int]] = Field(default_factory=list)
 
 
 class DeltaMessage(OpenAIBaseModel):

@@ -31,14 +31,14 @@ decode:
     --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
 
 proxy:
-    python start_proxy.py --port 8192 --prefiller-port 8100 --decoder-port 8200
+    python examples/disagg_proxy_server.py --port 8192
 
 send_request:
   curl -X POST http://localhost:8192/v1/completions \
     -H "Content-Type: application/json" \
     -d '{ \
       "model": "meta-llama/Llama-3.2-1B-Instruct", \
-      "prompt": "Generate a curl command to send to an openai server hosted at local_host:8192 with this as the prompt", \
+      "prompt": "Generate a curl command to send to an openai server hosted at local_host:8192 with this as the", \
       "max_tokens": 150, \
       "temperature": 0.7 \
     }'

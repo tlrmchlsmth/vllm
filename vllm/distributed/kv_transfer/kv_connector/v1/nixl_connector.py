@@ -72,9 +72,7 @@ class NixlConnectorMetadata(KVConnectorMetadata):
     ):
         assert request_id not in self.requests
         assert kv_transfer_params.remote_engine_id is not None
-        print(kv_transfer_params.remote_engine_id)
         assert kv_transfer_params.remote_block_ids is not None
-        print("HERE")
 
         self.requests[request_id] = ReqMeta(
             local_block_ids=local_block_ids,
@@ -85,7 +83,7 @@ class NixlConnectorMetadata(KVConnectorMetadata):
 class NixlConnector(KVConnectorBase_V1):
 
     def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole):
-        self.engine_id = uuid.uuid4()
+        self.engine_id = vllm_config.kv_transfer_config.engine_id
 
         if role == KVConnectorRole.SCHEDULER:
             self.connector_scheduler : Optional[NixlConnectorScheduler] = \
@@ -158,6 +156,7 @@ class NixlConnectorScheduler:
         self.vllm_config = vllm_config
         self.block_size = vllm_config.cache_config.block_size
         self.engine_id = engine_id
+        logger.info("Initializing NIXL Scheduler " + engine_id)
 
         # Requests that need to start recv.
         # New requests are added by update_state_after_alloc in
@@ -207,6 +206,10 @@ class NixlConnectorScheduler:
                 local_block_ids=block_ids,
                 kv_transfer_params=req.kv_transfer_params,
             )
+
+        # Clear the list once workers start the transfers
+        self._reqs_need_recv.clear()
+
         return meta
 
 
@@ -218,6 +221,7 @@ class NixlConnectorWorker:
             logger.error("NIXL is not available")
             raise RuntimeError("NIXL is not available")
         logger.info("Initializing NIXL wrapper")
+        logger.info("Initializing NIXL worker " + engine_id)
 
         # Agent.
         self.nixl_wrapper = NixlWrapper(str(uuid.uuid4()), None)
@@ -424,6 +428,7 @@ class NixlConnectorWorker:
             return
 
         num_blocks = nixl_agent_meta.num_blocks
+        logger.debug("Adding remote agent " + engine_id + " " + str(num_blocks))
 
         agent_names = []
         agent_name = self.nixl_wrapper.add_remote_agent(
@@ -538,8 +543,9 @@ class NixlConnectorWorker:
             # NOTE: this is non-blocking
             logger.debug("start_load_kv for request %s from remote engine %s. "
                          "Num local_block_ids: %s. Num remote_block_ids: %s. ",
-                         req_id, len(meta.local_block_ids),
-                         len(meta.remote_block_ids), meta.remote_engine_id)
+                         req_id, meta.remote_engine_id,
+                         len(meta.local_block_ids),
+                         len(meta.remote_block_ids))
             self._read_blocks(
                 local_block_ids=meta.local_block_ids,
                 remote_block_ids=meta.remote_block_ids,
@@ -597,13 +603,12 @@ class NixlConnectorWorker:
                 local_block_descs_ids,
                 remote_xfer_side_handle,
                 remote_block_descs_ids,
-                notif_msg=request_id,
+                notif_msg=request_id.encode("utf-8"),
             )
 
             # Call transfer to begin the async transfer
             # We will check this is done in the next forward pass.
             self.nixl_wrapper.transfer(handle)
-
             self._recving_transfers[request_id].append(handle)
 
     def _get_block_descs_ids(self,

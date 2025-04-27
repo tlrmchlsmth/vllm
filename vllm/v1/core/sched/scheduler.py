@@ -781,6 +781,8 @@ class Scheduler(SchedulerInterface):
                         block.block_id for block in
                         self.kv_cache_manager.req_to_blocks[request.request_id]
                     ]
+                    # HACK(tms) - we're off by one between prefill an decode
+                    remote_blocks.pop()
 
                     kv_transfer_params = KVTransferParams(
                         do_remote_prefill=True,
@@ -813,8 +815,10 @@ class Scheduler(SchedulerInterface):
 
         # P/D: update recv and send status from last step.
         for req_id in (model_runner_output.finished_recving or []):
+            logger.debug("FINISHED RECVING: " + req_id)
             self.finished_recving_KV_req_ids.add(req_id)
         for req_id in (model_runner_output.finished_sending or []):
+            logger.debug("FINISHED SENDING: " + req_id)
             self._free_blocks(self.requests[req_id])
 
         self.running = new_running
@@ -832,7 +836,6 @@ class Scheduler(SchedulerInterface):
     def add_request(self, request: Request) -> None:
         self.waiting.append(request)
         self.requests[request.request_id] = request
-        print(f"Adding {request.request_id} to requests")
         if self.log_stats:
             request.record_event(EngineCoreEventType.QUEUED)
 
@@ -864,7 +867,6 @@ class Scheduler(SchedulerInterface):
             else:
                 self.waiting.remove(request)
             request.status = finished_status
-            print(f"freeing request {req_id}")
             self._free_request(request)
 
     def _free_request(self, request: Request,

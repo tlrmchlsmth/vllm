@@ -101,8 +101,8 @@ class ModelRunnerOutput:
     prompt_logprobs_dict: dict[str, Optional[LogprobsTensors]]
 
     # [req_ids]
-    finished_sending: Optional[list[str]] = None
-    finished_recving: Optional[list[str]] = None
+    finished_sending: Optional[set[str]] = None
+    finished_recving: Optional[set[str]] = None
 
 
 EMPTY_MODEL_RUNNER_OUTPUT = ModelRunnerOutput(req_ids=[],

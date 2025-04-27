@@ -123,14 +123,20 @@ async def handle_completions(request: Request):
     try:
         req_data = await request.json()
 
-        # Send request to prefill service, ignore the response
+        # Send request to prefill service
         response = await send_request_to_service(
-            app.state.prefill_client,
-            "/completions",
-            req_data
-        )
-        remote_block_ids = response.remote_block_ids
-        remote_engine_id = response.remote_engine_id
+            app.state.prefill_client, "/completions", req_data)
+
+        # Extract the needed fields
+        response_json = response.json()
+        remote_block_ids = response_json.get('remote_block_ids', [])
+        remote_engine_id = response_json.get('remote_engine_id', '')
+        print("Prefiller response:\n" + str(response_json))
+
+        # Add these to the request data for the decoder
+        req_data['remote_block_ids'] = remote_block_ids
+        req_data['remote_engine_id'] = remote_engine_id
+        print(f"{req_data}")
 
         et = time.time()
         stats_calculator.add(et - st)

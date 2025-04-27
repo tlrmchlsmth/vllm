@@ -1039,7 +1039,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 finished_sending, finished_recving = maybe_get_finished()
             # Return empty ModelRunnerOutput if there's no work to do.
             output = EMPTY_MODEL_RUNNER_OUTPUT
-            if len(finished_sending) > 0 or len(finished_sending) > 0:
+            if len(finished_sending) > 0 or len(finished_recving) > 0:
                 output.finished_sending = finished_sending
                 output.finished_recving = finished_recving
             return output
@@ -1062,6 +1062,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             attn_metadata.num_input_tokens = num_input_tokens
         else:
             # This may happen when there are outstanding KV transfers
+            print("tyler hack area " + str(scheduler_output.total_num_scheduled_tokens))
             num_input_tokens = 1
             attn_metadata = None
             logits_indices = None
@@ -1138,6 +1139,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Clear KVConnector state after all KVs are generated.
             if has_kv_transfer_group():
                 get_kv_transfer_group().clear_connector_metadata()
+
+            if len(finished_recving) > 0:
+                logger.debug(finished_recving)
 
             return ModelRunnerOutput(
                 req_ids=self.input_batch.req_ids,
