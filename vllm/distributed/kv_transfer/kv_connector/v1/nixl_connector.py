@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+import math
 import time
 import uuid
 from collections import defaultdict
@@ -49,11 +50,11 @@ class ReqMeta:
 
     def __init__(
         self,
-        block_ids: list[int],
+        local_block_ids: list[int],
         remote_block_ids: list[int],
         remote_engine_id: str,
     ):
-        self.block_ids = block_ids
+        self.local_block_ids = local_block_ids
         self.remote_block_ids = remote_block_ids
         self.remote_engine_id = remote_engine_id
 
@@ -65,13 +66,16 @@ class NixlConnectorMetadata(KVConnectorMetadata):
 
     def add_new_req(
         self,
-        req_id: str,
-        block_ids: list[int],
+        request_id: str,
+        local_block_ids: list[int],
         kv_transfer_params: KVTransferParams,
     ):
-        assert req_id not in self.requests
-        self.requests[req_id] = ReqMeta(
-            block_ids,
+        assert request_id not in self.requests
+        assert kv_transfer_params.remote_block_ids is not None
+        assert kv_transfer_params.remote_engine_id is not None
+
+        self.requests[request_id] = ReqMeta(
+            local_block_ids=local_block_ids,
             remote_block_ids=kv_transfer_params.remote_block_ids,
             remote_engine_id=kv_transfer_params.remote_engine_id)
 
@@ -99,10 +103,11 @@ class NixlConnector(KVConnectorBase_V1):
             request, num_computed_tokens)
 
     def update_state_after_alloc(self, request: "Request",
+                                 block_ids: list[int],
                                  num_external_tokens: int):
         assert self.connector_scheduler is not None
         return self.connector_scheduler.update_state_after_alloc(
-            request, num_external_tokens)
+            request, block_ids, num_external_tokens)
 
     def build_connector_meta(
         self,
@@ -115,7 +120,7 @@ class NixlConnector(KVConnectorBase_V1):
     # Worker Side Methods
     ############################################################
 
-    def register_kv_caches(self, kv_caches: torch.Tensor):
+    def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         assert self.connector_worker is not None
         self.connector_worker.register_kv_caches(kv_caches)
 
@@ -149,27 +154,42 @@ class NixlConnectorScheduler:
 
     def __init__(self, vllm_config: VllmConfig, engine_id: str):
         self.vllm_config = vllm_config
+        self.block_size = vllm_config.cache_config.block_size
         self.engine_id = engine_id
 
         # Requests that need to start recv.
         # New requests are added by update_state_after_alloc in
         # the scheduler. Used to make metadata passed to Worker.
-        self._reqs_need_recv: dict[str, Request] = {}
+        self._reqs_need_recv: dict[str, tuple[Request, list[int]]] = {}
 
     def get_num_new_matched_tokens(self, request: "Request",
                                    num_computed_tokens: int) -> int:
         """For remote prefill, allocate for all tokens."""
+
+        # NOTE: this function is called in the WAITING loop.
+        # So we should only have full blocks of computed tokens.
+        assert num_computed_tokens % self.block_size == 0
+
         if request.do_remote_prefill:
-            return len(request.prompt_token_ids) - num_computed_tokens
+            # NOTE: subtract 1 since we compute the last token
+            # here so that we can sample the first token.
+            num_prompt_tokens = len(request.prompt_token_ids) - 1
+
+            # Round down to a full block shape.
+            num_external_blocks = num_prompt_tokens // self.block_size
+            rounded_num_prompt_tokens = num_external_blocks * self.block_size
+            return max(rounded_num_prompt_tokens - num_computed_tokens, 0)
         else:
             return 0
 
     def update_state_after_alloc(self, request: "Request",
+                                 block_ids: list[int],
                                  num_external_tokens: int):
         if request.do_remote_decode:
             pass
         if request.do_remote_prefill and num_external_tokens > 0:
-            self._reqs_need_recv[request.request_id] = request
+            self._reqs_need_recv[request.request_id] = (
+                request, block_ids)
 
     def build_connector_meta(
         self,
@@ -178,18 +198,13 @@ class NixlConnectorScheduler:
         meta = NixlConnectorMetadata()
 
         # Loop through scheduled reqs and convert to ReqMeta.
-        for new_req in scheduler_output.scheduled_new_reqs:
-            req = self._reqs_need_recv.pop(new_req.req_id, None)
-            if req is not None:
-                meta.add_new_req(
-                    req_id=new_req.req_id,
-                    block_ids=new_req.block_ids,
-                    kv_transfer_params=req.kv_transfer_params,
-                )
-
-        # Invariant: only new requests should need load
-        # and we should get all new requests each step().
-        assert len(self._reqs_need_recv) == 0
+        for req_id, (req, block_ids) in self._reqs_need_recv.items():
+            assert req.kv_transfer_params is not None
+            meta.add_new_req(
+                request_id=req_id,
+                local_block_ids=block_ids,
+                kv_transfer_params=req.kv_transfer_params,
+            )
         return meta
 
 
@@ -213,7 +228,6 @@ class NixlConnectorWorker:
 
         # KV Caches and nixl tracking data.
         self.num_layers: int = 0
-        self.num_heads: int = 0
         self.kv_caches: dict[str, torch.Tensor] = {}
 
         # Map of engine_id -> kv_caches_base_addr
@@ -244,16 +258,26 @@ class NixlConnectorWorker:
         first_kv_cache = kv_caches[first_layer_name]
 
         # [2 (k and v), num_blocks, ...]
-        _, num_blocks, block_size, num_heads, head_dim = first_kv_cache.shape
+        # TODO(tms): num_blocks will be in a different spot for MLA.
+        num_blocks = first_kv_cache.shape[1]
         kv_elem_size = first_kv_cache[0].element_size()
-        self.block_len = block_size * num_heads * head_dim * kv_elem_size
+        # TODO(tms): self.block_len needs to be per-layer for sliding window,
+        # hybrid attn, etc
+        self.block_len = kv_elem_size * math.prod(first_kv_cache.shape[-3:])
+
         logger.debug("Per layer kv cache size: %s", first_kv_cache[0].shape)
         self.num_layers = len(kv_caches)
         self.num_blocks = num_blocks
-        self.num_heads = num_heads
         self.kv_caches = kv_caches
         kv_caches_base_addr = []
         caches_data = []
+
+        # Note(tms): I modified this from the original region setup code.
+        # K and V are now in different regions. Advantage is that we can
+        # elegantly support MLA and any cases where the K and V tensors
+        # are non-contiguous (it's not locally guaranteed that they will be)
+        # Disadvantage is that the encoded NixlAgentMetadata is now larger
+        # (roughly 8KB vs 5KB).
         for layer_name in kv_caches:
             for cache in kv_caches[layer_name]:
                 base_addr = cache.data_ptr()
@@ -329,9 +353,6 @@ class NixlConnectorWorker:
         else:
             raise Exception("SET NIXL_ROLE to SENDER OR RECVER")
 
-        # Very, very hacky
-        self.remote_engine_id = metadata.engine_id
-
         # FOR DEBUG: try to send some shit
 
         if NIXL_ROLE == "RECVER":
@@ -345,8 +366,8 @@ class NixlConnectorWorker:
                 remote_engine_id=remote_engine_id  #HACK
             )
 
-            connector_metadata.add_new_req(req_id="tms",
-                                           block_ids=list(
+            connector_metadata.add_new_req(request_id="tms",
+                                           local_block_ids=list(
                                                range(n_blocks_to_send)),
                                            kv_transfer_params=xfer_params)
             self.start_load_kv(connector_metadata)
@@ -466,16 +487,16 @@ class NixlConnectorWorker:
                 len(done_recving))
         return done_sending, done_recving
 
-    def _get_new_notifs(self) -> set[str]:
+    def _get_new_notifs(self) -> list[str]:
         """Get req_ids which got a remote xfer message."""
 
-        notified_req_ids: set[str] = set()
+        notified_req_ids: list[str] = []
         # TODO: handle the TP case (N notifies for TP=N).
         # See: vllm/worker/worker_base.py L476 in DynamoPR.
         for req_ids in self.nixl_wrapper.get_new_notifs().values():
             for req_id in req_ids:
                 assert req_id not in notified_req_ids
-                notified_req_ids.add(req_id.decode('utf-8'))
+                notified_req_ids.append(req_id.decode('utf-8'))
         return notified_req_ids
 
     def _pop_done_transfers(self, transfers: dict[str, list[int]]) -> set[str]:
@@ -515,22 +536,19 @@ class NixlConnectorWorker:
         for req_id, meta in metadata.requests.items():
             # NOTE: this is non-blocking
             logger.debug("start_load_kv for request " + req_id)
+            print(meta.local_block_ids)
+            print(meta.remote_block_ids)
+            print(meta.remote_engine_id)
             self._read_blocks(
-                local_block_ids=meta.block_ids,
-                # TODO: support staging once we do heterogeneous TP
-                staging_block_ids=meta.block_ids,
-                # DISGUSTING HACKs
-                #remote_block_ids=meta.remote_block_ids,
-                #dst_engine_id=meta.remote_engine_id,
-                remote_block_ids=meta.block_ids,
-                dst_engine_id=self.remote_engine_id,
+                local_block_ids=meta.local_block_ids,
+                remote_block_ids=meta.remote_block_ids,
+                dst_engine_id=meta.remote_engine_id,
                 request_id=req_id,
             )
 
     def _read_blocks(
         self,
         local_block_ids: list[int],
-        staging_block_ids: list[int],
         remote_block_ids: list[int],
         dst_engine_id: str,
         request_id: str,
@@ -548,8 +566,6 @@ class NixlConnectorWorker:
         # NOTE(rob): we could potentially do the rearranging during the load_kv!
 
         assert len(local_block_ids) == len(remote_block_ids)
-        assert (staging_block_ids is None
-                or len(staging_block_ids) == len(remote_block_ids))
         if len(local_block_ids) == 0:
             return
 
