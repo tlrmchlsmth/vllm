@@ -11,7 +11,6 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
-from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 EOS_TOKEN_ID = 50256
 
@@ -21,6 +20,7 @@ def create_vllm_config(
     max_num_batched_tokens: int = 64,
     block_size: int = 16,
 ) -> VllmConfig:
+    """Initialize VllmConfig For Testing."""
     scheduler_config = SchedulerConfig(
         max_num_seqs=max_num_seqs,
         max_num_batched_tokens=max_num_batched_tokens,
@@ -60,6 +60,7 @@ def create_scheduler(
     vllm_config: VllmConfig,
     num_blocks: int = 10000,
 ) -> Scheduler:
+    """Initialize Scheduler For Testing."""
     block_size = vllm_config.cache_config.block_size
     kv_cache_config = KVCacheConfig(
         num_blocks=num_blocks,  # A large number of blocks to hold all requests
@@ -87,6 +88,8 @@ def create_request(
     do_remote_prefill: bool = False,
     use_all_1s_for_prompt_tokens: bool = False,
 ) -> Request:
+    """Make dummy request for testing."""
+
     if do_remote_decode:
         assert not do_remote_prefill
         kv_transfer_params = KVTransferParams(
@@ -95,8 +98,8 @@ def create_request(
     elif do_remote_prefill:
         kv_transfer_params = KVTransferParams(
             do_remote_prefill=True,
-            remote_engine_id="abc",
-            remote_block_ids=[1, 2, 3],
+            remote_engine_id="remote_engine_id",
+            remote_block_ids=[1,2,3],
         )
     else:
         kv_transfer_params = None
@@ -105,7 +108,6 @@ def create_request(
         max_tokens=max_tokens,
         kv_transfer_params=kv_transfer_params,
     )
-
 
     if use_all_1s_for_prompt_tokens:
         prompt_token_ids = [1] * num_tokens
@@ -131,6 +133,8 @@ def create_model_runner_output(
     finished_sending: Optional[list[str]] = None,
     finished_recving: Optional[list[str]] = None,
 ) -> ModelRunnerOutput:
+    """Make dummy model runner output for testing."""
+
     req_ids = [req.request_id for req in reqs]
     req_id_to_index = {
         req_id: idx for idx, req_id in enumerate(req_ids)

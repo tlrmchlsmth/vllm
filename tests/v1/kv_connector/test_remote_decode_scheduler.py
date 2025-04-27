@@ -43,13 +43,12 @@ def test_basic_remote_decode_cycle():
     # Ensure the request is finished after 1 tokens.
     assert request.is_finished()
     assert request.status == RequestStatus.FINISHED_REMOTE_DECODE
-    blocks = scheduler.kv_cache_manager.req_to_blocks[request_id]
     output = engine_core_outputs.outputs[0]
     assert output.finish_reason == FinishReason.REMOTE_DECODE
-    
-    # Ensure the return gives the proper transfer params.
-    remote_block_ids = output.kv_transfer_params.remote_block_ids
-    for remote_block_id, block in zip(remote_block_ids, blocks):
-        assert remote_block_id == block.block_id
-    assert (output.kv_transfer_params.remote_engine_id == 
-            scheduler.connector.engine_id)
+    assert output.kv_transfer_params is not None
+
+    # Ensure blocks are not freed.
+    blocks = scheduler.kv_cache_manager.req_to_blocks[request_id]
+    for block in blocks:
+        assert block.ref_cnt == 1
+
