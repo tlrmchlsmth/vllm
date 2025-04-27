@@ -305,6 +305,7 @@ class Scheduler(SchedulerInterface):
                             num_tokens=0,
                             num_computed_tokens=(len(request.all_token_ids) - 1)
                         )
+                        self.finished_recving_KV_req_ids.remove(request.request_id)
                         request.status = RequestStatus.WAITING
                         self.kv_cache_manager.free(request)
                     else:
