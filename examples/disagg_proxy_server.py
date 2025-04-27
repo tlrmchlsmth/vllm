@@ -137,10 +137,12 @@ async def handle_completions(request: Request):
 
         # Stream response from decode service
         async def generate_stream():
-            async for chunk in stream_service_response(app.state.decode_client,
-                                                       "/completions",
-                                                       req_data,
-                                                       ):
+            async for chunk in stream_service_response(
+                app.state.decode_client,
+                "/completions",
+                req_data,
+                remote_block_ids=remote_block_ids,
+                remote_engine_id=remote_engine_id):
                 yield chunk
 
         return StreamingResponse(generate_stream(),
