@@ -39,8 +39,7 @@ def test_basic_lifecycle():
     assert len(scheduler_output.num_scheduled_tokens) == 0
     assert scheduler_output.total_num_scheduled_tokens == 0
 
-    # Req waiting for KVs with no computed
-    # or scheduled tokens.
+    # Req waiting for KVs with no computed/scheduled toks ...
     assert len(scheduler.waiting) == 1
     assert request in scheduler.waiting
     assert (request.status == RequestStatus.WAITING_FOR_REMOTE_KVS)
