@@ -18,8 +18,6 @@ def test_basic_lifecycle():
     BLOCK_SIZE = vllm_config.cache_config.block_size
     NUM_EXTERNAL_FULL_BLOCKS = 2
     NUM_TOKENS = int(BLOCK_SIZE * (NUM_EXTERNAL_FULL_BLOCKS + 0.5))
-    START_FREE_BLOCK_QUEUE_SIZE = (
-        scheduler.kv_cache_manager.block_pool.free_block_queue.num_free_blocks)
     
     request = create_request(request_id=1,
                              num_tokens=NUM_TOKENS,
