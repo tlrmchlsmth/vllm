@@ -14,6 +14,38 @@ from vllm.v1.structured_output import StructuredOutputManager
 
 EOS_TOKEN_ID = 50256
 
+def assert_scheduler_empty(scheduler: Scheduler):
+    """Assert Scheduler Is Empty."""
+    # Scheduler Metadata.
+    assert len(scheduler.requests) == 0
+    assert len(scheduler.waiting) == 0
+    assert len(scheduler.running) == 0
+    assert len(scheduler.scheduled_req_ids) == 0
+    assert len(scheduler.finished_req_ids) == 0
+    assert len(scheduler.finished_recving_KV_req_ids) == 0
+    assert len(scheduler._cached_reqs_data) == 0
+    
+    # EncoderCacheManager.
+    assert len(scheduler.encoder_cache_manager.freed) == 0
+    assert len(scheduler.encoder_cache_manager.cached) == 0
+
+    # KVCache Manager.
+    assert len(scheduler.kv_cache_manager.req_to_blocks) == 0
+    assert len(scheduler.kv_cache_manager.req_to_block_hashes) == 0
+    assert len(scheduler.kv_cache_manager.num_cached_block) == 0
+    num_free_blocks = (
+        scheduler.kv_cache_manager.block_pool.free_block_queue.num_free_blocks)
+    assert num_free_blocks == (
+        scheduler.kv_cache_manager.block_pool.num_gpu_blocks - 1)
+    assert (
+        len(scheduler.kv_cache_manager.block_pool.cached_block_hash_to_block) == 0)
+    
+    for block in scheduler.kv_cache_manager.block_pool.blocks:
+        assert block.block_hash is None
+        assert block.ref_cnt == 0
+    
+
+
 def create_vllm_config(
     model: str = "facebook/opt-125m",
     max_num_seqs: int = 16,
