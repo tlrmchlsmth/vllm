@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 import copy
-from typing import Optional
 
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
-from vllm.v1.request import RequestStatus, Request
+from vllm.v1.request import RequestStatus, FinishReason
 
 from .utils import (create_request, create_scheduler,
-                    create_vllm_config, create_model_runner_output)
+                    create_vllm_config, create_model_runner_output,
+                    assert_scheduler_empty)
 
-def test_basic_remote_prefill_cycle():
+def test_basic_lifecycle():
     """Test Remote Prefills Lifecycle."""
 
     vllm_config = create_vllm_config()
@@ -79,6 +79,7 @@ def test_basic_remote_prefill_cycle():
     assert len(scheduler.waiting) == 1
     assert (request_id in scheduler.finished_recving_KV_req_ids)
 
+    # STEP (3):
     # (3a): schedule(): this should actually schedule.
     scheduler_output = scheduler.schedule()
     assert len(scheduler.running) == 1
@@ -97,8 +98,27 @@ def test_basic_remote_prefill_cycle():
     total_prompt_tokens = len(scheduled_req.prompt_token_ids)
     assert (num_scheduled_tokens == total_prompt_tokens - num_computed_tokens)
 
+    # (3b): execute_model()
+    model_runner_output = create_model_runner_output([request])
+    # (3c): update_from_output()
+    scheduler.update_from_output(scheduler_output, model_runner_output)
 
-def test_interleaved_remote_prefill_cycle():
+    # Step (4): Hit EOS.
+    scheduler_output = scheduler.schedule()
+    model_runner_output = create_model_runner_output(
+        [request], use_eos=True)
+    engine_core_outputs = scheduler.update_from_output(
+        scheduler_output, model_runner_output)
+    scheduler.schedule()
+
+    outputs = engine_core_outputs.outputs
+    assert len(outputs) == 1
+    output = outputs[0]
+    assert output.finish_reason == FinishReason.STOP
+    assert_scheduler_empty(scheduler)
+
+
+def test_interleaved_lifecycle():
     """Test Remote Prefills Work Well With Other Requests."""
 
     vllm_config = create_vllm_config()
@@ -184,8 +204,24 @@ def test_interleaved_remote_prefill_cycle():
     assert len(scheduler_output.scheduled_new_reqs) == 1
     assert len(scheduler_output.scheduled_cached_reqs) == 2
 
+    model_runner_output = create_model_runner_output(
+        [request_local_a, request_local_b, request_remote]
+    )
+    scheduler.update_from_output(scheduler_output, model_runner_output)
 
-def test_remote_prefill_no_prefix_cache_uncomputed_blocks():
+    # STEP 6: Hit EOS and free.
+    scheduler_output = scheduler.schedule()
+    model_runner_output = create_model_runner_output(
+        [request_local_a, request_local_b, request_remote],
+        use_eos=True,
+    )
+    scheduler.update_from_output(
+        scheduler_output, model_runner_output)
+    scheduler.schedule()
+    assert_scheduler_empty(scheduler)
+
+
+def test_no_spurious_prefix_caching():
     """
     With P/D, blocks can be allocated but uncomputed for
     multiple engine steps. This test confirms that we do

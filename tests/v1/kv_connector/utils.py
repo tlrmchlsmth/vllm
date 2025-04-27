@@ -165,15 +165,21 @@ def create_model_runner_output(
     reqs: list[Request],
     finished_sending: Optional[list[str]] = None,
     finished_recving: Optional[list[str]] = None,
+    use_eos: bool = False,
 ) -> ModelRunnerOutput:
     """Make dummy model runner output for testing."""
 
+    # Make request data.
     req_ids = [req.request_id for req in reqs]
     req_id_to_index = {
         req_id: idx for idx, req_id in enumerate(req_ids)
     }
-    sampled_token_ids = [[0] for _ in req_ids]
-    
+
+    # Make sampled tokens.
+    sampled_token = EOS_TOKEN_ID if use_eos else 0
+    sampled_token_ids = [[sampled_token] for _ in req_ids]
+
+    # Make output data structure.
     return ModelRunnerOutput(
         req_ids=req_ids,
         req_id_to_index=req_id_to_index,
