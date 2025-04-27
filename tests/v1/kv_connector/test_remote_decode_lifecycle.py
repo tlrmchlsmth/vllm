@@ -8,8 +8,8 @@ from .utils import (create_request, create_scheduler,
                     create_vllm_config, create_model_runner_output,
                     assert_scheduler_empty)
 
-def test_basic_remote_decode_cycle():
-    """Test Remote Decode Lifecycle."""
+def test_remote_decode_cycle():
+    """Test lifecycle of a Remote Decode request."""
 
     vllm_config = create_vllm_config()
     scheduler = create_scheduler(vllm_config)
