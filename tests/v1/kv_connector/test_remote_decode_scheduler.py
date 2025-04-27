@@ -5,7 +5,8 @@ from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
 from vllm.v1.request import RequestStatus, FinishReason
 
 from .utils import (create_request, create_scheduler,
-                    create_vllm_config, create_model_runner_output)
+                    create_vllm_config, create_model_runner_output,
+                    assert_scheduler_empty)
 
 def test_basic_remote_decode_cycle():
     """Test Remote Decode Lifecycle."""
@@ -27,7 +28,7 @@ def test_basic_remote_decode_cycle():
     scheduler.add_request(request)
     request_id = request.request_id
 
-    # STEP (1):
+    # STEP (1): Prefill.
     # (1a): schedule()
     scheduler_output = scheduler.schedule()
     assert len(scheduler.running) == 1
@@ -57,13 +58,37 @@ def test_basic_remote_decode_cycle():
     for block in blocks:
         assert block.ref_cnt == 1
 
-    # STEP (2):
-    # (2a): schedule()
+    # STEP (2): Send Finished to PB.
+    # (2a): schedule() - pass finished request to PB.
     scheduler_output = scheduler.schedule()
     assert len(scheduler.running) == 0
+    assert len(scheduler_output.finished_req_ids) == 1
+    assert request_id in scheduler_output.finished_req_ids
     assert len(scheduler_output.scheduled_new_reqs) == 0
     assert len(scheduler_output.scheduled_cached_reqs) == 0
+    assert len(scheduler.finished_req_ids) == 0
 
-    # model_runner_output = copy.deepcopy(
-    #     EMPTY_MODEL_RUNNER_OUTPUT)
-    # model_runner_output.finished_sending 
+    # (2b): execute_model()
+    model_runner_output = EMPTY_MODEL_RUNNER_OUTPUT
+
+    # (2c): update_from_output()
+    scheduler.update_from_output(scheduler_output, model_runner_output)
+
+    # STEP (3): Finished sending.
+    # (3a): schedule() - pass finished request to PB.
+    scheduler_output = scheduler.schedule()
+    assert len(scheduler.running) == 0
+    assert len(scheduler_output.finished_req_ids) == 0
+    assert len(scheduler_output.scheduled_new_reqs) == 0
+    assert len(scheduler_output.scheduled_cached_reqs) == 0
+    assert len(scheduler.finished_req_ids) == 0
+
+    # (3b): execute_model()
+    model_runner_output = copy.deepcopy(EMPTY_MODEL_RUNNER_OUTPUT)
+    model_runner_output.finished_sending = [request_id]
+
+    # (3c): update_from_output()
+    scheduler.update_from_output(scheduler_output, model_runner_output)
+
+    # Confirm we do not have any memory leaks after req lifecycle.
+    assert_scheduler_empty(scheduler)
