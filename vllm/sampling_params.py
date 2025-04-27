@@ -39,8 +39,12 @@ class KVTransferParams(
     do_remote_prefill: bool = False
 
     @staticmethod
-    def from_optional(do_remote_decode: bool,
-                      do_remote_prefill: bool) -> Optional["KVTransferParams"]:
+    def from_optional(
+        do_remote_decode: bool,
+        do_remote_prefill: bool,
+        remote_engine_id: Optional[str],
+        remote_block_ids: Optional[list[int]],
+    ) -> Optional["KVTransferParams"]:
         if do_remote_decode and do_remote_prefill:
             raise ValueError(
                 "Cannot do both remote prefill and remote decode.")
@@ -48,6 +52,8 @@ class KVTransferParams(
             return KVTransferParams(
                 do_remote_decode=do_remote_decode,
                 do_remote_prefill=do_remote_prefill,
+                remote_engine_id=remote_engine_id,
+                remote_block_ids=remote_block_ids,
             )
         else:
             return None

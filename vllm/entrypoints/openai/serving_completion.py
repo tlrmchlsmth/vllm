@@ -475,13 +475,16 @@ class OpenAIServingCompletion(OpenAIServing):
         )
 
         request_metadata.final_usage_info = usage
-
+        
+        assert len(final_res_batch) == 1
         return CompletionResponse(
             id=request_id,
             created=created_time,
             model=model_name,
             choices=choices,
             usage=usage,
+            remote_engine_id=final_res_batch[0].kv_transfer_params.remote_engine_id,
+            remote_block_ids=final_res_batch[0].kv_transfer_params.remote_block_ids,
         )
 
     def _create_completion_logprobs(

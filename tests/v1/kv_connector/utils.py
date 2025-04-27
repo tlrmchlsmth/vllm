@@ -56,16 +56,6 @@ def create_vllm_config(
     )
 
 
-def create_model_runner(
-    vllm_config: VllmConfig,
-    device: torch.device,
-) -> GPUModelRunner:
-    return GPUModelRunner(
-        vllm_config=vllm_config,
-        device=device,
-    )
-
-
 def create_scheduler(
     vllm_config: VllmConfig,
     num_blocks: int = 10000,
@@ -96,11 +86,11 @@ def create_request(
     do_remote_decode: bool = False,
     do_remote_prefill: bool = False,
     use_all_1s_for_prompt_tokens: bool = False,
-) -> list[Request]:
+) -> Request:
     if do_remote_decode:
         assert not do_remote_prefill
         kv_transfer_params = KVTransferParams(
-            do_remote_prefill=True
+            do_remote_decode=True
         )
     elif do_remote_prefill:
         kv_transfer_params = KVTransferParams(

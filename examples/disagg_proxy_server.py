@@ -98,12 +98,15 @@ async def send_request_to_service(client: httpx.AsyncClient, endpoint: str,
 
 
 async def stream_service_response(client: httpx.AsyncClient, endpoint: str,
-                                  req_data: dict):
+                                  req_data: dict, remote_block_ids: list[int],
+                                  remote_engine_id: str):
     """
     Asynchronously stream the response from a service using a persistent client.
     """
     headers = {"Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}"}
     req_data['do_remote_prefill'] = True
+    req_data["remote_block_ids"] = remote_block_ids
+    req_data['remote_engine_id'] = remote_engine_id
     async with client.stream("POST", endpoint, json=req_data,
                              headers=headers) as response:
         response.raise_for_status()
@@ -121,17 +124,25 @@ async def handle_completions(request: Request):
         req_data = await request.json()
 
         # Send request to prefill service, ignore the response
-        await send_request_to_service(app.state.prefill_client, "/completions",
-                                      req_data)
+        response = await send_request_to_service(
+            app.state.prefill_client,
+            "/completions",
+            req_data
+        )
+        remote_block_ids = response.remote_block_ids
+        remote_engine_id = response.remote_engine_id
 
         et = time.time()
         stats_calculator.add(et - st)
 
         # Stream response from decode service
         async def generate_stream():
-            async for chunk in stream_service_response(app.state.decode_client,
-                                                       "/completions",
-                                                       req_data):
+            async for chunk in stream_service_response(
+                app.state.decode_client,
+                "/completions",
+                req_data,
+                remote_block_ids=remote_block_ids,
+                remote_engine_id=remote_engine_id):
                 yield chunk
 
         return StreamingResponse(generate_stream(),

@@ -816,6 +816,14 @@ class CompletionRequest(OpenAIBaseModel):
         default=False,
         description="KVTransfer parameters used for disaggregated serving.")
 
+    remote_engine_id: Optional[str] = Field(
+        default=None,
+        description="Remote engine id.")
+    
+    remote_block_ids: Optional[list[int]] = Field(
+        default=None,
+        description="Remote block ids.")
+
     # doc: end-completion-extra-params
 
     # Default sampling parameters for completion requests
@@ -916,6 +924,8 @@ class CompletionRequest(OpenAIBaseModel):
         kv_transfer_params = KVTransferParams.from_optional(
             do_remote_decode=self.do_remote_decode,
             do_remote_prefill=self.do_remote_prefill,
+            remote_engine_id=self.remote_engine_id,
+            remote_block_ids=self.remote_block_ids,
         )
 
         import os
