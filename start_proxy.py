@@ -116,6 +116,32 @@ async def stream_service_response(client: httpx.AsyncClient, endpoint: str,
         async for chunk in response.aiter_bytes():
             yield chunk
 
+async def send_request_to_prefill_service(client: httpx.AsyncClient, endpoint: str,
+                                  req_data: dict):
+    """
+    Send a request to a service using a persistent client.
+    """
+    req_data = req_data.copy()
+    req_data['do_remote_decode'] = True
+    req_data["stream"] = False
+    headers = {
+        "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
+        "X-Request-Id": "vllm-d-debug",
+    }
+    response = await client.post(endpoint, json=req_data, headers=headers)
+    response.raise_for_status()
+
+    # Extract and print the actual response content
+    try:
+        response_json = response.json()
+        print(f"Prefill Request Content: {req_data}")
+        print(f"Prefill Response Content: {response_json}")
+    except Exception as e:
+        print(f"Could not parse prefill response as JSON: {e}")
+        print(f"Raw prefill response text: {response.text}")
+
+    return response
+
 
 @app.post("/v1/completions")
 async def handle_completions(request: Request):
@@ -128,8 +154,9 @@ async def handle_completions(request: Request):
         print(req_data)
 
         # Send request to prefill service, ignore the response
-        await send_request_to_service(app.state.prefill_client, "/completions",
+        response = await send_request_to_prefill_service(app.state.prefill_client, "/completions",
                                       req_data)
+        print(response)
 
         et = time.time()
         stats_calculator.add(et - st)

@@ -1045,19 +1045,27 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             return output
 
         # Prepare the decoder inputs.
-        attn_metadata, logits_indices, spec_decode_metadata = (
-            self._prepare_inputs(scheduler_output))
+        num_reqs = self.input_batch.num_reqs
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
-        if (self.use_cuda_graph
-                and num_scheduled_tokens <= self.cudagraph_batch_sizes[-1]):
-            # Use piecewise CUDA graphs.
-            # Add padding to the batch size.
-            num_input_tokens = self.vllm_config.pad_for_cudagraph(
-                num_scheduled_tokens)
+        if num_reqs > 0:
+            attn_metadata, logits_indices, spec_decode_metadata = (
+                self._prepare_inputs(scheduler_output))
+            if (self.use_cuda_graph
+                    and num_scheduled_tokens <= self.cudagraph_batch_sizes[-1]):
+                # Use piecewise CUDA graphs.
+                # Add padding to the batch size.
+                num_input_tokens = self.vllm_config.pad_for_cudagraph(
+                    num_scheduled_tokens)
+            else:
+                # Eager mode.
+                num_input_tokens = num_scheduled_tokens
+            attn_metadata.num_input_tokens = num_input_tokens
         else:
-            # Eager mode.
-            num_input_tokens = num_scheduled_tokens
-        attn_metadata.num_input_tokens = num_input_tokens
+            # This may happen when there are outstanding KV transfers
+            num_input_tokens = 1
+            attn_metadata = None
+            logits_indices = None
+            spec_decode_metadata = None
 
         # _prepare_inputs may reorder the batch, so we must gather multi
         # modal outputs after that to ensure the correct order
@@ -1123,6 +1131,24 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if not get_pp_group().is_last_rank:
             # For mid-pipeline stages, return the hidden states.
             return hidden_states
+
+        if logits_indices is None:
+            # HACK(tms): Early exit
+
+            # Clear KVConnector state after all KVs are generated.
+            if has_kv_transfer_group():
+                get_kv_transfer_group().clear_connector_metadata()
+
+            return ModelRunnerOutput(
+                req_ids=self.input_batch.req_ids,
+                req_id_to_index=self.input_batch.req_id_to_index,
+                sampled_token_ids=[],
+                spec_token_ids=None,
+                logprobs=None,
+                prompt_logprobs_dict={},
+                finished_sending=finished_sending,
+                finished_recving=finished_recving,
+            )
 
         hidden_states = hidden_states[:num_scheduled_tokens]
         sample_hidden_states = hidden_states[logits_indices]

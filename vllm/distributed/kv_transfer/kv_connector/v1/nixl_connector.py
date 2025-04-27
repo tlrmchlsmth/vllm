@@ -71,8 +71,10 @@ class NixlConnectorMetadata(KVConnectorMetadata):
         kv_transfer_params: KVTransferParams,
     ):
         assert request_id not in self.requests
-        assert kv_transfer_params.remote_block_ids is not None
         assert kv_transfer_params.remote_engine_id is not None
+        print(kv_transfer_params.remote_engine_id)
+        assert kv_transfer_params.remote_block_ids is not None
+        print("HERE")
 
         self.requests[request_id] = ReqMeta(
             local_block_ids=local_block_ids,
@@ -450,7 +452,6 @@ class NixlConnectorWorker:
                         blocks_data.append(
                             (base_addr + block_offset + tp_multiplier_offset,
                              dst_block_len, self.rank))
-            print(len(self.kv_caches_base_addr[self.engine_id]))
             logger.debug("Created %s blocks for src engine %s and rank %s",
                          len(blocks_data), self.engine_id, self.rank)
 
@@ -535,10 +536,10 @@ class NixlConnectorWorker:
         """
         for req_id, meta in metadata.requests.items():
             # NOTE: this is non-blocking
-            logger.debug("start_load_kv for request " + req_id)
-            print(meta.local_block_ids)
-            print(meta.remote_block_ids)
-            print(meta.remote_engine_id)
+            logger.debug("start_load_kv for request %s from remote engine %s. "
+                         "Num local_block_ids: %s. Num remote_block_ids: %s. ",
+                         req_id, len(meta.local_block_ids),
+                         len(meta.remote_block_ids), meta.remote_engine_id)
             self._read_blocks(
                 local_block_ids=meta.local_block_ids,
                 remote_block_ids=meta.remote_block_ids,

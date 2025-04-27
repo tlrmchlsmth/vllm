@@ -918,6 +918,11 @@ class CompletionRequest(OpenAIBaseModel):
             do_remote_prefill=self.do_remote_prefill,
         )
 
+        import os
+        print("Setting sampling params in protocol.py")
+        NIXL_ROLE = os.getenv("NIXL_ROLE")
+        kv_transfer_params.remote_engine_id = str(NIXL_ROLE) + " set_in_protocol.py"
+
         return SamplingParams.from_optional(
             n=self.n,
             best_of=self.best_of,
@@ -1347,6 +1352,10 @@ class ChatCompletionResponse(OpenAIBaseModel):
     usage: UsageInfo
     prompt_logprobs: Optional[list[Optional[dict[int, Logprob]]]] = None
 
+    # Add these fields for KV transfer
+    remote_engine_id: Optional[str] = None
+    remote_block_ids: Optional[list[int]] = Field(default_factory=list)
+
 
 class DeltaMessage(OpenAIBaseModel):
     role: Optional[str] = None
@@ -1606,9 +1615,9 @@ class TranscriptionRequest(OpenAIBaseModel):
 
     # doc: begin-transcription-extra-params
     stream: Optional[bool] = False
-    """Custom field not present in the original OpenAI definition. When set, 
+    """Custom field not present in the original OpenAI definition. When set,
     it will enable output to be streamed in a similar fashion as the Chat
-    Completion endpoint. 
+    Completion endpoint.
     """
     # Flattened stream option to simplify form data.
     stream_include_usage: Optional[bool] = False
@@ -1626,7 +1635,7 @@ class TranscriptionRequest(OpenAIBaseModel):
     """
 
     top_p: Optional[float] = None
-    """Enables nucleus (top-p) sampling, where tokens are selected from the 
+    """Enables nucleus (top-p) sampling, where tokens are selected from the
     smallest possible set whose cumulative probability exceeds `p`.
     """
 
@@ -1634,7 +1643,7 @@ class TranscriptionRequest(OpenAIBaseModel):
     """Limits sampling to the `k` most probable tokens at each step."""
 
     min_p: Optional[float] = None
-    """Filters out tokens with a probability lower than `min_p`, ensuring a 
+    """Filters out tokens with a probability lower than `min_p`, ensuring a
     minimum likelihood threshold during sampling.
     """
 
