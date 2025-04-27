@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+from typing import Optional
 import torch
 
 from vllm.config import (CacheConfig, DeviceConfig, KVTransferConfig,
@@ -7,12 +8,12 @@ from vllm.sampling_params import KVTransferParams, SamplingParams
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec)
+from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 EOS_TOKEN_ID = 50256
-
 
 def create_vllm_config(
     model: str = "facebook/opt-125m",
@@ -98,7 +99,9 @@ def create_request(
 ) -> list[Request]:
     if do_remote_decode:
         assert not do_remote_prefill
-        kv_transfer_params = KVTransferParams(do_remote_prefill=True, )
+        kv_transfer_params = KVTransferParams(
+            do_remote_prefill=True
+        )
     elif do_remote_prefill:
         kv_transfer_params = KVTransferParams(
             do_remote_prefill=True,
@@ -131,4 +134,26 @@ def create_request(
         multi_modal_hashes=None,
         eos_token_id=EOS_TOKEN_ID,
         arrival_time=0,
+    )
+
+def create_model_runner_output(
+    reqs: list[Request],
+    finished_sending: Optional[list[str]] = None,
+    finished_recving: Optional[list[str]] = None,
+) -> ModelRunnerOutput:
+    req_ids = [req.request_id for req in reqs]
+    req_id_to_index = {
+        req_id: idx for idx, req_id in enumerate(req_ids)
+    }
+    sampled_token_ids = [[0] for _ in req_ids]
+    
+    return ModelRunnerOutput(
+        req_ids=req_ids,
+        req_id_to_index=req_id_to_index,
+        sampled_token_ids=sampled_token_ids,
+        spec_token_ids=None,
+        logprobs=None,
+        prompt_logprobs_dict={},
+        finished_sending=finished_sending,
+        finished_recving=finished_recving,
     )

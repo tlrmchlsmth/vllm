@@ -766,6 +766,7 @@ class Scheduler(SchedulerInterface):
                 if request.do_remote_decode and not stopped:
                     request.status = RequestStatus.FINISHED_REMOTE_DECODE
                     self._free_request(request, skip_free_blocks=True)
+
                     # TODO(rob): do this on a per-Connector basis.
                     remote_blocks = [
                         block.block_id for block in

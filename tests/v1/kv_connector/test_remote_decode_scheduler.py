@@ -2,11 +2,10 @@
 import copy
 from typing import Optional
 
-from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
+from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
 from vllm.v1.request import RequestStatus, Request
 
-from .utils import (create_request, create_scheduler,
-                    create_vllm_config, create_model_runner_output)
+from .utils import create_request, create_scheduler, create_vllm_config
 
 def test_basic_remote_prefill_cycle():
     """Test Remote Prefills Lifecycle."""
@@ -128,7 +127,7 @@ def test_interleaved_remote_prefill_cycle():
     scheduler_output = scheduler.schedule()
     assert len(scheduler.running) == 1
 
-    model_runner_output = create_model_runner_output(
+    model_runner_output = make_model_runner_output(
         [request_local_a])
     scheduler.update_from_output(scheduler_output,
                                  model_runner_output)
@@ -142,7 +141,7 @@ def test_interleaved_remote_prefill_cycle():
     assert len(scheduler_output.scheduled_new_reqs) == 1
     assert len(scheduler_output.scheduled_cached_reqs) == 1
 
-    model_runner_output = create_model_runner_output(
+    model_runner_output = make_model_runner_output(
         [request_local_a, request_local_b])
     scheduler.update_from_output(scheduler_output,
                                  model_runner_output)
@@ -154,7 +153,7 @@ def test_interleaved_remote_prefill_cycle():
     assert len(scheduler_output.scheduled_new_reqs) == 0
     assert len(scheduler_output.scheduled_cached_reqs) == 2
 
-    model_runner_output = create_model_runner_output(
+    model_runner_output = make_model_runner_output(
         reqs=[request_local_a, request_local_b])
     scheduler.update_from_output(scheduler_output,
                                  model_runner_output)
@@ -170,7 +169,7 @@ def test_interleaved_remote_prefill_cycle():
     assert len(scheduler_output.scheduled_new_reqs) == 0
     assert len(scheduler_output.scheduled_cached_reqs) == 2
 
-    model_runner_output = create_model_runner_output(
+    model_runner_output = make_model_runner_output(
         [request_local_a, request_local_b],
         finished_recving=[request_remote.request_id]
     )
