@@ -47,8 +47,15 @@ def test_basic_remote_decode_cycle():
     assert output.finish_reason == FinishReason.REMOTE_DECODE
     assert output.kv_transfer_params is not None
 
-    # Ensure blocks are not freed.
+    # Request freed in Scheduler and in Persistent Batch.
+    # This causes the request to be freed in the scheduler.
+    
+
+    # This causes the request to be freed in the PB on next step().
+    assert request_id in scheduler.finished_req_ids
+    assert len(scheduler.running) == 0
+
+    # ... but blocks should not be freed.
     blocks = scheduler.kv_cache_manager.req_to_blocks[request_id]
     for block in blocks:
         assert block.ref_cnt == 1
-
