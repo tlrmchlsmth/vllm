@@ -775,6 +775,7 @@ class Scheduler(SchedulerInterface):
                 if request.do_remote_decode and not stopped:
                     request.status = RequestStatus.FINISHED_REMOTE_DECODE
                     self._free_request(request, skip_free_blocks=True)
+                    stopped = True
 
                     # TODO(rob): do this on a per-Connector basis.
                     remote_blocks = [
@@ -786,9 +787,7 @@ class Scheduler(SchedulerInterface):
 
                     kv_transfer_params = KVTransferParams(
                         do_remote_prefill=True,
-                        # put the remote block ids here
                         remote_block_ids=remote_blocks,
-                        # put the enigne id here
                         remote_engine_id=self.connector.engine_id,
                     )
 
