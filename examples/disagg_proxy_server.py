@@ -3,6 +3,7 @@
 import argparse
 import os
 import time
+import uuid
 from contextlib import asynccontextmanager
 
 import httpx
@@ -83,14 +84,17 @@ app.state.decode_client = None
 
 
 async def send_request_to_service(client: httpx.AsyncClient, endpoint: str,
-                                  req_data: dict):
+                                  req_data: dict, request_id: str):
     """
     Send a request to a service using a persistent client.
     """
     req_data = req_data.copy()
     req_data['do_remote_decode'] = True
     req_data["stream"] = False
-    headers = {"Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}"}
+    headers = {
+           "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
+           "X-Request-Id": request_id
+           }
     response = await client.post(endpoint, json=req_data, headers=headers)
     response.raise_for_status()
 
@@ -99,11 +103,14 @@ async def send_request_to_service(client: httpx.AsyncClient, endpoint: str,
 
 async def stream_service_response(client: httpx.AsyncClient, endpoint: str,
                                   req_data: dict, remote_block_ids: list[int],
-                                  remote_engine_id: str):
+                                  remote_engine_id: str, request_id: str):
     """
     Asynchronously stream the response from a service using a persistent client.
     """
-    headers = {"Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}"}
+    headers = {
+           "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
+           "X-Request-Id": request_id
+           }
     req_data['do_remote_prefill'] = True
     req_data["remote_block_ids"] = remote_block_ids
     req_data['remote_engine_id'] = remote_engine_id
@@ -123,9 +130,11 @@ async def handle_completions(request: Request):
     try:
         req_data = await request.json()
 
+        request_id = str(uuid.uuid4())
+
         # Send request to prefill service
         response = await send_request_to_service(
-            app.state.prefill_client, "/completions", req_data)
+            app.state.prefill_client, "/completions", req_data, request_id)
 
         # Extract the needed fields
         response_json = response.json()
@@ -147,7 +156,8 @@ async def handle_completions(request: Request):
                 "/completions",
                 req_data,
                 remote_block_ids=remote_block_ids,
-                remote_engine_id=remote_engine_id):
+                remote_engine_id=remote_engine_id,
+                request_id=request_id):
                 yield chunk
 
         return StreamingResponse(generate_stream(),
