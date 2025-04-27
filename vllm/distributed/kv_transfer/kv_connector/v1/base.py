@@ -201,6 +201,7 @@ class KVConnectorBase_V1(ABC):
 
     @abstractmethod
     def update_state_after_alloc(self, request: "Request",
+                                 block_ids: list[int],
                                  num_external_tokens: int):
         """
         Update KVConnector state after block allocation.

@@ -363,6 +363,16 @@ class Scheduler(SchedulerInterface):
                     self.waiting.popleft()
                     skipped_waiting_requests.appendleft(request)
                     request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
+
+                    # KVConnector: update internal state after allocation.
+                    # This information is used to determine if a load is
+                    # needed for this request.
+                    if self.connector is not None:
+                        self.connector.update_state_after_alloc(
+                            request,
+                            [b.block_id for b in computed_blocks + new_blocks],
+                            num_external_tokens,
+                        )
                     continue
 
                 # Number of tokens to be scheduled.
@@ -404,6 +414,7 @@ class Scheduler(SchedulerInterface):
                 if self.connector is not None:
                     self.connector.update_state_after_alloc(
                         request,
+                        [b.block_id for b in computed_blocks + new_blocks],
                         num_external_tokens,
                     )
 

@@ -97,10 +97,11 @@ class NixlConnector(KVConnectorBase_V1):
             request, num_computed_tokens)
 
     def update_state_after_alloc(self, request: "Request",
+                                 block_ids: list[int],
                                  num_external_tokens: int):
         assert self.connector_scheduler is not None
         return self.connector_scheduler.update_state_after_alloc(
-            request, num_external_tokens)
+            request, block_ids, num_external_tokens)
 
     def build_connector_meta(
         self,
@@ -175,11 +176,13 @@ class NixlConnectorScheduler:
             return 0
 
     def update_state_after_alloc(self, request: "Request",
+                                 block_ids: list[int],
                                  num_external_tokens: int):
         if request.do_remote_decode:
             pass
         if request.do_remote_prefill and num_external_tokens > 0:
-            self._reqs_need_recv[request.request_id] = request
+            self._reqs_need_recv[request.request_id] = (
+                request, block_ids)
 
     def build_connector_meta(
         self,
@@ -188,18 +191,12 @@ class NixlConnectorScheduler:
         meta = NixlConnectorMetadata()
 
         # Loop through scheduled reqs and convert to ReqMeta.
-        for new_req in scheduler_output.scheduled_new_reqs:
-            req = self._reqs_need_recv.pop(new_req.req_id, None)
-            if req is not None:
-                meta.add_new_req(
-                    request_id=new_req.req_id,
-                    local_block_ids=new_req.block_ids,
-                    kv_transfer_params=req.kv_transfer_params,
-                )
-
-        # Invariant: only new requests should need load
-        # and we should get all new requests each step().
-        assert len(self._reqs_need_recv) == 0
+        for req_id, (req, block_ids) in self._reqs_need_recv.items():
+            meta.add_new_req(
+                request_id=req_id,
+                local_block_ids=block_ids,
+                kv_transfer_params=req.kv_transfer_params,
+            )
         return meta
 
 
