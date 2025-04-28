@@ -5,9 +5,10 @@ prefill:
     VLLM_LOGGING_LEVEL="DEBUG" \
     VLLM_WORKER_MULTIPROC_METHOD=spawn \
     VLLM_ENABLE_V1_MULTIPROCESSING=0 \
-    vllm serve meta-llama/Llama-3.2-1B-Instruct \
+    vllm serve meta-llama/Llama-3.1-8B-Instruct \
     --port 8100 \
     --enforce-eager \
+    --disable-log-requests \
     --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
 
 decode:
@@ -17,9 +18,10 @@ decode:
     VLLM_LOGGING_LEVEL="DEBUG" \
     VLLM_WORKER_MULTIPROC_METHOD=spawn \
     VLLM_ENABLE_V1_MULTIPROCESSING=0 \
-    vllm serve meta-llama/Llama-3.2-1B-Instruct \
+    vllm serve meta-llama/Llama-3.1-8B-Instruct \
     --port 8200 \
     --enforce-eager \
+    --disable-log-requests \
     --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
 
 proxy:
@@ -29,7 +31,7 @@ send_request:
   curl -X POST http://localhost:8192/v1/completions \
     -H "Content-Type: application/json" \
     -d '{ \
-      "model": "meta-llama/Llama-3.2-1B-Instruct", \
+      "model": "meta-llama/Llama-3.1-8B-Instruct", \
       "prompt": "Generate a curl command to send to an openai server hosted at local_host:8192 with this as the", \
       "max_tokens": 150, \
       "temperature": 0.7 \
