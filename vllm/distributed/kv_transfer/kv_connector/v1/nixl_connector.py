@@ -493,16 +493,16 @@ class NixlConnectorWorker:
                 len(done_recving))
         return done_sending, done_recving
 
-    def _get_new_notifs(self) -> list[str]:
+    def _get_new_notifs(self) -> set[str]:
         """Get req_ids which got a remote xfer message."""
 
-        notified_req_ids: list[str] = []
+        notified_req_ids: set[str] = set()
         # TODO: handle the TP case (N notifies for TP=N).
         # See: vllm/worker/worker_base.py L476 in DynamoPR.
         for req_ids in self.nixl_wrapper.get_new_notifs().values():
             for req_id in req_ids:
                 assert req_id not in notified_req_ids
-                notified_req_ids.append(req_id.decode("utf-8"))
+                notified_req_ids.add(req_id.decode("utf-8"))
         return notified_req_ids
 
     def _pop_done_transfers(self, transfers: dict[str, list[int]]) -> set[str]:
