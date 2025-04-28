@@ -1,9 +1,3 @@
-notes:
-    UCX_RNDV_THRESH=0    # Force rendezvous protocol for all messages
-    UCX_MEMTYPE_CACHE=n  # Disable memory type caching
-    UCX_TLS=rc,ud,dc,cuda_copy,cuda_ipc,gdr_copy  # Prioritize RDMA transports
-    UCX_ZCOPY_THRESH=0   # Force zero-copy for all sizes
-
 prefill:
     UCX_LOG_LEVEL=debug \
     NIXL_ROLE="SENDER" \
@@ -14,7 +8,6 @@ prefill:
     vllm serve meta-llama/Llama-3.2-1B-Instruct \
     --port 8100 \
     --enforce-eager \
-    --load-format dummy \
     --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
 
 decode:
@@ -27,7 +20,6 @@ decode:
     vllm serve meta-llama/Llama-3.2-1B-Instruct \
     --port 8200 \
     --enforce-eager \
-    --load-format dummy \
     --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
 
 proxy:
