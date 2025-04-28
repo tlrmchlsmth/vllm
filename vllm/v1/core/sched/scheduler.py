@@ -779,12 +779,12 @@ class Scheduler(SchedulerInterface):
                     stopped = True
 
                     # TODO(rob): do this on a per-Connector basis.
+                    # TODO(tms): Should this be get_computed_blocks to only send full blocks?
                     remote_blocks = [
                         block.block_id for block in
-                        self.kv_cache_manager.req_to_blocks[request.request_id]
+                        #self.kv_cache_manager.req_to_blocks[request.request_id]
+                        self.kv_cache_manager.get_computed_blocks(request)[0]
                     ]
-                    # HACK(tms) - we're off by one between prefill an decode
-                    remote_blocks.pop()
 
                     kv_transfer_params = KVTransferParams(
                         do_remote_prefill=True,

@@ -32,7 +32,7 @@ send_request:
     -H "Content-Type: application/json" \
     -d '{ \
       "model": "meta-llama/Llama-3.1-8B-Instruct", \
-      "prompt": "Generate a curl command to send to an openai server hosted at local_host:8192 with this as the", \
+      "prompt": "EXPLAIN KERMIT THE FROG", \
       "max_tokens": 150, \
       "temperature": 0.7 \
     }'

@@ -572,6 +572,11 @@ class NixlConnectorWorker:
 
         # NOTE(rob): we could potentially do the rearranging during the load_kv!
 
+        # Note(tms): The remote_block_ids only contain full computed blocks,
+        # while the local_block_ids are all blocks allocated for this request,
+        # so truncate the local_block_ids to account for this.
+        if len(remote_block_ids) < len(local_block_ids):
+            local_block_ids = local_block_ids[:len(remote_block_ids)]
         assert len(local_block_ids) == len(remote_block_ids)
         if len(local_block_ids) == 0:
             return
