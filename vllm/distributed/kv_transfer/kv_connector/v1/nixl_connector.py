@@ -189,8 +189,7 @@ class NixlConnectorScheduler:
         if request.do_remote_decode:
             pass
         if request.do_remote_prefill and num_external_tokens > 0:
-            self._reqs_need_recv[request.request_id] = (
-                request, block_ids)
+            self._reqs_need_recv[request.request_id] = (request, block_ids)
 
     def build_connector_meta(
         self,
@@ -285,6 +284,8 @@ class NixlConnectorWorker:
         # Disadvantage is that the encoded NixlAgentMetadata is now larger
         # (roughly 8KB vs 5KB).
         for layer_name in kv_caches:
+            print(f"{layer_name=}")
+            print(len(kv_caches[layer_name]))
             for cache in kv_caches[layer_name]:
                 base_addr = cache.data_ptr()
                 region_len = num_blocks * self.block_len
@@ -329,7 +330,7 @@ class NixlConnectorWorker:
         remote_engine_id = None  # HACK for debug send
 
         if NIXL_ROLE == "SENDER":
-            _side_channel.connect("tcp://localhost:5577")
+            _side_channel.connect("tcp://localhost:5578")
             _side_channel.setsockopt(zmq.LINGER, 0)  # type: ignore
             metadata = NixlAgentMetadata(
                 engine_id=self.engine_id,
@@ -349,13 +350,14 @@ class NixlConnectorWorker:
             logger.debug("GOT ACK %s", ack)
 
         elif NIXL_ROLE == "RECVER":
-            _side_channel.bind("tcp://localhost:5577")
+            _side_channel.bind("tcp://localhost:5578")
             _side_channel.setsockopt(zmq.LINGER, 0)  # type: ignore
             decoder = msgspec.msgpack.Decoder(NixlAgentMetadata)
             metadata_bytes = _side_channel.recv()
             metadata = decoder.decode(metadata_bytes)
 
             remote_engine_id = metadata.engine_id  #HACK
+            print(f"{remote_engine_id=}")
 
             self.add_remote_agent(metadata)
             print("SENDING ACK")
@@ -437,7 +439,8 @@ class NixlConnectorWorker:
             return
 
         num_blocks = nixl_agent_meta.num_blocks
-        logger.debug("Adding remote agent " + engine_id + " " + str(num_blocks))
+        logger.debug("Adding remote agent " + engine_id + " " +
+                     str(num_blocks))
 
         agent_names = []
         agent_name = self.nixl_wrapper.add_remote_agent(
@@ -550,11 +553,11 @@ class NixlConnectorWorker:
         """
         for req_id, meta in metadata.requests.items():
             # NOTE: this is non-blocking
-            logger.debug("start_load_kv for request %s from remote engine %s. "
-                         "Num local_block_ids: %s. Num remote_block_ids: %s. ",
-                         req_id, meta.remote_engine_id,
-                         len(meta.local_block_ids),
-                         len(meta.remote_block_ids))
+            logger.debug(
+                "start_load_kv for request %s from remote engine %s. "
+                "Num local_block_ids: %s. Num remote_block_ids: %s. ", req_id,
+                meta.remote_engine_id, len(meta.local_block_ids),
+                len(meta.remote_block_ids))
             self._read_blocks(
                 local_block_ids=meta.local_block_ids,
                 remote_block_ids=meta.remote_block_ids,
@@ -599,6 +602,7 @@ class NixlConnectorWorker:
         # Read the data from the remote.
         for i in range(tp_multiplier):
             local_block_descs_ids = self._get_block_descs_ids(
+                # self.engine_id,
                 dst_engine_id,
                 "all",
                 local_block_ids,
@@ -645,7 +649,7 @@ class NixlConnectorWorker:
                                       "the same TP size.")
         else:
             num_blocks = self.dst_num_blocks[engine_id]
-            for layer_id in 2 * layer_ids:
+            for layer_id in range(2 * len(layer_ids)):
                 for block_id in block_ids:
                     descs_ids.append(layer_id * num_blocks + block_id)
         return descs_ids

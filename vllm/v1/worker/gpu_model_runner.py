@@ -1036,13 +1036,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 #     forward_context = get_forward_context()
                 #     print("\n\n================================================")
                 #     for layer_name in forward_context.no_compile_layers:
-                        
+
                 #         attn_layer = forward_context.no_compile_layers[layer_name]
                 #         kv_cache_layer = attn_layer.kv_cache[\
                 #                 forward_context.virtual_engine]
                 #         print(f"{layer_name=}: {kv_cache_layer[0, 1, 0, 0, 0].item()=}")
                 #     print("================================================\n\n")
-
                 # return finished_recving, finished_sending
             else:
                 return [], []
