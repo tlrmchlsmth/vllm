@@ -552,10 +552,10 @@ class NixlConnectorWorker:
         for req_id, meta in metadata.requests.items():
             # NOTE: this is non-blocking
             logger.debug(
-                "start_load_kv for request %s from remote engine %s. "
-                "Num local_block_ids: %s. Num remote_block_ids: %s. ", req_id,
-                meta.remote_engine_id, len(meta.local_block_ids),
-                len(meta.remote_block_ids))
+                    "start_load_kv for request %s from remote engine %s. "
+                    "Num local_block_ids: %s. Num remote_block_ids: %s. ", req_id,
+                    meta.remote_engine_id, len(meta.local_block_ids),
+                    len(meta.remote_block_ids))
             self._read_blocks(
                 local_block_ids=meta.local_block_ids,
                 remote_block_ids=meta.remote_block_ids,
