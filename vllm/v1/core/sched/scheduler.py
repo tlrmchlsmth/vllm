@@ -303,7 +303,8 @@ class Scheduler(SchedulerInterface):
                         self.kv_cache_manager.cache_blocks(
                             request,
                             num_tokens=0,
-                            num_computed_tokens=(len(request.all_token_ids) - 1))
+                            num_computed_tokens=(len(request.all_token_ids) - 1)
+                        )
                         self.finished_recving_KV_req_ids.remove(request.request_id)
                         request.status = RequestStatus.WAITING
                         self.kv_cache_manager.free(request)
@@ -687,7 +688,7 @@ class Scheduler(SchedulerInterface):
                 continue
 
 
-            if req_id not in model_runner_output.req_id_to_index:
+            if not req_id in model_runner_output.req_id_to_index:
                 print(req_id)
                 print(model_runner_output.req_id_to_index)
                 continue
