@@ -551,11 +551,10 @@ class NixlConnectorWorker:
         """
         for req_id, meta in metadata.requests.items():
             # NOTE: this is non-blocking
-            logger.debug(
-                    "start_load_kv for request %s from remote engine %s. "
-                    "Num local_block_ids: %s. Num remote_block_ids: %s. ", req_id,
-                    meta.remote_engine_id, len(meta.local_block_ids),
-                    len(meta.remote_block_ids))
+            logger.debug("start_load_kv for request %s from remote engine %s. "
+                         "Num local_block_ids: %s. Num remote_block_ids: %s. ", req_id,
+                         meta.remote_engine_id, len(meta.local_block_ids),
+                         len(meta.remote_block_ids))
             self._read_blocks(
                 local_block_ids=meta.local_block_ids,
                 remote_block_ids=meta.remote_block_ids,
@@ -570,9 +569,6 @@ class NixlConnectorWorker:
         dst_engine_id: str,
         request_id: str,
     ):
-        print(f"{local_block_ids=}")
-        print(f"{remote_block_ids=}")
-
         # NOTE(rob): having the staging blocks be on the READER side is
         # not going to work well (since we will have to call rearrange tensors).
         # after we detect the txn is complete (which means we cannot make the
