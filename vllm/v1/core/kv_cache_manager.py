@@ -301,7 +301,7 @@ class KVCacheManager:
         new_computed_blocks: Optional[list[KVCacheBlock]] = None,
     ):
         if new_computed_blocks is None:
-            new_computed_blocks = []    
+            new_computed_blocks = []
 
         req_blocks = self.req_to_blocks[request.request_id]
 
