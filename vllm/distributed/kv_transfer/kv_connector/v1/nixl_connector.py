@@ -233,7 +233,6 @@ class NixlConnectorWorker:
         self.rank = 0
 
         # KV Caches and nixl tracking data.
-        self.num_layers: int = 0
         self.kv_caches: dict[str, torch.Tensor] = {}
 
         # Map of engine_id -> kv_caches_base_addr
@@ -242,6 +241,10 @@ class NixlConnectorWorker:
         # KV_CACHES_ADDR_TYPE = Union[list[tuple[int, int]],
         #                             list[list[tuple[int, int]]]]
         self.kv_caches_base_addr: dict[str, list[int]] = {}
+
+        # Number of NIXL regions. Currently one region per cache
+        # (so 1 per layer for MLA, otherwise 2 per layer)
+        self.num_regions = 0
 
         # Map of tp_mult -> nixl_prepped_dlist_handle (int).
         self.src_xfer_side_handles: dict[int, int] = {}
@@ -272,7 +275,6 @@ class NixlConnectorWorker:
         self.block_len = kv_elem_size * math.prod(first_kv_cache.shape[-3:])
 
         logger.debug("Per layer kv cache size: %s", first_kv_cache[0].shape)
-        self.num_layers = len(kv_caches)
         self.num_blocks = num_blocks
         self.kv_caches = kv_caches
         kv_caches_base_addr = []
@@ -291,6 +293,7 @@ class NixlConnectorWorker:
                 caches_data.append((base_addr, region_len, self.rank, ""))
                 kv_caches_base_addr.append(base_addr)
         self.kv_caches_base_addr[self.engine_id] = kv_caches_base_addr
+        self.num_regions = len(caches_data)
 
         descs = self.nixl_wrapper.get_reg_descs(caches_data, "VRAM")
         logger.debug("Registering descs: %s", caches_data)
@@ -618,16 +621,16 @@ class NixlConnectorWorker:
 
     def _get_block_descs_ids(self,
                              engine_id,
-                             layer_ids,
+                             region_ids,
                              block_ids,
                              i=None,
                              tp_multiplier=1,
                              staging_ranges=None):
 
-        if layer_ids == "all":
-            layer_ids = list(range(self.num_layers))
+        if region_ids == "all":
+            region_ids = range(self.num_regions)
         if block_ids == "all":
-            block_ids = list(range(self.num_blocks))
+            block_ids = range(self.num_blocks)
 
         descs_ids = []
 
@@ -636,7 +639,7 @@ class NixlConnectorWorker:
                                       "the same TP size.")
         else:
             num_blocks = self.dst_num_blocks[engine_id]
-            for layer_id in 2 * layer_ids:
+            for reg_id in region_ids:
                 for block_id in block_ids:
-                    descs_ids.append(layer_id * num_blocks + block_id)
+                    descs_ids.append(reg_id * num_blocks + block_id)
         return descs_ids
