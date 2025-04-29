@@ -22,7 +22,7 @@ def main():
     completion = client.completions.create(
         model="meta-llama/Llama-3.1-8B-Instruct",
         prompt=
-        "The absolute best part about working for Red Hat is that we get to work on open source software. Red Hat is a leader in many key open source infrastructure technologies like Linux, Kubernetes, and recently vLLM, which means that there is a lot of opportunity to work with community and customers on key infrastructure projects. This means",  # noqa: E501,
+        "The absolute best part about working for Red Hat is that we get to work on open source software. Red Hat is a leader in many key open source infrastructure technologies like Linux, Kubernetes, and recently vLLM, which means that there is a lot of opportunity to work with community and customers on key infrastructure projects. This means",  # noqa: E501
         echo=False,
         stream=stream)
 
