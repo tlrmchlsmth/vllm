@@ -25,19 +25,13 @@ def main():
         model="meta-llama/Llama-3.1-8B-Instruct",
         prompt=PROMPT,
         echo=False,
-        max_tokens=100,
         stream=stream)
 
     print("-" * 50)
     print("Completion results:")
     if stream:
-        text = ""
         for c in completion:
             print(c)
-            text += c.choices[0].text
-        
-        print("\n")
-        print(text)
     else:
         print(completion)
     print("-" * 50)
