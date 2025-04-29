@@ -8,7 +8,6 @@ openai_api_base = "http://localhost:8192/v1"
 
 
 PROMPT = "Question: Janet’s ducks lay 16 eggs per day. She eats three for breakfast every morning and bakes muffins for her friends every day with four. She sells the remainder at the farmers' market daily for $2 per fresh duck egg. How much in dollars does she make every day at the farmers' market? Answer:"
-PROMPT = "The best part about working for Red Hat is that I get to work on open source projects like vLLM"
 
 def main():
     client = OpenAI(

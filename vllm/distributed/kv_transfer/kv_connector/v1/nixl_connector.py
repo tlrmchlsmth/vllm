@@ -134,15 +134,6 @@ class NixlConnector(KVConnectorBase_V1):
         assert self.connector_worker is not None
         assert isinstance(self._connector_metadata, NixlConnectorMetadata)
         self.connector_worker.start_load_kv(self._connector_metadata)
-        # print("HERE!!!!!")
-        # for layer_name in forward_context.no_compile_layers:
-        #     attn_layer = forward_context.no_compile_layers[layer_name]
-        #     kv_cache_layer = attn_layer.kv_cache[\
-        #             forward_context.virtual_engine]
-        #     for b in range(1,5):
-        #         print(f"{b}: {kv_cache_layer[0, b, 0, 0, 0]=}")
-        #         print(f"{b}: {kv_cache_layer[1, b, 0, 0, 0]=}")
-        #     break
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         """NixlConnector does not do layerwise saving."""
