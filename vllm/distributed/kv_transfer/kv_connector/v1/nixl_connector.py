@@ -437,8 +437,7 @@ class NixlConnectorWorker:
             return
 
         num_blocks = nixl_agent_meta.num_blocks
-        logger.debug("Adding remote agent " + engine_id + " " +
-                     str(num_blocks))
+        logger.debug("Adding remote agent " + engine_id + " " + str(num_blocks))
 
         agent_names = []
         agent_name = self.nixl_wrapper.add_remote_agent(
