@@ -198,7 +198,8 @@ class NixlConnectorScheduler:
         if request.do_remote_decode:
             pass
         if request.do_remote_prefill and num_external_tokens > 0:
-            self._reqs_need_recv[request.request_id] = (request, block_ids)
+            self._reqs_need_recv[request.request_id] = (
+                request, block_ids)
 
     def build_connector_meta(
         self,
