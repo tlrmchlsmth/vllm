@@ -261,7 +261,6 @@ class NixlConnectorWorker:
         """Register the KV Cache data in nixl."""
 
         first_layer_name = next(iter(kv_caches))
-
         first_kv_cache = kv_caches[first_layer_name]
 
         # [2 (k and v), num_blocks, ...]
