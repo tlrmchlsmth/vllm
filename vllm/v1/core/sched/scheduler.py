@@ -879,8 +879,7 @@ class Scheduler(SchedulerInterface):
             request.status = finished_status
             self._free_request(request)
 
-    def _free_request(self,
-                      request: Request,
+    def _free_request(self, request: Request,
                       skip_free_blocks: bool = False) -> None:
         assert request.is_finished()
         self.encoder_cache_manager.free(request)
