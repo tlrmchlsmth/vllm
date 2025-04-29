@@ -192,7 +192,7 @@ class Scheduler(SchedulerInterface):
             # Schedule encoder inputs.
             if request.has_encoder_inputs:
                 (encoder_inputs_to_schedule, num_new_tokens,
-                 new_encoder_budget) = self._try_schedule_encoder_inputs(
+                    new_encoder_budget) = self._try_schedule_encoder_inputs(
                      request, request.num_computed_tokens, num_new_tokens,
                      encoder_budget)
                 if num_new_tokens == 0:
@@ -402,9 +402,9 @@ class Scheduler(SchedulerInterface):
                 # Schedule encoder inputs.
                 if request.has_encoder_inputs:
                     (encoder_inputs_to_schedule, num_new_tokens,
-                     new_encoder_budget) = self._try_schedule_encoder_inputs(
-                         request, num_computed_tokens, num_new_tokens,
-                         encoder_budget)
+                        new_encoder_budget) = self._try_schedule_encoder_inputs(
+                            request, num_computed_tokens, num_new_tokens,
+                            encoder_budget)
                     if num_new_tokens == 0:
                         # The request cannot be scheduled.
                         break
@@ -697,6 +697,7 @@ class Scheduler(SchedulerInterface):
                 # The request was not scheduled in this step.
                 new_running.append(request)
                 continue
+
 
             if req_id not in model_runner_output.req_id_to_index:
                 print(req_id)
