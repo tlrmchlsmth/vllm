@@ -32,6 +32,7 @@ from vllm.v1.structured_output import StructuredOutputManager
 
 logger = init_logger(__name__)
 
+
 class Scheduler(SchedulerInterface):
 
     def __init__(
@@ -303,9 +304,15 @@ class Scheduler(SchedulerInterface):
                         self.kv_cache_manager.cache_blocks(
                             request,
                             num_tokens=0,
-                            num_computed_tokens=(len(request.all_token_ids) - 1)
+                            num_computed_tokens=(len(request.all_token_ids) -
+                                                 1))
+                        print(f"{(len(request.all_token_ids) - 1)=}")
+                        print(
+                            f"{self.kv_cache_manager.num_cached_block[request.request_id]=}"
                         )
-                        self.finished_recving_KV_req_ids.remove(request.request_id)
+
+                        self.finished_recving_KV_req_ids.remove(
+                            request.request_id)
                         request.status = RequestStatus.WAITING
                         self.kv_cache_manager.free(request)
                     else:
@@ -345,6 +352,11 @@ class Scheduler(SchedulerInterface):
                     self.connector.get_num_new_matched_tokens(
                         request, num_computed_tokens))
 
+                print(f"{num_computed_tokens=}")
+                print(f"{len(computed_blocks)=}")
+                print(f"{computed_blocks=}")
+                print(f"{num_external_tokens=}")
+
                 # Total computed tokens (local + external).
                 num_computed_tokens += num_external_tokens
 
@@ -380,8 +392,8 @@ class Scheduler(SchedulerInterface):
                 # `request.num_prompt_tokens` to consider the resumed reqs,
                 # which have output tokens.
                 num_new_tokens = request.num_tokens - num_computed_tokens
-                if (0 < self.scheduler_config.long_prefill_token_threshold
-                        < num_new_tokens):
+                if (0 < self.scheduler_config.long_prefill_token_threshold <
+                        num_new_tokens):
                     num_new_tokens = (
                         self.scheduler_config.long_prefill_token_threshold)
                 num_new_tokens = min(num_new_tokens, token_budget)
@@ -390,10 +402,9 @@ class Scheduler(SchedulerInterface):
                 # Schedule encoder inputs.
                 if request.has_encoder_inputs:
                     (encoder_inputs_to_schedule, num_new_tokens,
-                        new_encoder_budget
-                        ) = self._try_schedule_encoder_inputs(
-                            request, num_computed_tokens, num_new_tokens,
-                            encoder_budget)
+                     new_encoder_budget) = self._try_schedule_encoder_inputs(
+                         request, num_computed_tokens, num_new_tokens,
+                         encoder_budget)
                     if num_new_tokens == 0:
                         # The request cannot be scheduled.
                         break
@@ -687,8 +698,7 @@ class Scheduler(SchedulerInterface):
                 new_running.append(request)
                 continue
 
-
-            if not req_id in model_runner_output.req_id_to_index:
+            if req_id not in model_runner_output.req_id_to_index:
                 print(req_id)
                 print(model_runner_output.req_id_to_index)
                 continue
@@ -869,7 +879,8 @@ class Scheduler(SchedulerInterface):
             request.status = finished_status
             self._free_request(request)
 
-    def _free_request(self, request: Request,
+    def _free_request(self,
+                      request: Request,
                       skip_free_blocks: bool = False) -> None:
         assert request.is_finished()
         self.encoder_cache_manager.free(request)

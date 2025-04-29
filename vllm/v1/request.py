@@ -72,6 +72,7 @@ class Request:
         #TODO: need to get the remote_engine_id and
         # remote block_ids
         self.kv_transfer_params = sampling_params.kv_transfer_params
+        print(f"{self.kv_transfer_params=}")
 
         # Sanity check
         assert len(self.mm_inputs) == len(self.mm_positions)

@@ -7,6 +7,9 @@ openai_api_key = "EMPTY"
 openai_api_base = "http://localhost:8192/v1"
 
 
+PROMPT = "Question: Janet’s ducks lay 16 eggs per day. She eats three for breakfast every morning and bakes muffins for her friends every day with four. She sells the remainder at the farmers' market daily for $2 per fresh duck egg. How much in dollars does she make every day at the farmers' market? Answer:"
+PROMPT = "The best part about working for Red Hat is that I get to work on open source projects like vLLM"
+
 def main():
     client = OpenAI(
         # defaults to os.environ.get("OPENAI_API_KEY")
@@ -18,19 +21,24 @@ def main():
     # model = models.data[0].id
 
     # Completion API
-    stream = True
+    stream = False
     completion = client.completions.create(
         model="meta-llama/Llama-3.1-8B-Instruct",
-        prompt=
-        "The absolute best part about working for Red Hat is that we get to work on open source software. Red Hat is a leader in many key open source infrastructure technologies like Linux, Kubernetes, and recently vLLM, which means that there is a lot of opportunity to work with community and customers on key infrastructure projects. This means",  # noqa: E501
+        prompt=PROMPT,
         echo=False,
+        max_tokens=100,
         stream=stream)
 
     print("-" * 50)
     print("Completion results:")
     if stream:
+        text = ""
         for c in completion:
             print(c)
+            text += c.choices[0].text
+        
+        print("\n")
+        print(text)
     else:
         print(completion)
     print("-" * 50)

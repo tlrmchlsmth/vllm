@@ -133,7 +133,17 @@ class NixlConnector(KVConnectorBase_V1):
                       **kwargs) -> None:
         assert self.connector_worker is not None
         assert isinstance(self._connector_metadata, NixlConnectorMetadata)
+        
         self.connector_worker.start_load_kv(self._connector_metadata)
+        # print("HERE!!!!!")
+        # for layer_name in forward_context.no_compile_layers:
+        #     attn_layer = forward_context.no_compile_layers[layer_name]
+        #     kv_cache_layer = attn_layer.kv_cache[\
+        #             forward_context.virtual_engine]
+        #     for b in range(1,5):
+        #         print(f"{b}: {kv_cache_layer[0, b, 0, 0, 0]=}")
+        #         print(f"{b}: {kv_cache_layer[1, b, 0, 0, 0]=}")
+        #     break
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         """NixlConnector does not do layerwise saving."""
@@ -261,6 +271,7 @@ class NixlConnectorWorker:
         """Register the KV Cache data in nixl."""
 
         first_layer_name = next(iter(kv_caches))
+
         first_kv_cache = kv_caches[first_layer_name]
 
         # [2 (k and v), num_blocks, ...]
@@ -290,6 +301,7 @@ class NixlConnectorWorker:
                 region_len = num_blocks * self.block_len
                 caches_data.append((base_addr, region_len, self.rank, ""))
                 kv_caches_base_addr.append(base_addr)
+        last_layer_name = layer_name
         self.kv_caches_base_addr[self.engine_id] = kv_caches_base_addr
 
         descs = self.nixl_wrapper.get_reg_descs(caches_data, "VRAM")
@@ -314,12 +326,16 @@ class NixlConnectorWorker:
             for b in range(n_blocks_to_send):
                 kv_caches[first_layer_name][0, b, 0, 0, 0] = b + 100.0
                 kv_caches[first_layer_name][1, b, 0, 0, 0] = b + 200.0
+                kv_caches[last_layer_name][0, b, 0, 0, 0] = b + 100.0
+                kv_caches[last_layer_name][1, b, 0, 0, 0] = b + 200.0
         for b in range(5):
             print(
-                f"{NIXL_ROLE} KV_CACHE block b val {kv_caches[first_layer_name][0, b, 0, 0, 0]}"  #noqa
+                f"{NIXL_ROLE} KV_CACHE block {b} val {kv_caches[first_layer_name][0, b, 0, 0, 0]=}\n"  #noqa
+                f"{NIXL_ROLE} KV_CACHE block {b} val {kv_caches[last_layer_name][0, b, 0, 0, 0]=}"  #noqa
             )
             print(
-                f"{NIXL_ROLE} KV_CACHE block b val {kv_caches[first_layer_name][1, b, 0, 0, 0]}"  #noqa
+                f"{NIXL_ROLE} KV_CACHE block {b} val {kv_caches[first_layer_name][1, b, 0, 0, 0]=}\n"  #noqa
+                f"{NIXL_ROLE} KV_CACHE block {b} val {kv_caches[last_layer_name][0, b, 0, 0, 0]=}"  #noqa
             )
         remote_engine_id = None  # HACK for debug send
 
@@ -413,13 +429,17 @@ class NixlConnectorWorker:
                 for b in range(n_blocks_to_send):
                     kv_caches[first_layer_name][0, b, 0, 0, 0] = b + 300.0
                     kv_caches[first_layer_name][1, b, 0, 0, 0] = b + 400.0
+                    kv_caches[last_layer_name][0, b, 0, 0, 0] = b + 300.0
+                    kv_caches[last_layer_name][1, b, 0, 0, 0] = b + 400.0
 
         for b in range(5):
             print(
-                f"{NIXL_ROLE} KV_CACHE block b val {kv_caches[first_layer_name][0, b, 0, 0, 0]}"  #noqa
+                f"{NIXL_ROLE} KV_CACHE block {b} val {kv_caches[first_layer_name][0, b, 0, 0, 0]=}\n"  #noqa
+                f"{NIXL_ROLE} KV_CACHE block {b} val {kv_caches[last_layer_name][0, b, 0, 0, 0]=}\n"  #noqa
             )
             print(
-                f"{NIXL_ROLE} KV_CACHE block b val {kv_caches[first_layer_name][1, b, 0, 0, 0]}"  #noqa
+                f"{NIXL_ROLE} KV_CACHE block {b} val {kv_caches[first_layer_name][1, b, 0, 0, 0]=}\n"  #noqa
+                f"{NIXL_ROLE} KV_CACHE block {b} val {kv_caches[last_layer_name][0, b, 0, 0, 0]=}\n"  #noqa
             )
 
     def add_remote_agent(self, nixl_agent_meta: NixlAgentMetadata, tp_idx=0):
@@ -560,6 +580,9 @@ class NixlConnectorWorker:
         dst_engine_id: str,
         request_id: str,
     ):
+        print(f"{local_block_ids=}")
+        print(f"{remote_block_ids=}")
+
         # NOTE(rob): having the staging blocks be on the READER side is
         # not going to work well (since we will have to call rearrange tensors).
         # after we detect the txn is complete (which means we cannot make the

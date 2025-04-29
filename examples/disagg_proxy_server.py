@@ -133,6 +133,7 @@ async def handle_completions(request: Request):
         request_id = str(uuid.uuid4())
 
         # Send request to prefill service
+        print(f"{req_data["prompt"]}=")
         response = await send_request_to_service(
             app.state.prefill_client, "/completions", req_data, request_id)
 
@@ -141,10 +142,6 @@ async def handle_completions(request: Request):
         remote_block_ids = response_json.get('remote_block_ids', [])
         remote_engine_id = response_json.get('remote_engine_id', '')
         print("Prefiller response:\n" + str(response_json))
-
-        # Add these to the request data for the decoder
-        req_data['remote_block_ids'] = remote_block_ids
-        req_data['remote_engine_id'] = remote_engine_id
 
         et = time.time()
         stats_calculator.add(et - st)

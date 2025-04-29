@@ -1028,6 +1028,22 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if has_kv_transfer_group():
                 kv_connector = get_kv_transfer_group()
                 return kv_connector.get_finished()
+                # finished_recving, finished_sending = kv_connector.get_finished()
+
+                # if len(finished_sending) > 0 or len(finished_recving) > 0:
+                #     print(f"{len(finished_sending)=}")
+                #     print(f"{len(finished_recving)=}")
+                #     forward_context = get_forward_context()
+                #     print("\n\n================================================")
+                #     for layer_name in forward_context.no_compile_layers:
+                        
+                #         attn_layer = forward_context.no_compile_layers[layer_name]
+                #         kv_cache_layer = attn_layer.kv_cache[\
+                #                 forward_context.virtual_engine]
+                #         print(f"{layer_name=}: {kv_cache_layer[0, 1, 0, 0, 0].item()=}")
+                #     print("================================================\n\n")
+
+                # return finished_recving, finished_sending
             else:
                 return [], []
 
