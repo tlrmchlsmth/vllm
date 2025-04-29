@@ -111,5 +111,5 @@ EMPTY_MODEL_RUNNER_OUTPUT = ModelRunnerOutput(req_ids=[],
                                               spec_token_ids=None,
                                               logprobs=None,
                                               prompt_logprobs_dict={},
-                                              finished_sending=[],
-                                              finished_recving=[])
+                                              finished_sending=None,
+                                              finished_recving=None)

@@ -1029,7 +1029,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 kv_connector = get_kv_transfer_group()
                 return kv_connector.get_finished()
             else:
-                return [], []
+                return set(), set()
 
         self._update_states(scheduler_output)
         if not scheduler_output.total_num_scheduled_tokens:

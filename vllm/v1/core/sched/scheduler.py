@@ -32,6 +32,7 @@ from vllm.v1.structured_output import StructuredOutputManager
 
 logger = init_logger(__name__)
 
+
 class Scheduler(SchedulerInterface):
 
     def __init__(
@@ -303,9 +304,10 @@ class Scheduler(SchedulerInterface):
                         self.kv_cache_manager.cache_blocks(
                             request,
                             num_tokens=0,
-                            num_computed_tokens=(len(request.all_token_ids) - 1)
-                        )
-                        self.finished_recving_KV_req_ids.remove(request.request_id)
+                            num_computed_tokens=(len(request.all_token_ids) -
+                                                 1))
+                        self.finished_recving_KV_req_ids.remove(
+                            request.request_id)
                         request.status = RequestStatus.WAITING
                         self.kv_cache_manager.free(request)
                     else:
@@ -380,8 +382,8 @@ class Scheduler(SchedulerInterface):
                 # `request.num_prompt_tokens` to consider the resumed reqs,
                 # which have output tokens.
                 num_new_tokens = request.num_tokens - num_computed_tokens
-                if (0 < self.scheduler_config.long_prefill_token_threshold
-                        < num_new_tokens):
+                if (0 < self.scheduler_config.long_prefill_token_threshold <
+                        num_new_tokens):
                     num_new_tokens = (
                         self.scheduler_config.long_prefill_token_threshold)
                 num_new_tokens = min(num_new_tokens, token_budget)
@@ -390,10 +392,9 @@ class Scheduler(SchedulerInterface):
                 # Schedule encoder inputs.
                 if request.has_encoder_inputs:
                     (encoder_inputs_to_schedule, num_new_tokens,
-                        new_encoder_budget
-                        ) = self._try_schedule_encoder_inputs(
-                            request, num_computed_tokens, num_new_tokens,
-                            encoder_budget)
+                     new_encoder_budget) = self._try_schedule_encoder_inputs(
+                         request, num_computed_tokens, num_new_tokens,
+                         encoder_budget)
                     if num_new_tokens == 0:
                         # The request cannot be scheduled.
                         break
@@ -447,14 +448,13 @@ class Scheduler(SchedulerInterface):
                 request.num_computed_tokens = num_computed_tokens
 
                 # Encoder-related.
-                if not request.do_remote_prefill:
-                    if encoder_inputs_to_schedule:
-                        scheduled_encoder_inputs[request.request_id] = (
-                            encoder_inputs_to_schedule)
-                        # Allocate the encoder cache.
-                        for i in encoder_inputs_to_schedule:
-                            self.encoder_cache_manager.allocate(request, i)
-                        encoder_budget = new_encoder_budget
+                if not request.do_remote_prefill and encoder_inputs_to_schedule:
+                    scheduled_encoder_inputs[request.request_id] = (
+                        encoder_inputs_to_schedule)
+                    # Allocate the encoder cache.
+                    for i in encoder_inputs_to_schedule:
+                        self.encoder_cache_manager.allocate(request, i)
+                    encoder_budget = new_encoder_budget
 
         # Put back any skipped requests at the head of the waiting queue
         if skipped_waiting_requests:
@@ -687,8 +687,7 @@ class Scheduler(SchedulerInterface):
                 new_running.append(request)
                 continue
 
-
-            if not req_id in model_runner_output.req_id_to_index:
+            if req_id not in model_runner_output.req_id_to_index:
                 print(req_id)
                 print(model_runner_output.req_id_to_index)
                 continue
@@ -779,17 +778,15 @@ class Scheduler(SchedulerInterface):
                     stopped = True
 
                     # TODO(rob): do this on a per-Connector basis.
-                    # TODO(tms): Should this be get_computed_blocks to only send full blocks?
                     remote_blocks = [
                         block.block_id for block in
-                        #self.kv_cache_manager.req_to_blocks[request.request_id]
                         self.kv_cache_manager.get_computed_blocks(request)[0]
                     ]
 
                     kv_transfer_params = KVTransferParams(
                         do_remote_prefill=True,
                         remote_block_ids=remote_blocks,
-                        remote_engine_id=self.connector.engine_id,
+                        remote_engine_id=self.vllm_config.engine_id,
                     )
 
                 # Add EngineCoreOutput for this Request.
@@ -815,10 +812,10 @@ class Scheduler(SchedulerInterface):
 
         # P/D: update recv and send status from last step.
         for req_id in (model_runner_output.finished_recving or []):
-            logger.debug("FINISHED RECVING: " + req_id)
+            logger.debug("FINISHED RECVING: %s", req_id)
             self.finished_recving_KV_req_ids.add(req_id)
         for req_id in (model_runner_output.finished_sending or []):
-            logger.debug("FINISHED SENDING: " + req_id)
+            logger.debug("FINISHED SENDING: %s", req_id)
             self._free_blocks(self.requests[req_id])
 
         self.running = new_running
@@ -869,7 +866,8 @@ class Scheduler(SchedulerInterface):
             request.status = finished_status
             self._free_request(request)
 
-    def _free_request(self, request: Request,
+    def _free_request(self,
+                      request: Request,
                       skip_free_blocks: bool = False) -> None:
         assert request.is_finished()
         self.encoder_cache_manager.free(request)
