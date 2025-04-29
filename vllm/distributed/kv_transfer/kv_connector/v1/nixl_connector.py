@@ -439,7 +439,7 @@ class NixlConnectorWorker:
             )
             print(
                 f"{NIXL_ROLE} KV_CACHE block {b} val {kv_caches[first_layer_name][1, b, 0, 0, 0]=}\n"  #noqa
-                f"{NIXL_ROLE} KV_CACHE block {b} val {kv_caches[last_layer_name][0, b, 0, 0, 0]=}\n"  #noqa
+                f"{NIXL_ROLE} KV_CACHE block {b} val {kv_caches[last_layer_name][1, b, 0, 0, 0]=}\n"  #noqa
             )
 
     def add_remote_agent(self, nixl_agent_meta: NixlAgentMetadata, tp_idx=0):
