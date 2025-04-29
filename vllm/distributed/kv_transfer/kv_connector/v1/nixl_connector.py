@@ -133,7 +133,6 @@ class NixlConnector(KVConnectorBase_V1):
                       **kwargs) -> None:
         assert self.connector_worker is not None
         assert isinstance(self._connector_metadata, NixlConnectorMetadata)
-        
         self.connector_worker.start_load_kv(self._connector_metadata)
         # print("HERE!!!!!")
         # for layer_name in forward_context.no_compile_layers:
@@ -199,8 +198,7 @@ class NixlConnectorScheduler:
         if request.do_remote_decode:
             pass
         if request.do_remote_prefill and num_external_tokens > 0:
-            self._reqs_need_recv[request.request_id] = (
-                request, block_ids)
+            self._reqs_need_recv[request.request_id] = (request, block_ids)
 
     def build_connector_meta(
         self,
@@ -448,7 +446,8 @@ class NixlConnectorWorker:
             return
 
         num_blocks = nixl_agent_meta.num_blocks
-        logger.debug("Adding remote agent " + engine_id + " " + str(num_blocks))
+        logger.debug("Adding remote agent " + engine_id + " " +
+                     str(num_blocks))
 
         agent_names = []
         agent_name = self.nixl_wrapper.add_remote_agent(
@@ -561,11 +560,11 @@ class NixlConnectorWorker:
         """
         for req_id, meta in metadata.requests.items():
             # NOTE: this is non-blocking
-            logger.debug("start_load_kv for request %s from remote engine %s. "
-                         "Num local_block_ids: %s. Num remote_block_ids: %s. ",
-                         req_id, meta.remote_engine_id,
-                         len(meta.local_block_ids),
-                         len(meta.remote_block_ids))
+            logger.debug(
+                "start_load_kv for request %s from remote engine %s. "
+                "Num local_block_ids: %s. Num remote_block_ids: %s. ", req_id,
+                meta.remote_engine_id, len(meta.local_block_ids),
+                len(meta.remote_block_ids))
             self._read_blocks(
                 local_block_ids=meta.local_block_ids,
                 remote_block_ids=meta.remote_block_ids,

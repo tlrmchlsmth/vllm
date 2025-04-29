@@ -92,9 +92,9 @@ async def send_request_to_service(client: httpx.AsyncClient, endpoint: str,
     req_data['do_remote_decode'] = True
     req_data["stream"] = False
     headers = {
-           "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
-           "X-Request-Id": request_id
-           }
+        "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
+        "X-Request-Id": request_id
+    }
     response = await client.post(endpoint, json=req_data, headers=headers)
     response.raise_for_status()
 
@@ -108,9 +108,9 @@ async def stream_service_response(client: httpx.AsyncClient, endpoint: str,
     Asynchronously stream the response from a service using a persistent client.
     """
     headers = {
-           "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
-           "X-Request-Id": request_id
-           }
+        "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
+        "X-Request-Id": request_id
+    }
     req_data['do_remote_prefill'] = True
     req_data["remote_block_ids"] = remote_block_ids
     req_data['remote_engine_id'] = remote_engine_id
@@ -133,9 +133,9 @@ async def handle_completions(request: Request):
         request_id = str(uuid.uuid4())
 
         # Send request to prefill service
-        print(f"{req_data["prompt"]}=")
-        response = await send_request_to_service(
-            app.state.prefill_client, "/completions", req_data, request_id)
+        response = await send_request_to_service(app.state.prefill_client,
+                                                 "/completions", req_data,
+                                                 request_id)
 
         # Extract the needed fields
         response_json = response.json()
@@ -149,12 +149,12 @@ async def handle_completions(request: Request):
         # Stream response from decode service
         async def generate_stream():
             async for chunk in stream_service_response(
-                app.state.decode_client,
-                "/completions",
-                req_data,
-                remote_block_ids=remote_block_ids,
-                remote_engine_id=remote_engine_id,
-                request_id=request_id):
+                    app.state.decode_client,
+                    "/completions",
+                    req_data,
+                    remote_block_ids=remote_block_ids,
+                    remote_engine_id=remote_engine_id,
+                    request_id=request_id):
                 yield chunk
 
         return StreamingResponse(generate_stream(),
