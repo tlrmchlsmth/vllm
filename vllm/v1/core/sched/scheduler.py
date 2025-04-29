@@ -783,10 +783,11 @@ class Scheduler(SchedulerInterface):
                         self.kv_cache_manager.get_computed_blocks(request)[0]
                     ]
 
+                    engine_id = self.vllm_config.kv_transfer_config.engine_id
                     kv_transfer_params = KVTransferParams(
                         do_remote_prefill=True,
                         remote_block_ids=remote_blocks,
-                        remote_engine_id=self.vllm_config.engine_id,
+                        remote_engine_id=engine_id,
                     )
 
                 # Add EngineCoreOutput for this Request.

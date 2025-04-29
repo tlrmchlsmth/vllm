@@ -275,6 +275,7 @@ class NixlConnectorWorker:
 
         logger.debug("Per layer kv cache size: %s", first_kv_cache[0].shape)
         self.num_blocks = num_blocks
+        self.dst_num_blocks[self.engine_id] = num_blocks
         self.kv_caches = kv_caches
         kv_caches_base_addr = []
         caches_data = []
@@ -592,7 +593,7 @@ class NixlConnectorWorker:
         # Read the data from the remote.
         for i in range(tp_multiplier):
             local_block_descs_ids = self._get_block_descs_ids(
-                dst_engine_id,
+                self.engine_id,
                 "all",
                 local_block_ids,
                 i=None,  #TODO: Enable both tp_multiplier and staging_ranges.
