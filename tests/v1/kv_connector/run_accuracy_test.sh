@@ -6,7 +6,7 @@ set -xe
 MODEL_NAME=Qwen/Qwen3-0.6B
 
 # Trap the SIGINT signal (triggered by Ctrl+C)
-trap 'cleanup' INT
+trap 'kill $(jobs -pr)' SIGINT SIGTERM EXIT
 
 # Cleanup function
 cleanup() {
@@ -50,7 +50,3 @@ python toy_proxy_server.py --port 8192 &
 
 # Run lm eval.
 python3 -m pytest -s -x test_accuracy.py
-
-# Cleanup commands()
-pgrep python | xargs kill -9
-pkill -f python

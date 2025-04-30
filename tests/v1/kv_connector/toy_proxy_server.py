@@ -2,12 +2,10 @@
 
 import argparse
 import os
-import time
 import uuid
 from contextlib import asynccontextmanager
 
 import httpx
-import numpy as np
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
 
@@ -35,34 +33,6 @@ async def lifespan(app: FastAPI):
 
 # Update FastAPI app initialization to use lifespan
 app = FastAPI(lifespan=lifespan)
-
-
-class StatsCalculator:
-
-    def __init__(self):
-        self._stats = []
-        self._last_log_time = time.time()
-
-    def add(self, value):
-        self._stats.append(value)
-        if time.time() - self._last_log_time > 5:
-            self._log_stats()
-            self._last_log_time = time.time()
-
-    def _log_stats(self):
-        # Print average, median, and 99th percentile
-        np_arr = np.array(self._stats)
-        output_str = f"\nNum requests: {len(self._stats)}" + \
-                "\nPrefill node TTFT stats:" + \
-                f"\n - Average (ms): {np.mean(np_arr)}" + \
-                f"\n - Median (ms): {np.median(np_arr)}" + \
-                f"\n - 99th Percentile (ms): {np.percentile(np_arr, 99)}\n"
-        print("===============================", output_str,
-              "===============================")
-
-
-stats_calculator = StatsCalculator()
-counter = 0
 
 
 def parse_args():
@@ -123,10 +93,6 @@ async def stream_service_response(client: httpx.AsyncClient, endpoint: str,
 
 @app.post("/v1/completions")
 async def handle_completions(request: Request):
-    global counter, stats_calculator
-    counter += 1
-
-    st = time.time()
     try:
         req_data = await request.json()
 
@@ -141,14 +107,10 @@ async def handle_completions(request: Request):
         response_json = response.json()
         remote_block_ids = response_json.get('remote_block_ids', [])
         remote_engine_id = response_json.get('remote_engine_id', '')
-        print("Prefiller response:\n" + str(response_json))
 
         # Add these to the request data for the decoder
         req_data['remote_block_ids'] = remote_block_ids
         req_data['remote_engine_id'] = remote_engine_id
-
-        et = time.time()
-        stats_calculator.add(et - st)
 
         # Stream response from decode service
         async def generate_stream():
@@ -170,43 +132,6 @@ async def handle_completions(request: Request):
         exc_info = sys.exc_info()
         print("Error occurred in disagg prefill proxy server"
               " - completions endpoint")
-        print(e)
-        print("".join(traceback.format_exception(*exc_info)))
-        raise
-
-
-@app.post("/v1/chat/completions")
-async def handle_chat_completions(request: Request):
-    global counter, stats_calculator
-    counter += 1
-
-    st = time.time()
-    try:
-        req_data = await request.json()
-
-        # Send request to prefill service, ignore the response
-        await send_request_to_service(app.state.prefill_client,
-                                      "/chat/completions", req_data)
-
-        et = time.time()
-        stats_calculator.add(et - st)
-
-        # Stream response from decode service
-        async def generate_stream():
-            async for chunk in stream_service_response(app.state.decode_client,
-                                                       "/chat/completions",
-                                                       req_data):
-                yield chunk
-
-        return StreamingResponse(generate_stream(),
-                                 media_type="application/json")
-
-    except Exception as e:
-        import sys
-        import traceback
-        exc_info = sys.exc_info()
-        print("Error occurred in disagg prefill proxy server "
-              " - chat completions endpoint")
         print(e)
         print("".join(traceback.format_exception(*exc_info)))
         raise

@@ -2,11 +2,11 @@
 import lm_eval
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
-NUM_CONCURRENT = 500
+NUM_CONCURRENT = 100
 TASK = "gsm8k"
 FILTER = "exact_match,strict-match"
 RTOL = 0.03
-EXPECTED_VALUE = 0.54
+EXPECTED_VALUE = 0.41
 
 
 def test_accuracy():
@@ -23,7 +23,6 @@ def test_accuracy():
     )
 
     measured_value = results["results"][TASK][FILTER]
-    print(f"{measured_value}")
-    # assert (measured_value - RTOL < EXPECTED_VALUE
-    #         and measured_value + RTOL > EXPECTED_VALUE
-    #         ), f"Expected: {EXPECTED_VALUE} |  Measured: {measured_value}"
+    assert (measured_value - RTOL < EXPECTED_VALUE
+            and measured_value + RTOL > EXPECTED_VALUE
+            ), f"Expected: {EXPECTED_VALUE} |  Measured: {measured_value}"
