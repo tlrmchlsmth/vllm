@@ -117,8 +117,6 @@ class BlockPool:
             prev_block_hash_value = prev_block.block_hash.hash_value
 
         for i, blk in enumerate(new_full_blocks):
-            if blk.block_hash is not None:
-                continue
             assert blk.block_hash is None
 
             if i < len(new_block_hashes):

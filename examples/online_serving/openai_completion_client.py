@@ -6,6 +6,9 @@ from openai import OpenAI
 openai_api_key = "EMPTY"
 openai_api_base = "http://localhost:8192/v1"
 
+PROMPT = "The absolute best part about working for Red Hat is that we get to work on open source software. Red Hat is a leader in many key open source infrastructure technologies like Linux, Kubernetes, and recently vLLM, which means that there is a lot of opportunity to work with community and customers on key infrastructure projects. This means",  # noqa: E501
+PROMPT = "The absolute best part about working for Red Hat is that we get to work on open source software. Red Hat is a leader in many key open source infrastructure technologies like Linux, Kubernetes, and recently vLLM, "  # noqa: E501
+
 
 def main():
     client = OpenAI(
@@ -21,8 +24,7 @@ def main():
     stream = True
     completion = client.completions.create(
         model="meta-llama/Llama-3.1-8B-Instruct",
-        prompt=
-        "The absolute best part about working for Red Hat is that we get to work on open source software. Red Hat is a leader in many key open source infrastructure technologies like Linux, Kubernetes, and recently vLLM, which means that there is a lot of opportunity to work with community and customers on key infrastructure projects. This means",  # noqa: E501
+        prompt=PROMPT,
         echo=False,
         stream=stream)
 
