@@ -20,7 +20,7 @@ from vllm.v1.core.sched.output import SchedulerOutput
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
     from vllm.forward_context import ForwardContext
-    from vllm.v1.request import Request
+    from vllm.v1.request import Request, RequestStatus
 
 logger = init_logger(__name__)
 
@@ -171,7 +171,8 @@ class NixlConnectorScheduler:
         # So we should only have full blocks of computed tokens.
         assert num_computed_tokens % self.block_size == 0
 
-        if request.do_remote_prefill:
+        if (request.do_remote_prefill
+                and request.status == RequestStatus.WAITING):
             # NOTE: subtract 1 since we compute the last token
             # here so that we can sample the first token.
             num_prompt_tokens = len(request.prompt_token_ids) - 1
