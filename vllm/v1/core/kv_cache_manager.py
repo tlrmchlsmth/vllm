@@ -25,7 +25,7 @@ class KVCacheManager:
         max_model_len: int,
         enable_caching: bool = True,
         caching_hash_algo: str = "builtin",
-        num_preallocate_tokens: int = 0,
+        num_preallocate_tokens: int = 64,
         log_stats: bool = False,
     ) -> None:
         assert len(kv_cache_config.kv_cache_groups) == 1, (
