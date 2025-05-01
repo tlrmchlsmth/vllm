@@ -13,7 +13,7 @@ def test_accuracy():
     """Run the end to end accuracy test."""
 
     model_args = (f"model={MODEL_NAME},"
-                  f"base_url=http://localhost:8193/v1/completions,"
+                  f"base_url=http://localhost:8192/v1/completions,"
                   f"num_concurrent={NUM_CONCURRENT},tokenized_requests=False")
 
     results = lm_eval.simple_evaluate(
@@ -26,7 +26,3 @@ def test_accuracy():
     assert (measured_value - RTOL < EXPECTED_VALUE
             and measured_value + RTOL > EXPECTED_VALUE
             ), f"Expected: {EXPECTED_VALUE} |  Measured: {measured_value}"
-
-
-if __name__ == "__main__":
-    test_accuracy()
