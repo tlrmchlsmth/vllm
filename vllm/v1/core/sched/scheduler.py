@@ -699,12 +699,14 @@ class Scheduler(SchedulerInterface):
         scheduler_output: SchedulerOutput,
         model_runner_output: ModelRunnerOutput,
     ) -> EngineCoreOutputs:
+        print("================ NEW ONE: ========================")
         sampled_token_ids = model_runner_output.sampled_token_ids
         spec_token_ids = model_runner_output.spec_token_ids
         logprobs = model_runner_output.logprobs
         prompt_logprobs_dict = model_runner_output.prompt_logprobs_dict
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
 
+        stopped_set: set[str] = set()
         new_running: list[Request] = []
         outputs: list[EngineCoreOutput] = []
         spec_decoding_stats: Optional[SpecDecodingStats] = None
@@ -849,6 +851,8 @@ class Scheduler(SchedulerInterface):
 
             if not stopped:
                 new_running.append(request)
+            else:
+                stopped_set.add(request.request_id)
 
         # P/D: update recv and send status from last step.
         for req_id in (model_runner_output.finished_recving or []):
@@ -858,9 +862,13 @@ class Scheduler(SchedulerInterface):
             logger.debug("FINISHED SENDING: %s", req_id)
             self._free_blocks(self.requests[req_id])
 
-        # Return the cached request data to the queue so they can be reused.
+        # Return the cached request data to the queue so they can
+        # be reused. Note: this must be done under if not stopped,
+        # otherwise we will have a memory leak since we update
+        # scheduled_cached_reqs after free!
         for req_data in scheduler_output.scheduled_cached_reqs:
-            self._cached_reqs_data[req_data.req_id].append(req_data)
+            if req_data.req_id not in stopped_set:
+                self._cached_reqs_data[req_data.req_id].append(req_data)
 
         self.running = new_running
         engine_core_outputs = EngineCoreOutputs(

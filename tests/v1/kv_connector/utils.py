@@ -22,7 +22,6 @@ def assert_scheduler_empty(scheduler: Scheduler):
     assert len(scheduler.requests) == 0
     assert len(scheduler.waiting) == 0
     assert len(scheduler.running) == 0
-    assert len(scheduler.scheduled_req_ids) == 0
     assert len(scheduler.finished_req_ids) == 0
     assert len(scheduler.finished_recving_KV_req_ids) == 0
     assert len(scheduler._cached_reqs_data) == 0

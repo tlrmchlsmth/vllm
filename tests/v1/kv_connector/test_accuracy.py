@@ -26,3 +26,6 @@ def test_accuracy():
     assert (measured_value - RTOL < EXPECTED_VALUE
             and measured_value + RTOL > EXPECTED_VALUE
             ), f"Expected: {EXPECTED_VALUE} |  Measured: {measured_value}"
+
+
+test_accuracy()
