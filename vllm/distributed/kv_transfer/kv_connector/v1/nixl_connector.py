@@ -16,7 +16,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 from vllm.logger import init_logger
 from vllm.sampling_params import KVTransferParams
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.request import Request, RequestStatus
+from vllm.v1.request import Request
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
@@ -171,12 +171,9 @@ class NixlConnectorScheduler:
         # So we should only have full blocks of computed tokens.
         assert num_computed_tokens % self.block_size == 0
 
-        # NOTE: match externally for remote prefill and for
-        # WAITING (so not preempted status).
-        if (request.do_remote_prefill
-                and request.status == RequestStatus.WAITING):
-
-            # Round down to a full block shape.
+        # NOTE: we assume that the full prompt will be send
+        # by the P worker to the D worker.
+        if request.do_remote_prefill:
             num_external_blocks = len(
                 request.prompt_token_ids) // self.block_size
             rounded_num_prompt_tokens = num_external_blocks * self.block_size

@@ -309,7 +309,6 @@ class Scheduler(SchedulerInterface):
                         self.finished_recving_KV_req_ids.remove(
                             request.request_id)
                         request.status = RequestStatus.WAITING
-                        request.do_remote_prefill = False
                         self.kv_cache_manager.free(request)
                     else:
                         self.waiting.popleft()
@@ -376,6 +375,7 @@ class Scheduler(SchedulerInterface):
                             [b.block_id for b in computed_blocks + new_blocks],
                             num_external_tokens,
                         )
+                        request.do_remote_prefill = False
                     continue
 
                 # Number of tokens to be scheduled.
