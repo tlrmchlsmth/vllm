@@ -175,12 +175,10 @@ class NixlConnectorScheduler:
         # WAITING (so not preempted status).
         if (request.do_remote_prefill
                 and request.status == RequestStatus.WAITING):
-            # NOTE: subtract 1 since we compute the last token
-            # here so that we can sample the first token.
-            num_prompt_tokens = len(request.prompt_token_ids) - 1
 
             # Round down to a full block shape.
-            num_external_blocks = num_prompt_tokens // self.block_size
+            num_external_blocks = len(
+                request.prompt_token_ids) // self.block_size
             rounded_num_prompt_tokens = num_external_blocks * self.block_size
             return max(rounded_num_prompt_tokens - num_computed_tokens, 0)
 
