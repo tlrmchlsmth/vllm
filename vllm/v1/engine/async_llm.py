@@ -390,7 +390,6 @@ class AsyncLLM(EngineClient):
 
     async def abort(self, request_id: str) -> None:
         """Abort RequestId in OutputProcessor and EngineCore."""
-
         request_ids = self.output_processor.abort_requests((request_id, ))
         await self.engine_core.abort_requests_async(request_ids)
 

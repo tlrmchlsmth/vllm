@@ -16,11 +16,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 from vllm.logger import init_logger
 from vllm.sampling_params import KVTransferParams
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.request import Request, RequestStatus
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
     from vllm.forward_context import ForwardContext
-    from vllm.v1.request import Request
 
 logger = init_logger(__name__)
 
@@ -171,7 +171,10 @@ class NixlConnectorScheduler:
         # So we should only have full blocks of computed tokens.
         assert num_computed_tokens % self.block_size == 0
 
-        if request.do_remote_prefill:
+        # NOTE: match externally for remote prefill and for
+        # WAITING (so not preempted status).
+        if (request.do_remote_prefill
+                and request.status == RequestStatus.WAITING):
             # NOTE: subtract 1 since we compute the last token
             # here so that we can sample the first token.
             num_prompt_tokens = len(request.prompt_token_ids) - 1
@@ -180,8 +183,8 @@ class NixlConnectorScheduler:
             num_external_blocks = num_prompt_tokens // self.block_size
             rounded_num_prompt_tokens = num_external_blocks * self.block_size
             return max(rounded_num_prompt_tokens - num_computed_tokens, 0)
-        else:
-            return 0
+
+        return 0
 
     def update_state_after_alloc(self, request: "Request",
                                  block_ids: list[int],
@@ -310,7 +313,7 @@ class NixlConnectorWorker:
 
         # For debug, SENDER puts some stuff in the KV caches
         # so the RECVER can check it
-        n_blocks_to_send = 4096
+        n_blocks_to_send = min(4096, kv_caches[first_layer_name].shape[1])
         debug_xfer_gb = 2.0 * n_blocks_to_send * self.block_len / 1e9
         print(f"gb {debug_xfer_gb} -- block_len {self.block_len}")
         if NIXL_ROLE == "SENDER":
@@ -578,9 +581,12 @@ class NixlConnectorWorker:
         # Note(tms): The remote_block_ids only contain full computed blocks,
         # while the local_block_ids are all blocks allocated for this request,
         # so truncate the local_block_ids to account for this.
-        if len(remote_block_ids) < len(local_block_ids):
-            local_block_ids = local_block_ids[:len(remote_block_ids)]
-        assert len(local_block_ids) == len(remote_block_ids)
+        num_remote_blocks = len(remote_block_ids)
+        if num_remote_blocks < len(local_block_ids):
+            local_block_ids = local_block_ids[:num_remote_blocks]
+        assert len(local_block_ids) == num_remote_blocks
+
+        # NOTE(rob): this can cause the remote blocks to not be freed.
         if len(local_block_ids) == 0:
             return
 

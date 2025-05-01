@@ -309,6 +309,7 @@ class Scheduler(SchedulerInterface):
                         self.finished_recving_KV_req_ids.remove(
                             request.request_id)
                         request.status = RequestStatus.WAITING
+                        request.do_remote_prefill = False
                         self.kv_cache_manager.free(request)
                     else:
                         self.waiting.popleft()
