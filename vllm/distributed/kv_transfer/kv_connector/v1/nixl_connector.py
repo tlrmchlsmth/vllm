@@ -171,8 +171,6 @@ class NixlConnectorScheduler:
         # So we should only have full blocks of computed tokens.
         assert num_computed_tokens % self.block_size == 0
 
-        # NOTE: we assume that the full prompt will be send
-        # by the P worker to the D worker.
         if request.do_remote_prefill:
             num_external_blocks = len(
                 request.prompt_token_ids) // self.block_size
