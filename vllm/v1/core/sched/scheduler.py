@@ -699,7 +699,6 @@ class Scheduler(SchedulerInterface):
         scheduler_output: SchedulerOutput,
         model_runner_output: ModelRunnerOutput,
     ) -> EngineCoreOutputs:
-        print("================ NEW ONE: ========================")
         sampled_token_ids = model_runner_output.sampled_token_ids
         spec_token_ids = model_runner_output.spec_token_ids
         logprobs = model_runner_output.logprobs
@@ -863,9 +862,8 @@ class Scheduler(SchedulerInterface):
             self._free_blocks(self.requests[req_id])
 
         # Return the cached request data to the queue so they can
-        # be reused. Note: this must be done under if not stopped,
-        # otherwise we will have a memory leak since we update
-        # scheduled_cached_reqs after free!
+        # be reused. Note: we cannot add stopped requests to this
+        # since they are already freed above!
         for req_data in scheduler_output.scheduled_cached_reqs:
             if req_data.req_id not in stopped_set:
                 self._cached_reqs_data[req_data.req_id].append(req_data)
