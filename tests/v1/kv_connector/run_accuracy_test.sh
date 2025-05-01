@@ -46,7 +46,7 @@ wait_for_server 8100
 wait_for_server 8200
 
 # Proxy server.
-python toy_proxy_server.py --port 8192
+python toy_proxy_server.py --port 8192 &
 
 # Run lm eval.
 python3 -m pytest -s -x test_accuracy.py
