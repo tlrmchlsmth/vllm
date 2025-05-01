@@ -291,6 +291,7 @@ class KVCacheManager:
             # cache a block after is has finished recving.
             self.num_cached_block[request.request_id] = len(
                 new_computed_blocks)
+            return new_blocks
 
         self.cache_blocks(
             request=request,
