@@ -174,6 +174,7 @@ def test_no_mm_input_chunking():
         model="llava-hf/llava-1.5-7b-hf",
         max_num_batched_tokens=1024,
         disable_chunked_mm_input=True,
+        max_model_len=2048,
     )
     mm_positions = [[PlaceholderRange(offset=400, length=800)]]
     requests = create_requests(num_requests=1,
@@ -302,7 +303,7 @@ def test_schedule_concurrent_partial_requests(enable_prefix_caching: bool):
 
 def test_stop_via_update_from_output():
     """Test stopping behavior through update_from_output"""
-    scheduler = create_scheduler()
+    scheduler = create_scheduler(num_speculative_tokens=1)
 
     # Test case 1: Stop on EOS token
     requests = create_requests(num_requests=2, max_tokens=10)
@@ -310,7 +311,6 @@ def test_stop_via_update_from_output():
         req.num_computed_tokens = req.num_tokens
         scheduler.requests[req.request_id] = req
         scheduler.running.append(req)
-        scheduler.scheduled_req_ids.add(req.request_id)
 
     scheduler_output = SchedulerOutput(scheduled_new_reqs=[],
                                        scheduled_cached_reqs=[],
@@ -354,7 +354,7 @@ def test_stop_via_update_from_output():
     assert list(requests[1].output_token_ids) == [10, 11]
 
     # Test case 2: Stop on custom stop token
-    scheduler = create_scheduler()
+    scheduler = create_scheduler(num_speculative_tokens=2)
     requests = create_requests(num_requests=2,
                                max_tokens=10,
                                stop_token_ids=[42, 43])
@@ -362,7 +362,6 @@ def test_stop_via_update_from_output():
         req.num_computed_tokens = req.num_tokens
         scheduler.requests[req.request_id] = req
         scheduler.running.append(req)
-        scheduler.scheduled_req_ids.add(req.request_id)
 
     scheduler_output = SchedulerOutput(scheduled_new_reqs=[],
                                        scheduled_cached_reqs=[],
@@ -406,13 +405,12 @@ def test_stop_via_update_from_output():
     assert list(requests[1].output_token_ids) == [13, 14]
 
     # Test case 3: Stop on max tokens
-    scheduler = create_scheduler()
+    scheduler = create_scheduler(num_speculative_tokens=2)
     requests = create_requests(num_requests=2, max_tokens=2)
     for req in requests:
         req.num_computed_tokens = req.num_tokens
         scheduler.requests[req.request_id] = req
         scheduler.running.append(req)
-        scheduler.scheduled_req_ids.add(req.request_id)
 
     scheduler_output = SchedulerOutput(scheduled_new_reqs=[],
                                        scheduled_cached_reqs=[],
@@ -456,13 +454,12 @@ def test_stop_via_update_from_output():
     assert list(requests[1].output_token_ids) == [13]
 
     # Test case 4: Ignore EOS flag
-    scheduler = create_scheduler()
+    scheduler = create_scheduler(num_speculative_tokens=2)
     requests = create_requests(num_requests=1, max_tokens=10)
     requests[0].sampling_params.ignore_eos = True
     requests[0].num_computed_tokens = requests[0].num_tokens
     scheduler.requests[requests[0].request_id] = requests[0]
     scheduler.running.append(requests[0])
-    scheduler.scheduled_req_ids.add(requests[0].request_id)
 
     scheduler_output = SchedulerOutput(
         scheduled_new_reqs=[],
@@ -559,13 +556,14 @@ def test_schedule_concurrent_batches(enable_prefix_caching: Optional[bool],
 @pytest.mark.parametrize(
     "spec_tokens,output_tokens,expected",
     [
-        ([[1, 2, 3]], [[1, 2, 3, 4]], (3, 3)),  # perfect match
-        ([[1, 2, 3]], [[1, 5]], (3, 1)),  # early mismatch
-        ([[1, 2], [3]], [[1, 2, 5], [3, 4]], (3, 3)),  # multiple sequences
-        ([[1]], [[1, 2]], (1, 1)),  # single token sequence
-        ([[]], [[5]], (0, 0)),  # empty sequence
+        ([[1, 2, 3]], [[1, 2, 3, 4]], (1, 3, 3, [1, 1, 1])),  # perfect match
+        ([[1, 2, 3]], [[1, 5]], (1, 3, 1, [1, 0, 0])),  # early mismatch
+        ([[1, 2], [3]], [[1, 2, 5], [3, 4]],
+         (2, 3, 3, [2, 1])),  # multiple sequences
+        ([[1]], [[1, 2]], (1, 1, 1, [1])),  # single token sequence
+        ([[]], [[5]], (0, 0, 0, [0])),  # empty sequence
         ([[1, 2, 3], [4, 5, 6]], [[1, 2, 7], [4, 8]],
-         (6, 3)),  # multiple mismatches
+         (2, 6, 3, [2, 1, 0])),  # multiple mismatches
     ])
 def test_schedule_spec_decoding_stats(spec_tokens, output_tokens, expected):
     """Test scheduling behavior with speculative decoding.
@@ -574,7 +572,8 @@ def test_schedule_spec_decoding_stats(spec_tokens, output_tokens, expected):
     1. Speculated tokens get scheduled correctly
     2. Spec decoding stats properly count number of draft and accepted tokens
     """
-    scheduler = create_scheduler()
+    num_spec_tokens = max(1, max(len(t) for t in spec_tokens))
+    scheduler = create_scheduler(num_speculative_tokens=num_spec_tokens)
     requests = create_requests(num_requests=len(spec_tokens), num_tokens=1)
     req_ids = []
     req_to_index = {}
@@ -647,8 +646,10 @@ def test_schedule_spec_decoding_stats(spec_tokens, output_tokens, expected):
     else:
         assert scheduler_stats.spec_decoding_stats is not None
         stats = scheduler_stats.spec_decoding_stats
-        assert stats.num_draft_tokens == expected[0]
-        assert stats.num_accepted_tokens == expected[1]
+        assert stats.num_drafts == expected[0]
+        assert stats.num_draft_tokens == expected[1]
+        assert stats.num_accepted_tokens == expected[2]
+        assert stats.num_accepted_tokens_per_pos == expected[3]
 
 
 def _assert_right_scheduler_output(
@@ -677,20 +678,17 @@ def _assert_right_kv_cache_manager(
     """Check whether KVCacheManager is correct after allocate."""
 
     # Make sure the request stats are right.
-    EXPECTED_ACTUAL_BLOCKS = num_tokens // block_size
-    EXPECTED_TOTAL_BLOCKS = (EXPECTED_ACTUAL_BLOCKS +
-                             scheduler.kv_cache_manager.num_preallocate_blocks)
+    EXPECTED_TOTAL_BLOCKS = num_tokens // block_size
     for req_id in req_ids:
         blocks = scheduler.kv_cache_manager.req_to_blocks[req_id]
         hashes = scheduler.kv_cache_manager.req_to_block_hashes[req_id]
         assert (scheduler.kv_cache_manager.num_cached_block[req_id] ==
-                EXPECTED_ACTUAL_BLOCKS)
+                EXPECTED_TOTAL_BLOCKS)
         assert len(blocks) == EXPECTED_TOTAL_BLOCKS
-        assert len(hashes) == EXPECTED_ACTUAL_BLOCKS
+        assert len(hashes) == EXPECTED_TOTAL_BLOCKS
 
     # Make sure we actually touched all the blocks.
-    BLOCKS_PER_REQ = (num_tokens / block_size +
-                      scheduler.kv_cache_manager.num_preallocate_blocks)
+    BLOCKS_PER_REQ = num_tokens / block_size
     assert (scheduler.kv_cache_manager.block_pool.get_num_free_blocks() ==
             num_total_blocks - num_requests * BLOCKS_PER_REQ)
 
@@ -925,7 +923,6 @@ def test_kv_connector_handles_preemption():
         block_size=BLOCK_SIZE,
         num_blocks=NUM_BLOCKS,
     )
-    scheduler.kv_cache_manager.num_preallocate_blocks = 0
 
     NUM_MATCHED_NEW_TOKENS = BLOCK_SIZE
     scheduler.connector.get_num_new_matched_tokens = Mock(name="method")
