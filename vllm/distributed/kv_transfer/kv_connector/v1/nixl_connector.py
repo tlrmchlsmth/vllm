@@ -584,7 +584,7 @@ class NixlConnectorWorker:
             local_block_ids = local_block_ids[:num_remote_blocks]
         assert len(local_block_ids) == num_remote_blocks
 
-        # NOTE(rob): this can cause the remote blocks to not be freed.
+        # NOTE(rob): this can cause the remote blocks to not be freed?
         if len(local_block_ids) == 0:
             return
 
