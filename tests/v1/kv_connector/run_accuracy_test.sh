@@ -28,18 +28,17 @@ wait_for_server() {
 }
 
 # Prefill instance.
-CUDA_VISIBLE_DEVICES=2 NIXL_ROLE="SENDER" vllm serve $MODEL_NAME \
+CUDA_VISIBLE_DEVICES=0 NIXL_ROLE="SENDER" vllm serve $MODEL_NAME \
     --port 8100 \
     --enforce-eager \
     --disable-log-requests \
     --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' &
 
 # Decode instance.
-CUDA_VISIBLE_DEVICES=7 NIXL_ROLE="RECVER" vllm serve $MODEL_NAME \
+CUDA_VISIBLE_DEVICES=1 NIXL_ROLE="RECVER" vllm serve $MODEL_NAME \
     --port 8200 \
     --enforce-eager \
     --disable-log-requests \
-    --num_gpu_blocks_override 1000 \
     --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' &
 
 # wait until prefill and decode instances are ready
@@ -50,4 +49,4 @@ wait_for_server 8200
 python toy_proxy_server.py --port 8192
 
 # Run lm eval.
-# python3 -m pytest -s -x test_accuracy.py
+python3 -m pytest -s -x test_accuracy.py
