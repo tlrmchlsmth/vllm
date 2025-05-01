@@ -375,6 +375,8 @@ class Scheduler(SchedulerInterface):
                             [b.block_id for b in computed_blocks + new_blocks],
                             num_external_tokens,
                         )
+                        # We should only trigger a KV transfer once per request.
+                        request.do_remote_prefill = False
                     continue
 
                 # Number of tokens to be scheduled.
