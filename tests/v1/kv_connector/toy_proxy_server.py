@@ -41,9 +41,9 @@ def parse_args():
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--host", type=str, default="localhost")
     parser.add_argument("--prefiller-host", type=str, default="localhost")
-    parser.add_argument("--prefiller-port", type=int, default=8101)
+    parser.add_argument("--prefiller-port", type=int, default=8100)
     parser.add_argument("--decoder-host", type=str, default="localhost")
-    parser.add_argument("--decoder-port", type=int, default=8201)
+    parser.add_argument("--decoder-port", type=int, default=8200)
     args = parser.parse_args()
     return args
 
@@ -107,6 +107,10 @@ async def handle_completions(request: Request):
         response_json = response.json()
         remote_block_ids = response_json.get('remote_block_ids', [])
         remote_engine_id = response_json.get('remote_engine_id', '')
+
+        # Add these to the request data for the decoder
+        req_data['remote_block_ids'] = remote_block_ids
+        req_data['remote_engine_id'] = remote_engine_id
 
         # Stream response from decode service
         async def generate_stream():
