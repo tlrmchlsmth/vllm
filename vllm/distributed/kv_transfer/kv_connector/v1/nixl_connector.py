@@ -292,7 +292,7 @@ class NixlConnectorWorker:
         self.nixl_wrapper.register_memory(descs)
         self._registered_descs.append(descs)
 
-        # THIS IS FOR DEBUG!!!
+        # THIS IS FOR DEV
         import os
         _ctx = zmq.Context()  # type: ignore
         _side_channel = _ctx.socket(zmq.PAIR)  # type: ignore
