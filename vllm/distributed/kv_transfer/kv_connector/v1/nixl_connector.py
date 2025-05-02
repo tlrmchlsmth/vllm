@@ -297,6 +297,7 @@ class NixlConnectorWorker:
         _side_channel.connect(f"tcp://{host}:{port}")
         _side_channel.setsockopt(zmq.LINGER, 0)  # type: ignore
 
+        logger.debug(f"Send Connect")
         _side_channel.send(b"Connect")
         decoder = msgspec.msgpack.Decoder(NixlAgentMetadata)
         metadata_bytes = _side_channel.recv()
@@ -592,6 +593,9 @@ class NixlConnectorWorker:
         dst_engine_id: str,
         request_id: str,
     ):
+        if dst_engine_id not in self._remote_agents:
+            make_connection("localhost", 5577)  # HACK: we need to be able to have host and port with dst_engine_id
+
         # NOTE(rob): having the staging blocks be on the READER side is
         # not going to work well (since we will have to call rearrange tensors).
         # after we detect the txn is complete (which means we cannot make the
