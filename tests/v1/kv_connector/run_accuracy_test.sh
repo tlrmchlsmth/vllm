@@ -28,10 +28,11 @@ wait_for_server() {
 }
 
 # Prefill instance.
-CUDA_VISIBLE_DEVICES=0 NIXL_ROLE="SENDER" vllm serve $MODEL_NAME \
+CUDA_VISIBLE_DEVICES=0,1 NIXL_ROLE="SENDER" vllm serve $MODEL_NAME \
     --port 8100 \
     --enforce-eager \
     --disable-log-requests \
+    --tensor-parallel-size 2 \
     --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' &
 
 # Decode instance.
