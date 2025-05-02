@@ -289,6 +289,27 @@ class NixlConnectorWorker:
 
         self.hack_event.set()
 
+    def make_connection(self, host, port):
+        _ctx = zmq.Context()  # type: ignore
+        _side_channel = _ctx.socket(zmq.DEALER)
+
+        _side_channel.setsockopt_string(zmq.IDENTITY, self.engine_id)
+        _side_channel.connect(f"tcp://{host}:{port}")
+        _side_channel.setsockopt(zmq.LINGER, 0)  # type: ignore
+
+        _side_channel.send(b"Connect")
+        decoder = msgspec.msgpack.Decoder(NixlAgentMetadata)
+        metadata_bytes = _side_channel.recv()
+        metadata = decoder.decode(metadata_bytes)
+
+        remote_engine_id = metadata.engine_id  #HACK
+
+        self.add_remote_agent(metadata)
+        print("SENDING ACK")
+        _side_channel.send(b"ack")
+
+        return remote_engine_id
+
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in nixl."""
 
@@ -337,10 +358,6 @@ class NixlConnectorWorker:
 
         NIXL_ROLE = os.getenv("NIXL_ROLE")
 
-        if NIXL_ROLE == "RECVER":
-            _ctx = zmq.Context()  # type: ignore
-            _side_channel = _ctx.socket(zmq.DEALER)
-
         # For debug, SENDER puts some stuff in the KV caches
         # so the RECVER can check it
         n_blocks_to_send = min(4096, kv_caches[first_layer_name].shape[1])
@@ -370,21 +387,7 @@ class NixlConnectorWorker:
 
             logger.debug(f"HACK connection established")
         elif NIXL_ROLE == "RECVER":
-            _side_channel.setsockopt_string(zmq.IDENTITY, self.engine_id)
-            _side_channel.connect("tcp://localhost:5577")
-            _side_channel.setsockopt(zmq.LINGER, 0)  # type: ignore
-
-            _side_channel.send(b"Connect")
-            decoder = msgspec.msgpack.Decoder(NixlAgentMetadata)
-            metadata_bytes = _side_channel.recv()
-            metadata = decoder.decode(metadata_bytes)
-
-            remote_engine_id = metadata.engine_id  #HACK
-
-            self.add_remote_agent(metadata)
-            print("SENDING ACK")
-            _side_channel.send(b"ack")
-
+            remote_engine_id = self.make_connection("localhost", 5577) # HACK call it statically for now
         else:
             raise Exception("SET NIXL_ROLE to SENDER OR RECVER")
 
