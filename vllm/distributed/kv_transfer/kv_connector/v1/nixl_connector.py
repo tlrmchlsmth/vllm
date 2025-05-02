@@ -570,24 +570,20 @@ class NixlConnectorWorker:
             local_block_ids = local_block_ids[:len(remote_block_ids)]
         assert len(local_block_ids) == len(remote_block_ids)
 
-        # NOTE(rob): this can cause the remote blocks to not be freed?
+        # Can this cause the remote blocks to not be freed?
         if len(local_block_ids) == 0:
             return
 
-        # TODO: support TP multipliers.
-        remote_block_descs_ids = self._get_block_descs_ids(
-            dst_engine_id, "all", remote_block_ids)
-        local_xfer_side_handle = self.src_xfer_side_handles
-
-        # Read the data from the remote.
-        local_block_descs_ids = self._get_block_descs_ids(self.engine_id,
-                                                          "all",
-                                                          local_block_ids,
-                                                          i=None,
-                                                          tp_multiplier=1,
-                                                          staging_ranges=None)
-        assert len(local_block_descs_ids) == len(remote_block_descs_ids)
+        # Get side handles.
+        local_xfer_side_handle = self.src_xfer_side_handle
         remote_xfer_side_handle = self.dst_xfer_side_handles[dst_engine_id]
+
+        # Get descs ids.
+        remote_block_descs_ids = self._get_block_descs_ids(
+            dst_engine_id, remote_block_ids)
+        local_block_descs_ids = self._get_block_descs_ids(
+            self.engine_id, local_block_ids)
+        assert len(local_block_descs_ids) == len(remote_block_descs_ids)
 
         # NOTE(rob): we use the request_id as the notify msg, so we
         # must use the same request_id in both the p and d workers.
@@ -600,32 +596,21 @@ class NixlConnectorWorker:
             notif_msg=request_id.encode("utf-8"),
         )
 
-        # Call transfer to begin the async transfer
-        # We will check this is done in the next forward pass.
+        # Begin async xfer. We check for DONE in next engine step.
         self.nixl_wrapper.transfer(handle)
         self._recving_transfers[request_id].append(handle)
 
-    def _get_block_descs_ids(self,
-                             engine_id,
-                             region_ids,
-                             block_ids,
-                             i=None,
-                             tp_multiplier=1,
-                             staging_ranges=None):
+    def _get_block_descs_ids(self, engine_id: str,
+                             block_ids: list[int]) -> list[int]:
+        """Get the descs ids for a set of block ids."""
 
-        if region_ids == "all":
-            region_ids = range(self.num_regions)
-        if block_ids == "all":
-            block_ids = range(self.num_blocks)
+        # range(1) for MLA, range(2) otherwise.
+        region_ids = range(self.num_regions)
+        num_blocks = self.dst_num_blocks[engine_id]
 
-        descs_ids = []
-
-        if i is not None:
-            raise NotImplementedError("Prefill and Decode instances must have "
-                                      "the same TP size.")
-        else:
-            num_blocks = self.dst_num_blocks[engine_id]
-            for reg_id in region_ids:
-                for block_id in block_ids:
-                    descs_ids.append(reg_id * num_blocks + block_id)
+        # Get the desc ids for each block.
+        descs_ids: list[int] = []
+        for reg_id in region_ids:
+            for block_id in block_ids:
+                descs_ids.append(reg_id * num_blocks + block_id)
         return descs_ids
