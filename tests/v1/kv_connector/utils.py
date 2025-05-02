@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 from typing import Optional
+
 import torch
 
 from vllm.config import (CacheConfig, DeviceConfig, KVTransferConfig,
@@ -14,17 +15,17 @@ from vllm.v1.structured_output import StructuredOutputManager
 
 EOS_TOKEN_ID = 50256
 
+
 def assert_scheduler_empty(scheduler: Scheduler):
     """Confirm the scheduler is "empty" - i.e. no leaks."""
     # Scheduler Metadata.
     assert len(scheduler.requests) == 0
     assert len(scheduler.waiting) == 0
     assert len(scheduler.running) == 0
-    assert len(scheduler.scheduled_req_ids) == 0
     assert len(scheduler.finished_req_ids) == 0
     assert len(scheduler.finished_recving_KV_req_ids) == 0
     assert len(scheduler._cached_reqs_data) == 0
-    
+
     # EncoderCacheManager.
     assert len(scheduler.encoder_cache_manager.freed) == 0
     assert len(scheduler.encoder_cache_manager.cached) == 0
@@ -37,15 +38,16 @@ def assert_scheduler_empty(scheduler: Scheduler):
         scheduler.kv_cache_manager.block_pool.free_block_queue.num_free_blocks)
     assert num_free_blocks == (
         scheduler.kv_cache_manager.block_pool.num_gpu_blocks - 1)
-    
+
     # NOTE(rob): just the ref count on blocks will be 0. The hash
     # value, etc will remain since we lazily evict for prefix cache.
     for block in scheduler.kv_cache_manager.block_pool.blocks:
         assert block.ref_cnt == 0
         # assert block._block_hash is None
     # assert (
-    #     len(scheduler.kv_cache_manager.block_pool.cached_block_hash_to_block) == 0)
-    
+    #     len(scheduler.kv_cache_manager.block_pool.cached_block_hash_to_block
+    #           ) == 0)
+
 
 def create_vllm_config(
     model: str = "facebook/opt-125m",
@@ -80,13 +82,11 @@ def create_vllm_config(
         kv_connector="NixlConnector",
         kv_role="kv_both",
     )
-    return VllmConfig(
-        scheduler_config=scheduler_config,
-        model_config=model_config,
-        cache_config=cache_config,
-        kv_transfer_config=kv_transfer_config,
-        device_config=DeviceConfig("cpu")
-    )
+    return VllmConfig(scheduler_config=scheduler_config,
+                      model_config=model_config,
+                      cache_config=cache_config,
+                      kv_transfer_config=kv_transfer_config,
+                      device_config=DeviceConfig("cpu"))
 
 
 def create_scheduler(
@@ -125,14 +125,12 @@ def create_request(
 
     if do_remote_decode:
         assert not do_remote_prefill
-        kv_transfer_params = KVTransferParams(
-            do_remote_decode=True
-        )
+        kv_transfer_params = KVTransferParams(do_remote_decode=True)
     elif do_remote_prefill:
         kv_transfer_params = KVTransferParams(
             do_remote_prefill=True,
             remote_engine_id="remote_engine_id",
-            remote_block_ids=[1,2,3],
+            remote_block_ids=[1, 2, 3],
         )
     else:
         kv_transfer_params = None
@@ -145,13 +143,10 @@ def create_request(
     if use_all_1s_for_prompt_tokens:
         prompt_token_ids = [1] * num_tokens
     else:
-        prompt_token_ids = [
-            i * request_id for i in range(num_tokens)
-        ]
-        
+        prompt_token_ids = [i * request_id for i in range(num_tokens)]
+
     return Request(
         request_id=f"id-{request_id}",
-        prompt=None,
         prompt_token_ids=prompt_token_ids,
         sampling_params=sampling_params,
         multi_modal_inputs=None,
@@ -160,6 +155,7 @@ def create_request(
         eos_token_id=EOS_TOKEN_ID,
         arrival_time=0,
     )
+
 
 def create_model_runner_output(
     reqs: list[Request],
@@ -171,9 +167,7 @@ def create_model_runner_output(
 
     # Make request data.
     req_ids = [req.request_id for req in reqs]
-    req_id_to_index = {
-        req_id: idx for idx, req_id in enumerate(req_ids)
-    }
+    req_id_to_index = {req_id: idx for idx, req_id in enumerate(req_ids)}
 
     # Make sampled tokens.
     sampled_token = EOS_TOKEN_ID if use_eos else 0
