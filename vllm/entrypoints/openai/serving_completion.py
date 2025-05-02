@@ -8,7 +8,6 @@ from typing import Optional, Union, cast
 
 import jinja2
 from fastapi import Request
-from torch._C import NoneType
 
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
@@ -478,11 +477,13 @@ class OpenAIServingCompletion(OpenAIServing):
         request_metadata.final_usage_info = usage
 
         if final_res_batch[0].kv_transfer_params is not None:
-            remote_engine_id=final_res_batch[0].kv_transfer_params.remote_engine_id
-            remote_block_ids=final_res_batch[0].kv_transfer_params.remote_block_ids
+            remote_engine_id = final_res_batch[
+                0].kv_transfer_params.remote_engine_id
+            remote_block_ids = final_res_batch[
+                0].kv_transfer_params.remote_block_ids
         else:
-            remote_engine_id=None
-            remote_block_ids=None
+            remote_engine_id = None
+            remote_block_ids = None
 
         assert len(final_res_batch) == 1
         return CompletionResponse(
