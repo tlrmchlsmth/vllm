@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import math
+import os
 import time
 import uuid
 from collections import defaultdict
@@ -15,6 +16,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
 from vllm.logger import init_logger
 from vllm.sampling_params import KVTransferParams
+from vllm.utils import round_down
 from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
@@ -119,7 +121,6 @@ class NixlConnector(KVConnectorBase_V1):
     ############################################################
     # Worker Side Methods
     ############################################################
-
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         assert self.connector_worker is not None
         self.connector_worker.register_kv_caches(kv_caches)
@@ -172,9 +173,8 @@ class NixlConnectorScheduler:
         assert num_computed_tokens % self.block_size == 0
 
         if request.do_remote_prefill:
-            num_external_blocks = len(
-                request.prompt_token_ids) // self.block_size
-            rounded_num_prompt_tokens = num_external_blocks * self.block_size
+            rounded_num_prompt_tokens = round_down(
+                len(request.prompt_token_ids), self.block_size)
             return max(rounded_num_prompt_tokens - num_computed_tokens, 0)
 
         return 0
@@ -298,29 +298,31 @@ class NixlConnectorWorker:
 
         self._registered_descs.append(descs)
 
-        # THIS IS FOR DEBUG and INSECURE
-        import os
+        # THIS IS FOR DEV
         _ctx = zmq.Context()  # type: ignore
         _side_channel = _ctx.socket(zmq.PAIR)  # type: ignore
         NIXL_ROLE = os.getenv("NIXL_ROLE")
 
-        # For debug, SENDER puts some stuff in the KV caches
-        # so the RECVER can check it
-        n_blocks_to_send = min(4096, kv_caches[first_layer_name].shape[1])
-        debug_xfer_gb = 2.0 * n_blocks_to_send * self.block_len / 1e9
-        print(f"gb {debug_xfer_gb} -- block_len {self.block_len}")
-        if NIXL_ROLE == "SENDER":
-            for b in range(n_blocks_to_send):
-                kv_caches[first_layer_name][0, b, 0, 0, 0] = b + 100.0
-                kv_caches[first_layer_name][1, b, 0, 0, 0] = b + 200.0
-        for b in range(5):
-            print(
-                f"{NIXL_ROLE} KV_CACHE block b val {kv_caches[first_layer_name][0, b, 0, 0, 0]}"  #noqa
-            )
-            print(
-                f"{NIXL_ROLE} KV_CACHE block b val {kv_caches[first_layer_name][1, b, 0, 0, 0]}"  #noqa
-            )
-        remote_engine_id = None  # HACK for debug send
+        # FOR DEV, SENDER puts data in its KV caches so the RECVER can check it
+        if os.environ.get("VLLM_DEBUG_INITIAL_NIXL_PD_XFER") is not None:
+            n_blocks_to_send = min(4096, kv_caches[first_layer_name].shape[1])
+            debug_xfer_gb = 2.0 * n_blocks_to_send * self.block_len / 1e9
+            logger.debug(
+                "Starting initial NIXL PD XFER: Total %s GB, Block len %s KB",
+                debug_xfer_gb, self.block_len / 1024)
+            if NIXL_ROLE == "SENDER":
+                for b in range(n_blocks_to_send):
+                    kv_caches[first_layer_name][0, b, 0, 0, 0] = b + 100.0
+                    kv_caches[first_layer_name][1, b, 0, 0, 0] = b + 200.0
+
+            for b in range(5):
+                logger.debug("%s KV_CACHE coord %s val %f", NIXL_ROLE,
+                             (0, b, 0, 0, 0),
+                             kv_caches[first_layer_name][0, b, 0, 0, 0])
+                logger.debug("%s KV_CACHE coord %s val %f", NIXL_ROLE,
+                             (1, b, 0, 0, 0),
+                             kv_caches[first_layer_name][1, b, 0, 0, 0])
+            remote_engine_id = None  # HACK for debug send
 
         if NIXL_ROLE == "SENDER":
             _side_channel.connect("tcp://localhost:5577")
@@ -352,74 +354,76 @@ class NixlConnectorWorker:
             remote_engine_id = metadata.engine_id  #HACK
 
             self.add_remote_agent(metadata)
-            print("SENDING ACK")
+            logger.debug("SENDING ACK")
             _side_channel.send(b"ack")
 
         else:
             raise Exception("SET NIXL_ROLE to SENDER OR RECVER")
 
-        # FOR DEBUG: try to send some shit
+        # FOR DEV, SENDER puts data in its KV caches so the RECVER can check it
 
-        if NIXL_ROLE == "RECVER":
-            logger.debug("Sending blocks")
-            connector_metadata = NixlConnectorMetadata()
-            assert remote_engine_id is not None
-            xfer_params = KVTransferParams(
-                do_remote_decode=True,
-                do_remote_prefill=False,
-                remote_block_ids=list(range(n_blocks_to_send)),
-                remote_engine_id=remote_engine_id  #HACK
-            )
+        if os.environ.get("VLLM_DEBUG_INITIAL_NIXL_PD_XFER") is not None:
+            initial_xfer_req_id = "initial_xfer_req_id"
 
-            connector_metadata.add_new_req(request_id="tms",
-                                           local_block_ids=list(
-                                               range(n_blocks_to_send)),
-                                           kv_transfer_params=xfer_params)
-            self.start_load_kv(connector_metadata)
+            if NIXL_ROLE == "RECVER":
+                logger.debug("SENDING BLOCKS")
+                connector_metadata = NixlConnectorMetadata()
+                assert remote_engine_id is not None
+                xfer_params = KVTransferParams(
+                    do_remote_decode=True,
+                    do_remote_prefill=False,
+                    remote_block_ids=list(range(n_blocks_to_send)),
+                    remote_engine_id=remote_engine_id  #HACK
+                )
 
-            # Wait for Receive to complete
-            logger.debug("TMS START RECEIVE XFER")
-            done = False
-            start_time = time.time()
-            while (not done):
-                finished = self.get_finished()
-                # NOTE: Should fix discrepancy between bytes/str finished sets
-                # Here we have str. For sender we have bytes.
-                done = "tms" in finished[1]
-                time.sleep(1e-5)
-            end_time = time.time()
-            execution_time = end_time - start_time
-            logger.debug(
-                "Transfer Received. Duration: %f ms Bandwidth %f GB/s",
-                1e3 * execution_time, debug_xfer_gb / execution_time)
+                connector_metadata.add_new_req(request_id=initial_xfer_req_id,
+                                               local_block_ids=list(
+                                                   range(n_blocks_to_send)),
+                                               kv_transfer_params=xfer_params)
+                self.start_load_kv(connector_metadata)
 
-        if NIXL_ROLE == "SENDER":
-            # Wait for Send to complete
-            logger.debug("TMS START SEND XFER")
-            done = False
-            start_time = time.time()
-            while (not done):
-                finished = self.get_finished()
-                done = "tms" in finished[0]
-                time.sleep(1e-5)
-            end_time = time.time()
-            execution_time = end_time - start_time
-            logger.debug("Transfer Sent. Duration: %f ms Bandwidth %f GB/s",
-                         1e3 * execution_time, debug_xfer_gb / execution_time)
+                # Wait for Receive to complete
+                logger.debug("START RECEIVE XFER")
+                done = False
+                start_time = time.time()
+                while (not done):
+                    finished = self.get_finished()
+                    done = initial_xfer_req_id in finished[1]
+                    time.sleep(1e-5)
+                end_time = time.time()
+                execution_time = end_time - start_time
+                logger.debug(
+                    "Transfer Received. Duration: %f ms Bandwidth %f GB/s",
+                    1e3 * execution_time, debug_xfer_gb / execution_time)
 
-            # Put some different stuff in there
             if NIXL_ROLE == "SENDER":
-                for b in range(n_blocks_to_send):
-                    kv_caches[first_layer_name][0, b, 0, 0, 0] = b + 300.0
-                    kv_caches[first_layer_name][1, b, 0, 0, 0] = b + 400.0
+                # Wait for Send to complete
+                logger.debug("START SEND XFER")
+                done = False
+                start_time = time.time()
+                while (not done):
+                    finished = self.get_finished()
+                    done = initial_xfer_req_id in finished[0]
+                    time.sleep(1e-5)
+                end_time = time.time()
+                execution_time = end_time - start_time
+                logger.debug(
+                    "Transfer Sent. Duration: %f ms Bandwidth %f GB/s",
+                    1e3 * execution_time, debug_xfer_gb / execution_time)
 
-        for b in range(5):
-            print(
-                f"{NIXL_ROLE} KV_CACHE block b val {kv_caches[first_layer_name][0, b, 0, 0, 0]}"  #noqa
-            )
-            print(
-                f"{NIXL_ROLE} KV_CACHE block b val {kv_caches[first_layer_name][1, b, 0, 0, 0]}"  #noqa
-            )
+                # Put some different stuff in there
+                if NIXL_ROLE == "SENDER":
+                    for b in range(n_blocks_to_send):
+                        kv_caches[first_layer_name][0, b, 0, 0, 0] = b + 300.0
+                        kv_caches[first_layer_name][1, b, 0, 0, 0] = b + 400.0
+
+            for b in range(5):
+                logger.debug("%s KV_CACHE coord %s val %f", NIXL_ROLE,
+                             (0, b, 0, 0, 0),
+                             kv_caches[first_layer_name][0, b, 0, 0, 0])
+                logger.debug("%s KV_CACHE coord %s val %f", NIXL_ROLE,
+                             (1, b, 0, 0, 0),
+                             kv_caches[first_layer_name][1, b, 0, 0, 0])
 
     def add_remote_agent(self, nixl_agent_meta: NixlAgentMetadata, tp_idx=0):
         engine_id = nixl_agent_meta.engine_id
