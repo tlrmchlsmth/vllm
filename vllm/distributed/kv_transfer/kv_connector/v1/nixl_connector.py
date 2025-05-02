@@ -277,17 +277,19 @@ class NixlConnectorWorker:
         logger.debug("Size of encoded NixlAgentMetadata: %s bytes",
                      str(size_in_bytes))
 
-        identity, message = _side_channel.recv_multipart()
-        print(f"[Server] Received from {identity}: {message}")
+        while True:
+            print(f"Listen for new connect...")
+            identity, message = _side_channel.recv_multipart()
+            print(f"[Server] Received from {identity}: {message}")
 
-        _side_channel.send_multipart([identity, encoder.encode(metadata)])
-        #_side_channel.send(encoder.encode(metadata))
+            _side_channel.send_multipart([identity, encoder.encode(metadata)])
+            #_side_channel.send(encoder.encode(metadata))
 
-        logger.debug("WAITING ON RECV") # XXX assuming we have a single client now
-        identity, ack = _side_channel.recv_multipart()
-        logger.debug("GOT ACK %s", ack)
+            logger.debug("WAITING ON RECV") # XXX assuming we have a single client now
+            identity, ack = _side_channel.recv_multipart()
+            logger.debug("GOT ACK %s", ack)
 
-        self.hack_event.set()
+            self.hack_event.set()
 
     def make_connection(self, host, port):
         _ctx = zmq.Context()  # type: ignore
@@ -382,78 +384,81 @@ class NixlConnectorWorker:
             thread = threading.Thread(target=self.conn_listener, daemon=True, name="nixl-conn-listener")
             thread.start()
 
-            logger.debug(f"HACK wait for static connection establishment")
-            while not self.hack_event.is_set():
-                time.sleep(1)
+            # HACK for debugging
+            # logger.debug(f"HACK wait for static connection establishment")
+            # while not self.hack_event.is_set():
+            #     time.sleep(1)
 
-            logger.debug(f"HACK connection established")
+            # logger.debug(f"HACK connection established")
         elif NIXL_ROLE == "RECVER":
-            remote_engine_id = self.make_connection("localhost", 5577) # HACK call it statically for now
+            # HACE only enable for debugging
+            #remote_engine_id = self.make_connection("localhost", 5577) # HACK call it statically for now
+            pass
         else:
             raise Exception("SET NIXL_ROLE to SENDER OR RECVER")
 
         # FOR DEBUG: try to send some shit
 
-        if NIXL_ROLE == "RECVER":
-            logger.debug("Sending blocks")
-            connector_metadata = NixlConnectorMetadata()
-            assert remote_engine_id is not None
-            xfer_params = KVTransferParams(
-                do_remote_decode=True,
-                do_remote_prefill=False,
-                remote_block_ids=list(range(n_blocks_to_send)),
-                remote_engine_id=remote_engine_id  #HACK
-            )
+        # if NIXL_ROLE == "RECVER":
+        #     logger.debug("Sending blocks")
+        #     connector_metadata = NixlConnectorMetadata()
+        #     assert remote_engine_id is not None
+        #     xfer_params = KVTransferParams(
+        #         do_remote_decode=True,
+        #         do_remote_prefill=False,
+        #         remote_block_ids=list(range(n_blocks_to_send)),
+        #         remote_engine_id=remote_engine_id  #HACK
+        #     )
 
-            connector_metadata.add_new_req(request_id="tms",
-                                           local_block_ids=list(
-                                               range(n_blocks_to_send)),
-                                           kv_transfer_params=xfer_params)
-            self.start_load_kv(connector_metadata)
+        #     connector_metadata.add_new_req(request_id="tms",
+        #                                    local_block_ids=list(
+        #                                        range(n_blocks_to_send)),
+        #                                    kv_transfer_params=xfer_params)
+        #     self.start_load_kv(connector_metadata)
 
-            # Wait for Receive to complete
-            logger.debug("TMS START RECEIVE XFER")
-            done = False
-            start_time = time.time()
-            while (not done):
-                finished = self.get_finished()
-                # NOTE: Should fix discrepancy between bytes/str finished sets
-                # Here we have str. For sender we have bytes.
-                done = "tms" in finished[1]
-                time.sleep(1e-5)
-            end_time = time.time()
-            execution_time = end_time - start_time
-            logger.debug(
-                "Transfer Received. Duration: %f ms Bandwidth %f GB/s",
-                1e3 * execution_time, debug_xfer_gb / execution_time)
+        #     # Wait for Receive to complete
+        #     logger.debug("TMS START RECEIVE XFER")
+        #     done = False
+        #     start_time = time.time()
+        #     while (not done):
+        #         finished = self.get_finished()
+        #         # NOTE: Should fix discrepancy between bytes/str finished sets
+        #         # Here we have str. For sender we have bytes.
+        #         done = "tms" in finished[1]
+        #         time.sleep(1e-5)
+        #     end_time = time.time()
+        #     execution_time = end_time - start_time
+        #     logger.debug(
+        #         "Transfer Received. Duration: %f ms Bandwidth %f GB/s",
+        #         1e3 * execution_time, debug_xfer_gb / execution_time)
 
-        if NIXL_ROLE == "SENDER":
-            # Wait for Send to complete
-            logger.debug("TMS START SEND XFER")
-            done = False
-            start_time = time.time()
-            while (not done):
-                finished = self.get_finished()
-                done = "tms" in finished[0]
-                time.sleep(1e-5)
-            end_time = time.time()
-            execution_time = end_time - start_time
-            logger.debug("Transfer Sent. Duration: %f ms Bandwidth %f GB/s",
-                         1e3 * execution_time, debug_xfer_gb / execution_time)
+        # if NIXL_ROLE == "SENDER":
+        #     # Wait for Send to complete
+        #     logger.debug("TMS START SEND XFER")
+        #     done = False
+        #     start_time = time.time()
+        #     while (not done):
+        #         finished = self.get_finished()
+        #         done = "tms" in finished[0]
+        #         time.sleep(1e-5)
+        #     end_time = time.time()
+        #     execution_time = end_time - start_time
+        #     logger.debug("Transfer Sent. Duration: %f ms Bandwidth %f GB/s",
+        #                  1e3 * execution_time, debug_xfer_gb / execution_time)
 
-            # Put some different stuff in there
-            if NIXL_ROLE == "SENDER":
-                for b in range(n_blocks_to_send):
-                    kv_caches[first_layer_name][0, b, 0, 0, 0] = b + 300.0
-                    kv_caches[first_layer_name][1, b, 0, 0, 0] = b + 400.0
+        #     # Put some different stuff in there
+        #     if NIXL_ROLE == "SENDER":
+        #         for b in range(n_blocks_to_send):
+        #             kv_caches[first_layer_name][0, b, 0, 0, 0] = b + 300.0
+        #             kv_caches[first_layer_name][1, b, 0, 0, 0] = b + 400.0
 
-        for b in range(5):
-            print(
-                f"{NIXL_ROLE} KV_CACHE block b val {kv_caches[first_layer_name][0, b, 0, 0, 0]}"  #noqa
-            )
-            print(
-                f"{NIXL_ROLE} KV_CACHE block b val {kv_caches[first_layer_name][1, b, 0, 0, 0]}"  #noqa
-            )
+        # for b in range(5):
+        #     print(
+        #         f"{NIXL_ROLE} KV_CACHE block b val {kv_caches[first_layer_name][0, b, 0, 0, 0]}"  #noqa
+        #     )
+        #     print(
+        #         f"{NIXL_ROLE} KV_CACHE block b val {kv_caches[first_layer_name][1, b, 0, 0, 0]}"  #noqa
+        #     )
 
     def add_remote_agent(self, nixl_agent_meta: NixlAgentMetadata, tp_idx=0):
         engine_id = nixl_agent_meta.engine_id
@@ -594,7 +599,7 @@ class NixlConnectorWorker:
         request_id: str,
     ):
         if dst_engine_id not in self._remote_agents:
-            make_connection("localhost", 5577)  # HACK: we need to be able to have host and port with dst_engine_id
+            self.make_connection("localhost", 5577)  # HACK: we need to be able to have host and port with dst_engine_id
 
         # NOTE(rob): having the staging blocks be on the READER side is
         # not going to work well (since we will have to call rearrange tensors).
