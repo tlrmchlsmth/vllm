@@ -3,7 +3,7 @@ import math
 import time
 import uuid
 from collections import defaultdict
-from typing import TYPE_CHECKING, Any, Union
+from typing import TYPE_CHECKING, Any
 
 import msgspec
 import torch
@@ -221,8 +221,8 @@ class NixlConnectorWorker:
         self.nixl_wrapper = NixlWrapper(str(uuid.uuid4()), None)
         self.agent_name = self.nixl_wrapper.name
 
-        # Map of engine_id -> list[agent_names] (1 per rank).
-        self._remote_agents: dict[str, list[str]] = {}
+        # Map of engine_id -> agent_name.
+        self._remote_agents: dict[str, str] = {}
 
         # Metadata.
         self.engine_id = engine_id
@@ -231,11 +231,8 @@ class NixlConnectorWorker:
         # KV Caches and nixl tracking data.
         self.kv_caches: dict[str, torch.Tensor] = {}
 
-        # Map of engine_id -> kv_caches_base_addr
-        # For Local: base addr for *this* rank, each layer for K,V
-        # For Remote: base addr for *each* rank, each layer for K,V
-        self.kv_caches_base_addr: dict[str, Union[list[int]],
-                                       list[list[int]]] = {}
+        # Map of engine_id -> kv_caches_base_addr for layers.
+        self.kv_caches_base_addr: dict[str, list[int]] = {}
 
         # Number of NIXL regions. Currently one region per cache
         # (so 1 per layer for MLA, otherwise 2 per layer)
@@ -309,15 +306,15 @@ class NixlConnectorWorker:
         if NIXL_ROLE == "SENDER":
             for b in range(n_blocks_to_send):
                 kv_caches[first_layer_name][0, b, 0, 0,
-                                            0] = b + 100 * (self.rank + 1)
+                                            0] = b + 100. + self.rank
                 kv_caches[first_layer_name][1, b, 0, 0,
-                                            0] = b + 200 * (self.rank + 1)
+                                            0] = b + 200. + self.rank
         for b in range(5):
             print(
-                f"{NIXL_ROLE} KV_CACHE block b val {kv_caches[first_layer_name][0, b, 0, 0, 0]=}"  #noqa
+                f"{NIXL_ROLE} KV_CACHE block {b} val {kv_caches[first_layer_name][0, b, 0, 0, 0]}"  #noqa
             )
             print(
-                f"{NIXL_ROLE} KV_CACHE block b val {kv_caches[first_layer_name][1, b, 0, 0, 0]=}"  #noqa
+                f"{NIXL_ROLE} KV_CACHE block {b} val {kv_caches[first_layer_name][1, b, 0, 0, 0]}"  #noqa
             )
 
         # Hack for development: create unique port.
@@ -367,11 +364,11 @@ class NixlConnectorWorker:
 
             # Trigger a recv.
             connector_metadata = NixlConnectorMetadata()
-            xfer_params = KVTransferParams(
-                do_remote_decode=True,
-                do_remote_prefill=False,
-                remote_block_ids=list(range(n_blocks_to_send)),
-                remote_engine_id=metadata.remote_engine_id)
+            xfer_params = KVTransferParams(do_remote_decode=True,
+                                           do_remote_prefill=False,
+                                           remote_block_ids=list(
+                                               range(n_blocks_to_send)),
+                                           remote_engine_id=metadata.engine_id)
             connector_metadata.add_new_req(
                 request_id="tms",
                 local_block_ids=list(range(n_blocks_to_send)),
@@ -413,16 +410,16 @@ class NixlConnectorWorker:
             if NIXL_ROLE == "SENDER":
                 for b in range(n_blocks_to_send):
                     kv_caches[first_layer_name][0, b, 0, 0,
-                                                0] = b + 300 * (self.rank + 1)
+                                                0] = b + 300. + self.rank
                     kv_caches[first_layer_name][1, b, 0, 0,
-                                                0] = b + 400 * (self.rank + 1)
+                                                0] = b + 400. + self.rank
 
         for b in range(5):
             print(
-                f"{NIXL_ROLE} KV_CACHE rank {self.rank} block b val {kv_caches[first_layer_name][0, b, 0, 0, 0]=}"  #noqa
+                f"{NIXL_ROLE} KV_CACHE block {b} val {kv_caches[first_layer_name][0, b, 0, 0, 0]}"  #noqa
             )
             print(
-                f"{NIXL_ROLE} KV_CACHE block {self.rank} b val {kv_caches[first_layer_name][1, b, 0, 0, 0]=}"  #noqa
+                f"{NIXL_ROLE} KV_CACHE block {b} val {kv_caches[first_layer_name][1, b, 0, 0, 0]}"  #noqa
             )
 
     def add_remote_agent(self, nixl_agent_meta: NixlAgentMetadata):
@@ -430,11 +427,8 @@ class NixlConnectorWorker:
         if engine_id in self._remote_agents:
             return
 
-        agent_names = []
-        for agent_meta in nixl_agent_meta.agent_metadata:
-            agent_name = self.nixl_wrapper.add_remote_agent(agent_meta)
-            agent_names.append(agent_name)
-        self._remote_agents[engine_id] = agent_names
+        self._remote_agents[engine_id] = self.nixl_wrapper.add_remote_agent(
+            nixl_agent_meta.agent_metadata)
         self.kv_caches_base_addr[
             engine_id] = nixl_agent_meta.kv_caches_base_addr
 
@@ -463,7 +457,7 @@ class NixlConnectorWorker:
         # Create dst descs and xfer side handles.
         self.dst_num_blocks[engine_id] = nixl_agent_meta.num_blocks
         blocks_data = []
-        for base_addr in self.kv_caches_base_addr[engine_id][self.rank]:
+        for base_addr in self.kv_caches_base_addr[engine_id]:
             for block_id in range(nixl_agent_meta.num_blocks):
                 block_offset = block_id * self.block_len
                 # (addr, len, device id)
@@ -476,7 +470,7 @@ class NixlConnectorWorker:
         descs = self.nixl_wrapper.get_xfer_descs(blocks_data, "VRAM")
         self.dst_xfer_side_handles[
             engine_id] = self.nixl_wrapper.prep_xfer_dlist(
-                self._remote_agents[engine_id][self.rank], descs)
+                self._remote_agents[engine_id], descs)
 
     def get_finished(self) -> tuple[set[str], set[str]]:
         """Get requests that are done sending or recving."""
