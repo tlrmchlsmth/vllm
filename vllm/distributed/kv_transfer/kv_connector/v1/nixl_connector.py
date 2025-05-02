@@ -599,7 +599,8 @@ class NixlConnectorWorker:
         request_id: str,
     ):
         if dst_engine_id not in self._remote_agents:
-            self.make_connection("localhost", 5577)  # HACK: we need to be able to have host and port with dst_engine_id
+            remote_engine_id = self.make_connection("localhost", 5577)  # HACK: we need to be able to retrieve  host and port from Request
+            assert(dst_engine_id == remote_engine_id)
 
         # NOTE(rob): having the staging blocks be on the READER side is
         # not going to work well (since we will have to call rearrange tensors).
