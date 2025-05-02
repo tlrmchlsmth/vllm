@@ -72,6 +72,10 @@ class KVConnectorBase_V1(ABC):
         """
         return
 
+    def get_finished(self) -> tuple[set[str], set[str]]:
+        """Get the finished recving and sending requests."""
+        return set(), set()
+
     @property
     def role(self) -> KVConnectorRole:
         return self._role
