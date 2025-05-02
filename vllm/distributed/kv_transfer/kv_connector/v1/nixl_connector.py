@@ -323,7 +323,7 @@ class NixlConnectorWorker:
         remote_engine_id = None  # HACK for debug send
 
         if NIXL_ROLE == "SENDER":
-            _side_channel.connect("tcp://localhost:5577")
+            _side_channel.bind("tcp://localhost:5577")
             _side_channel.setsockopt(zmq.LINGER, 0)  # type: ignore
             metadata = NixlAgentMetadata(
                 engine_id=self.engine_id,
@@ -343,7 +343,7 @@ class NixlConnectorWorker:
             logger.debug("GOT ACK %s", ack)
 
         elif NIXL_ROLE == "RECVER":
-            _side_channel.bind("tcp://localhost:5577")
+            _side_channel.connect("tcp://localhost:5577")
             _side_channel.setsockopt(zmq.LINGER, 0)  # type: ignore
             decoder = msgspec.msgpack.Decoder(NixlAgentMetadata)
             metadata_bytes = _side_channel.recv()
