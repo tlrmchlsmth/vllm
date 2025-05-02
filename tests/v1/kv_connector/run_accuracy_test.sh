@@ -8,16 +8,6 @@ MODEL_NAME=Qwen/Qwen3-0.6B
 # Trap the SIGINT signal (triggered by Ctrl+C)
 trap 'kill $(jobs -pr)' SIGINT SIGTERM EXIT
 
-# Cleanup function
-cleanup() {
-    echo "Caught Ctrl+C, cleaning up..."
-    # Cleanup commands
-    pgrep python | xargs kill -9
-    pkill -f python
-    echo "Cleanup complete. Exiting."
-    exit 0
-}
-
 # Waits for vLLM to start.
 wait_for_server() {
   local port=$1
