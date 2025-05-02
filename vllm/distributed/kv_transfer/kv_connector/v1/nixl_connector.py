@@ -9,6 +9,7 @@ import msgspec
 import torch
 import zmq
 from typing_extensions import Optional
+import threading
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -255,6 +256,39 @@ class NixlConnectorWorker:
         # [req_id -> list[handle]]
         self._recving_transfers: dict[str, list[Any]] = defaultdict(list[Any])
 
+    def conn_listener(self):
+        _ctx = zmq.Context()  # type: ignore
+        _side_channel = _ctx.socket(zmq.ROUTER)  # XXX zmq.PAIR)  # type: ignore
+
+        _side_channel.bind("tcp://localhost:5577")
+        _side_channel.setsockopt(zmq.LINGER, 0)  # type: ignore
+
+        logger.debug(f"Prefiller Listening on port 5577")
+
+        metadata = NixlAgentMetadata(
+            engine_id=self.engine_id,
+            agent_metadata=self.nixl_wrapper.get_agent_metadata(),
+            kv_caches_base_addr=self.kv_caches_base_addr[self.engine_id],
+            num_blocks=self.num_blocks,
+        )
+        encoder = msgspec.msgpack.Encoder()
+        encoded_data = encoder.encode(metadata)
+        size_in_bytes = len(encoded_data)
+        logger.debug("Size of encoded NixlAgentMetadata: %s bytes",
+                     str(size_in_bytes))
+
+        identity, message = _side_channel.recv_multipart()
+        print(f"[Server] Received from {identity}: {message}")
+
+        _side_channel.send_multipart([identity, encoder.encode(metadata)])
+        #_side_channel.send(encoder.encode(metadata))
+
+        logger.debug("WAITING ON RECV") # XXX assuming we have a single client now
+        identity, ack = _side_channel.recv_multipart()
+        logger.debug("GOT ACK %s", ack)
+
+        self.hack_event.set()
+
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in nixl."""
 
@@ -303,10 +337,8 @@ class NixlConnectorWorker:
 
         NIXL_ROLE = os.getenv("NIXL_ROLE")
 
-        _ctx = zmq.Context()  # type: ignore
-        if NIXL_ROLE == "SENDER":
-            _side_channel = _ctx.socket(zmq.ROUTER)  # XXX zmq.PAIR)  # type: ignore
-        elif NIXL_ROLE == "RECVER":
+        if NIXL_ROLE == "RECVER":
+            _ctx = zmq.Context()  # type: ignore
             _side_channel = _ctx.socket(zmq.DEALER)
 
         # For debug, SENDER puts some stuff in the KV caches
@@ -328,30 +360,15 @@ class NixlConnectorWorker:
         remote_engine_id = None  # HACK for debug send
 
         if NIXL_ROLE == "SENDER":
-            _side_channel.bind("tcp://localhost:5577")
-            _side_channel.setsockopt(zmq.LINGER, 0)  # type: ignore
-            metadata = NixlAgentMetadata(
-                engine_id=self.engine_id,
-                agent_metadata=self.nixl_wrapper.get_agent_metadata(),
-                kv_caches_base_addr=self.kv_caches_base_addr[self.engine_id],
-                num_blocks=self.num_blocks,
-            )
-            encoder = msgspec.msgpack.Encoder()
-            encoded_data = encoder.encode(metadata)
-            size_in_bytes = len(encoded_data)
-            logger.debug("Size of encoded NixlAgentMetadata: %s bytes",
-                         str(size_in_bytes))
+            self.hack_event = threading.Event()
+            thread = threading.Thread(target=self.conn_listener, daemon=True, name="nixl-conn-listener")
+            thread.start()
 
-            identity, message = _side_channel.recv_multipart()
-            print(f"[Server] Received from {identity}: {message}")
+            logger.debug(f"HACK wait for static connection establishment")
+            while not self.hack_event.is_set():
+                time.sleep(1)
 
-            _side_channel.send_multipart([identity, encoder.encode(metadata)])
-            #_side_channel.send(encoder.encode(metadata))
-
-            logger.debug("WAITING ON RECV") # XXX assuming we have a single client now
-            identity, ack = _side_channel.recv_multipart()
-            logger.debug("GOT ACK %s", ack)
-
+            logger.debug(f"HACK connection established")
         elif NIXL_ROLE == "RECVER":
             _side_channel.setsockopt_string(zmq.IDENTITY, self.engine_id)
             _side_channel.connect("tcp://localhost:5577")
