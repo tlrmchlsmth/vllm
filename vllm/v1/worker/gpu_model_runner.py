@@ -1054,9 +1054,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 maybe_setup_kv_connector()
                 maybe_wait_for_save()
                 finished_sending, finished_recving = maybe_get_finished()
+
             # Return empty ModelRunnerOutput if there's no work to do.
-            output = copy.deepcopy(EMPTY_MODEL_RUNNER_OUTPUT)
+            output = EMPTY_MODEL_RUNNER_OUTPUT
+
             if len(finished_sending) > 0 or len(finished_recving) > 0:
+                output = copy.deepcopy(EMPTY_MODEL_RUNNER_OUTPUT)
                 output.finished_sending = finished_sending
                 output.finished_recving = finished_recving
             return output
