@@ -300,9 +300,14 @@ class NixlConnectorWorker:
 
         # THIS IS FOR DEBUG and INSECURE
         import os
-        _ctx = zmq.Context()  # type: ignore
-        _side_channel = _ctx.socket(zmq.PAIR)  # type: ignore
+
         NIXL_ROLE = os.getenv("NIXL_ROLE")
+
+        _ctx = zmq.Context()  # type: ignore
+        if NIXL_ROLE == "SENDER":
+            _side_channel = _ctx.socket(zmq.ROUTER)  # XXX zmq.PAIR)  # type: ignore
+        elif NIXL_ROLE == "RECVER":
+            _side_channel = _ctx.socket(zmq.DEALER)
 
         # For debug, SENDER puts some stuff in the KV caches
         # so the RECVER can check it
@@ -336,15 +341,23 @@ class NixlConnectorWorker:
             size_in_bytes = len(encoded_data)
             logger.debug("Size of encoded NixlAgentMetadata: %s bytes",
                          str(size_in_bytes))
-            _side_channel.send(encoder.encode(metadata))
 
-            logger.debug("WAITING ON RECV")
-            ack = _side_channel.recv()
+            identity, message = _side_channel.recv_multipart()
+            print(f"[Server] Received from {identity}: {message}")
+
+            _side_channel.send_multipart([identity, encoder.encode(metadata)])
+            #_side_channel.send(encoder.encode(metadata))
+
+            logger.debug("WAITING ON RECV") # XXX assuming we have a single client now
+            identity, ack = _side_channel.recv_multipart()
             logger.debug("GOT ACK %s", ack)
 
         elif NIXL_ROLE == "RECVER":
+            _side_channel.setsockopt_string(zmq.IDENTITY, self.engine_id)
             _side_channel.connect("tcp://localhost:5577")
             _side_channel.setsockopt(zmq.LINGER, 0)  # type: ignore
+
+            _side_channel.send(b"Connect")
             decoder = msgspec.msgpack.Decoder(NixlAgentMetadata)
             metadata_bytes = _side_channel.recv()
             metadata = decoder.decode(metadata_bytes)
