@@ -282,7 +282,7 @@ class NixlConnectorWorker:
         # Listen for new requests for metadata.
         host = envs.VLLM_NIXL_SIDE_CHANNEL_HOST
         port = envs.VLLM_NIXL_SIDE_CHANNEL_PORT
-        with zmq_ctx(zmq.constants.ROUTER, f"tcp://{host}:{port}") as sock:
+        with zmq_ctx(zmq.ROUTER, f"tcp://{host}:{port}") as sock:
             ready_event.set()
             while True:
                 identity, msg = sock.recv_multipart()
@@ -295,8 +295,8 @@ class NixlConnectorWorker:
     def _nixl_handshake(self, host: str, port: int):
         """Do a NIXL handshake with a remote prefill instance."""
 
-        with zmq_ctx(zmq.constants.REQ, f"tcp://{host}:{port}") as sock:
-            # Q
+        with zmq_ctx(zmq.REQ, f"tcp://{host}:{port}") as sock:
+            # Send query for the request.
             sock.send_string(GET_META_MSG)
             metadata_bytes = sock.recv()
             decoder = msgspec.msgpack.Decoder(NixlAgentMetadata)
@@ -599,10 +599,10 @@ def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:
     try:
         ctx = zmq.Context()
 
-        if socket_type == zmq.constants.ROUTER:
+        if socket_type == zmq.ROUTER:
             socket = ctx.socket(zmq.ROUTER)
             socket.bind(addr)
-        elif socket_type == zmq.constants.REQ:
+        elif socket_type == zmq.REQ:
             socket = ctx.socket(zmq.REQ)
             socket.connect(addr)
         else:
