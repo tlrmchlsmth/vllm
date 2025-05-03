@@ -5,18 +5,11 @@ set -xe
 # Model to run.
 MODEL_NAME=Qwen/Qwen3-0.6B
 
+# Find the git repository root directory
+GIT_ROOT=$(git rev-parse --show-toplevel)
+
 # Trap the SIGINT signal (triggered by Ctrl+C)
 trap 'kill $(jobs -pr)' SIGINT SIGTERM EXIT
-
-# Cleanup function
-cleanup() {
-    echo "Caught Ctrl+C, cleaning up..."
-    # Cleanup commands
-    pgrep python | xargs kill -9
-    pkill -f python
-    echo "Cleanup complete. Exiting."
-    exit 0
-}
 
 # Waits for vLLM to start.
 wait_for_server() {
@@ -46,7 +39,7 @@ wait_for_server 8100
 wait_for_server 8200
 
 # Proxy server.
-python toy_proxy_server.py --port 8192 &
+python ${GIT_ROOT}/tests/v1/kv_connector/toy_proxy_server.py --port 8192 &
 
 # Run lm eval.
-python3 -m pytest -s -x test_accuracy.py
+python -m pytest -s -x ${GIT_ROOT}/tests/v1/kv_connector/test_accuracy.py

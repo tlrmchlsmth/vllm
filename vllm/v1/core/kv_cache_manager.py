@@ -179,8 +179,8 @@ class KVCacheManager:
             num_lookahead_tokens: The number of speculative tokens to allocate.
                 This is used by spec decode proposers with kv-cache such
                 as eagle.
-            skip_cache_blocks: Whether to skip cachings the blocks. This is
-                used by P/D when allocating blocks that used in KV transfer
+            skip_cache_blocks: Whether to skip caching the blocks. This is
+                used by P/D when allocating blocks used in a KV transfer
                 which will complete in a future step.
 
         Blocks layout:
@@ -399,9 +399,8 @@ class KVCacheManager:
         Returns:
             int: The number of common prefix blocks.
         """
-        assert request.status in [
-            RequestStatus.RUNNING, RequestStatus.FINISHED_REMOTE_DECODE
-        ]
+        assert request.status in (RequestStatus.RUNNING,
+                                  RequestStatus.FINISHED_REMOTE_DECODE)
         blocks = self.req_to_blocks[request.request_id]
         num_common_blocks = 0
         for block in blocks:

@@ -872,11 +872,13 @@ class CompletionRequest(OpenAIBaseModel):
         default=False,
         description="KVTransfer parameters used for disaggregated serving.")
 
-    remote_engine_id: Optional[str] = Field(default=None,
-                                            description="Remote engine id.")
+    remote_engine_id: Optional[str] = Field(
+        default=None,
+        description="Remote engine id for prefill-decode disaggregation.")
 
     remote_block_ids: Optional[list[int]] = Field(
-        default=None, description="Remote block ids.")
+        default=None,
+        description="Remote block ids for prefill-decode disaggregation.")
 
     # doc: end-completion-extra-params
 
@@ -1262,6 +1264,12 @@ class CompletionResponse(OpenAIBaseModel):
     model: str
     choices: list[CompletionResponseChoice]
     usage: UsageInfo
+    remote_engine_id: Optional[str] = Field(
+        default=None,
+        description="Remote engine id for prefill-decode disaggregation.")
+    remote_block_ids: Optional[list[int]] = Field(
+        default=None,
+        description="Remote block ids for prefill-decode disaggregation.")
 
 
 class CompletionResponseStreamChoice(OpenAIBaseModel):

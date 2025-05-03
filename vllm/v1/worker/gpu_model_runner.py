@@ -1047,8 +1047,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if has_kv_transfer_group():
                 kv_connector = get_kv_transfer_group()
                 return kv_connector.get_finished()
-            else:
-                return set(), set()
+            return set(), set()
 
         self._update_states(scheduler_output)
         if not scheduler_output.total_num_scheduled_tokens:
@@ -1057,9 +1056,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 maybe_setup_kv_connector()
                 maybe_wait_for_save()
                 finished_sending, finished_recving = maybe_get_finished()
+
             # Return empty ModelRunnerOutput if there's no work to do.
-            output = copy.deepcopy(EMPTY_MODEL_RUNNER_OUTPUT)
+            output = EMPTY_MODEL_RUNNER_OUTPUT
+
             if len(finished_sending) > 0 or len(finished_recving) > 0:
+                output = copy.deepcopy(EMPTY_MODEL_RUNNER_OUTPUT)
                 output.finished_sending = finished_sending
                 output.finished_recving = finished_recving
             return output
