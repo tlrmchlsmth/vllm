@@ -401,9 +401,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Update the states of the running/resumed requests.
         for req_data in scheduler_output.scheduled_cached_reqs:
             req_id = req_data.req_id
-            if req_id not in self.requests:
-                print(f"{req_id} {self.requests}")
-                continue
             req_state = self.requests[req_id]
 
             # Update the cached states.
