@@ -17,7 +17,9 @@ from vllm import envs
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
-from vllm.distributed.parallel_state import get_tensor_model_parallel_rank
+from vllm.distributed.parallel_state import (
+    get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size,
+    get_tp_group)
 from vllm.logger import init_logger
 from vllm.sampling_params import KVTransferParams
 from vllm.utils import round_down
@@ -227,6 +229,8 @@ class NixlConnectorWorker:
         # Metadata.
         self.engine_id = engine_id
         self.rank = get_tensor_model_parallel_rank()
+        self.world_size = get_tensor_model_parallel_world_size()
+        self.tp_group = get_tp_group()
 
         # KV Caches and nixl tracking data.
         self.kv_caches: dict[str, torch.Tensor] = {}
@@ -250,6 +254,12 @@ class NixlConnectorWorker:
         # In progress transfers.
         # [req_id -> list[handle]]
         self._recving_transfers: dict[str, list[Any]] = defaultdict(list[Any])
+
+        # Complete transfer tracker. Used by the rank 0 to track finished
+        # transactions on ranks 1 to N-1.
+        # [req_id -> count]
+        self._done_recving_count: defaultdict[str, int] = defaultdict(0)
+        self._done_sending_count: defaultdict[str, int] = defaultdict(0)
 
         # Background thread for establishing new connections.
         self._nixl_handshake_listener_t: Optional[threading.Thread] = None
@@ -422,12 +432,64 @@ class NixlConnectorWorker:
         """Get requests that are done sending or recving."""
         done_sending = self._get_new_notifs()
         done_recving = self._pop_done_transfers(self._recving_transfers)
+
         if len(done_sending) > 0 or len(done_recving) > 0:
             logger.debug(
-                "get_finished: %s requests done sending "
-                "and %s requests done recving", len(done_sending),
+                "Rank %s, get_finished: %s requests done sending "
+                "and %s requests done recving", self.rank, len(done_sending),
                 len(done_recving))
-        return done_sending, done_recving
+
+        if self.world_size == 1:
+            return done_sending, done_recving
+
+        # All ranks must complete xfer before being "finished".
+        # TODO: better comment.
+        if self.rank == 0:
+            for req_id in done_sending:
+                self._done_sending_count[req_id] += 1
+            for req_id in done_recving:
+                self._done_recving_count[req_id] += 1
+
+            # Return ids of txns that have finished on all ranks.
+            all_done_sending: set[str] = set()
+            all_done_recving: set[str] = set()
+
+            # Update the counts of how many ranks have finished.
+            # Get notifies from other ranks that txns are done.
+            finished_req_ids: list[str] = []
+            for i in range(1, self.world_size):
+                finished_req_ids.append(self.tp_group.recv_object(src=i))
+
+            for req_id in finished_req_ids:
+                # Case 1: req_id is recving.
+                if (req_id in self._done_recving_count
+                        or req_id in self._recving_transfers):
+                    self._done_recving_count[req_id] += 1
+
+                    # All ranks done: free and return to scheduler.
+                    if self._done_recving_count == self.world_size - 1:
+                        self._done_recving_count.pop(req_id)
+                        all_done_recving.add(req_id)
+
+                # Case 2: req_id is sending.
+                else:
+                    self._done_sending_count[req_id] += 1
+
+                    # All ranks done: free and return to scheduler.
+                    if self._done_sending_count == self.world_size - 1:
+                        self._done_sending_count.pop(req_id)
+                        all_done_sending.add(req_id)
+
+            return all_done_sending, all_done_recving
+
+        else:
+            # Notify rank 0 of transaction completion.
+            finished_req_ids = list(done_recving.union(done_sending))
+            self.tp_group.send_object(req_id, dst=0)
+
+            # NOTE(rob): these are unused since only rank 0 returns
+            # ModelRunnerOutput.
+            return done_sending, done_recving
 
     def _get_new_notifs(self) -> set[str]:
         """Get req_ids which got a remote xfer message."""
