@@ -4,10 +4,7 @@ from openai import OpenAI
 
 # Modify OpenAI's API key and API base to use vLLM's API server.
 openai_api_key = "EMPTY"
-openai_api_base = "http://localhost:8192/v1"
-
-PROMPT = "The absolute best part about working for Red Hat is that we get to work on open source software. Red Hat is a leader in many key open source infrastructure technologies like Linux, Kubernetes, and recently vLLM, which means that there is a lot of opportunity to work with community and customers on key infrastructure projects. This means",  # noqa: E501
-PROMPT = "The absolute best part about working for Red Hat is that we get to work on open source software. Red Hat is a leader in many key open source infrastructure technologies like Linux, Kubernetes, and recently vLLM, "  # noqa: E501
+openai_api_base = "http://localhost:8000/v1"
 
 
 def main():
@@ -17,16 +14,18 @@ def main():
         base_url=openai_api_base,
     )
 
-    # models = client.models.list()
-    # model = models.data[0].id
+    models = client.models.list()
+    model = models.data[0].id
 
     # Completion API
-    stream = True
+    stream = False
     completion = client.completions.create(
-        model="meta-llama/Llama-3.1-8B-Instruct",
-        prompt=PROMPT,
+        model=model,
+        prompt="A robot may not injure a human being",
         echo=False,
-        stream=stream)
+        n=2,
+        stream=stream,
+        logprobs=3)
 
     print("-" * 50)
     print("Completion results:")

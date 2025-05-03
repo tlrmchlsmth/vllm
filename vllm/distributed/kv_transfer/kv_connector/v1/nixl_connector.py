@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 import math
-import time
+import os
+import threading
 import uuid
 from collections import defaultdict
 from typing import TYPE_CHECKING, Any
@@ -9,13 +10,13 @@ import msgspec
 import torch
 import zmq
 from typing_extensions import Optional
-import threading
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
 from vllm.logger import init_logger
 from vllm.sampling_params import KVTransferParams
+from vllm.utils import round_down
 from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
@@ -120,7 +121,6 @@ class NixlConnector(KVConnectorBase_V1):
     ############################################################
     # Worker Side Methods
     ############################################################
-
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         assert self.connector_worker is not None
         self.connector_worker.register_kv_caches(kv_caches)
@@ -173,9 +173,8 @@ class NixlConnectorScheduler:
         assert num_computed_tokens % self.block_size == 0
 
         if request.do_remote_prefill:
-            num_external_blocks = len(
-                request.prompt_token_ids) // self.block_size
-            rounded_num_prompt_tokens = num_external_blocks * self.block_size
+            rounded_num_prompt_tokens = round_down(
+                len(request.prompt_token_ids), self.block_size)
             return max(rounded_num_prompt_tokens - num_computed_tokens, 0)
 
         return 0
@@ -258,12 +257,13 @@ class NixlConnectorWorker:
 
     def conn_listener(self):
         _ctx = zmq.Context()  # type: ignore
-        _side_channel = _ctx.socket(zmq.ROUTER)  # XXX zmq.PAIR)  # type: ignore
+        _side_channel = _ctx.socket(
+            zmq.ROUTER)  # XXX zmq.PAIR)  # type: ignore
 
         _side_channel.bind("tcp://localhost:5577")
         _side_channel.setsockopt(zmq.LINGER, 0)  # type: ignore
 
-        logger.debug(f"Prefiller Listening on port 5577")
+        logger.debug("Prefiller Listening on port 5577")
 
         metadata = NixlAgentMetadata(
             engine_id=self.engine_id,
@@ -278,14 +278,15 @@ class NixlConnectorWorker:
                      str(size_in_bytes))
 
         while True:
-            print(f"Listen for new connect...")
+            print("Listen for new connect...")
             identity, message = _side_channel.recv_multipart()
             print(f"[Server] Received from {identity}: {message}")
 
             _side_channel.send_multipart([identity, encoder.encode(metadata)])
             #_side_channel.send(encoder.encode(metadata))
 
-            logger.debug("WAITING ON RECV") # XXX assuming we have a single client now
+            logger.debug(
+                "WAITING ON RECV")  # XXX assuming we have a single client now
             identity, ack = _side_channel.recv_multipart()
             logger.debug("GOT ACK %s", ack)
 
@@ -299,7 +300,7 @@ class NixlConnectorWorker:
         _side_channel.connect(f"tcp://{host}:{port}")
         _side_channel.setsockopt(zmq.LINGER, 0)  # type: ignore
 
-        logger.debug(f"Send Connect")
+        logger.debug("Send Connect")
         _side_channel.send(b"Connect")
         decoder = msgspec.msgpack.Decoder(NixlAgentMetadata)
         metadata_bytes = _side_channel.recv()
@@ -357,31 +358,35 @@ class NixlConnectorWorker:
         self._registered_descs.append(descs)
 
         # THIS IS FOR DEBUG and INSECURE
-        import os
 
         NIXL_ROLE = os.getenv("NIXL_ROLE")
 
-        # For debug, SENDER puts some stuff in the KV caches
-        # so the RECVER can check it
-        n_blocks_to_send = min(4096, kv_caches[first_layer_name].shape[1])
-        debug_xfer_gb = 2.0 * n_blocks_to_send * self.block_len / 1e9
-        print(f"gb {debug_xfer_gb} -- block_len {self.block_len}")
-        if NIXL_ROLE == "SENDER":
-            for b in range(n_blocks_to_send):
-                kv_caches[first_layer_name][0, b, 0, 0, 0] = b + 100.0
-                kv_caches[first_layer_name][1, b, 0, 0, 0] = b + 200.0
-        for b in range(5):
-            print(
-                f"{NIXL_ROLE} KV_CACHE block b val {kv_caches[first_layer_name][0, b, 0, 0, 0]}"  #noqa
-            )
-            print(
-                f"{NIXL_ROLE} KV_CACHE block b val {kv_caches[first_layer_name][1, b, 0, 0, 0]}"  #noqa
-            )
-        remote_engine_id = None  # HACK for debug send
+        # FOR DEV, SENDER puts data in its KV caches so the RECVER can check it
+        if os.environ.get("VLLM_DEBUG_INITIAL_NIXL_PD_XFER") is not None:
+            n_blocks_to_send = min(4096, kv_caches[first_layer_name].shape[1])
+            debug_xfer_gb = 2.0 * n_blocks_to_send * self.block_len / 1e9
+            logger.debug(
+                "Starting initial NIXL PD XFER: Total %s GB, Block len %s KB",
+                debug_xfer_gb, self.block_len / 1024)
+            if NIXL_ROLE == "SENDER":
+                for b in range(n_blocks_to_send):
+                    kv_caches[first_layer_name][0, b, 0, 0, 0] = b + 100.0
+                    kv_caches[first_layer_name][1, b, 0, 0, 0] = b + 200.0
+
+            for b in range(5):
+                logger.debug("%s KV_CACHE coord %s val %f", NIXL_ROLE,
+                             (0, b, 0, 0, 0),
+                             kv_caches[first_layer_name][0, b, 0, 0, 0])
+                logger.debug("%s KV_CACHE coord %s val %f", NIXL_ROLE,
+                             (1, b, 0, 0, 0),
+                             kv_caches[first_layer_name][1, b, 0, 0, 0])
+            remote_engine_id = None  # HACK for debug send
 
         if NIXL_ROLE == "SENDER":
             self.hack_event = threading.Event()
-            thread = threading.Thread(target=self.conn_listener, daemon=True, name="nixl-conn-listener")
+            thread = threading.Thread(target=self.conn_listener,
+                                      daemon=True,
+                                      name="nixl-conn-listener")
             thread.start()
 
             # HACK for debugging
@@ -397,7 +402,10 @@ class NixlConnectorWorker:
         else:
             raise Exception("SET NIXL_ROLE to SENDER OR RECVER")
 
-        # FOR DEBUG: try to send some shit
+        # FOR DEV, SENDER puts data in its KV caches so the RECVER can check it
+
+        if os.environ.get("VLLM_DEBUG_INITIAL_NIXL_PD_XFER") is not None:
+            initial_xfer_req_id = "initial_xfer_req_id"
 
         # if NIXL_ROLE == "RECVER":
         #     logger.debug("Sending blocks")
@@ -599,8 +607,10 @@ class NixlConnectorWorker:
         request_id: str,
     ):
         if dst_engine_id not in self._remote_agents:
-            remote_engine_id = self.make_connection("localhost", 5577)  # HACK: we need to be able to retrieve  host and port from Request
-            assert(dst_engine_id == remote_engine_id)
+            remote_engine_id = self.make_connection(
+                "localhost", 5577
+            )  # HACK: we need to be able to retrieve  host and port from Request
+            assert (dst_engine_id == remote_engine_id)
 
         # NOTE(rob): having the staging blocks be on the READER side is
         # not going to work well (since we will have to call rearrange tensors).

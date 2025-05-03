@@ -1,13 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
-import copy
-from typing import Optional
 
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (
     NixlConnectorMetadata)
-from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
-from vllm.v1.request import RequestStatus, Request
 
 from .utils import create_request, create_scheduler, create_vllm_config
+
 
 def test_scheduler_worker_inferface():
 
@@ -18,7 +15,7 @@ def test_scheduler_worker_inferface():
     BLOCK_SIZE = vllm_config.cache_config.block_size
     NUM_EXTERNAL_FULL_BLOCKS = 2
     NUM_TOKENS = int(BLOCK_SIZE * (NUM_EXTERNAL_FULL_BLOCKS + 0.5))
-    
+
     request = create_request(request_id=1,
                              num_tokens=NUM_TOKENS,
                              do_remote_prefill=True)
@@ -31,12 +28,12 @@ def test_scheduler_worker_inferface():
     kv_connector_metadata = scheduler_output.kv_connector_metadata
     assert kv_connector_metadata is not None
     assert isinstance(kv_connector_metadata, NixlConnectorMetadata)
-    
+
     assert len(kv_connector_metadata.requests) == 1
     assert request_id in kv_connector_metadata.requests
     req_meta = kv_connector_metadata.requests[request_id]
-    
+
     for block_id, block in zip(
-        req_meta.local_block_ids,
-        scheduler.kv_cache_manager.req_to_blocks[request_id]):
+            req_meta.local_block_ids,
+            scheduler.kv_cache_manager.req_to_blocks[request_id]):
         assert block_id == block.block_id

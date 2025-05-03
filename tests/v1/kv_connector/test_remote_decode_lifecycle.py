@@ -2,23 +2,23 @@
 import copy
 
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
-from vllm.v1.request import RequestStatus, FinishReason
+from vllm.v1.request import FinishReason, RequestStatus
 
-from .utils import (create_request, create_scheduler,
-                    create_vllm_config, create_model_runner_output,
-                    assert_scheduler_empty)
+from .utils import (assert_scheduler_empty, create_model_runner_output,
+                    create_request, create_scheduler, create_vllm_config)
+
 
 def test_basic_lifecycle():
     """Test lifecycle of a Remote Decode request."""
 
     vllm_config = create_vllm_config()
     scheduler = create_scheduler(vllm_config)
-    
+
     # 2 Full Blocks and 1 Half Block.
     BLOCK_SIZE = vllm_config.cache_config.block_size
     NUM_EXTERNAL_FULL_BLOCKS = 2
     NUM_TOKENS = int(BLOCK_SIZE * (NUM_EXTERNAL_FULL_BLOCKS + 0.5))
-    
+
     request = create_request(request_id=1,
                              num_tokens=NUM_TOKENS,
                              do_remote_decode=True)
@@ -36,9 +36,9 @@ def test_basic_lifecycle():
     model_runner_output = create_model_runner_output(reqs=[request])
 
     # (1c): update_from_output()
-    engine_core_outputs = scheduler.update_from_output(
-        scheduler_output, model_runner_output)
-    
+    engine_core_outputs = scheduler.update_from_output(scheduler_output,
+                                                       model_runner_output)
+
     # Ensure the request is finished after 1 tokens.
     assert request.is_finished()
     assert request.status == RequestStatus.FINISHED_REMOTE_DECODE

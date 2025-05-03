@@ -1638,7 +1638,7 @@ class ParallelConfig:
     """Use expert parallelism instead of tensor parallelism for MoE layers."""
 
     max_parallel_loading_workers: Optional[int] = None
-    """Maximum number of parallal loading workers when loading model
+    """Maximum number of parallel loading workers when loading model
     sequentially in multiple batches. To avoid RAM OOM when using tensor
     parallel and large models."""
 
@@ -1900,16 +1900,16 @@ class SchedulerConfig:
     NOTE: This will be replaced by speculative config in the future; it is
     present to enable correctness tests until then."""
 
-    delay_factor: float = 0.0
-    """Apply a delay (of delay factor multiplied by previous
-    prompt latency) before scheduling next prompt."""
-
     cuda_graph_sizes: list[int] = field(default_factory=lambda: [512])
     """Cuda graph capture sizes, default is 512.
     1. if one value is provided, then the capture list would follow the pattern:
         [1, 2, 4] + [i for i in range(8, cuda_graph_sizes + 1, 8)]
     2. more than one value (e.g. 1 2 128) is provided,
         then the capture list will follow the provided list."""
+
+    delay_factor: float = 0.0
+    """Apply a delay (of delay factor multiplied by previous
+    prompt latency) before scheduling next prompt."""
 
     enable_chunked_prefill: bool = None  # type: ignore
     """If True, prefill requests can be chunked based

@@ -401,9 +401,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Update the states of the running/resumed requests.
         for req_data in scheduler_output.scheduled_cached_reqs:
             req_id = req_data.req_id
-            if req_id not in self.requests:
-                print(f"{req_id} {self.requests}")
-                continue
             req_state = self.requests[req_id]
 
             # Update the cached states.
@@ -1057,9 +1054,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 maybe_setup_kv_connector()
                 maybe_wait_for_save()
                 finished_sending, finished_recving = maybe_get_finished()
+
             # Return empty ModelRunnerOutput if there's no work to do.
-            output = copy.deepcopy(EMPTY_MODEL_RUNNER_OUTPUT)
+            output = EMPTY_MODEL_RUNNER_OUTPUT
+
             if len(finished_sending) > 0 or len(finished_recving) > 0:
+                output = copy.deepcopy(EMPTY_MODEL_RUNNER_OUTPUT)
                 output.finished_sending = finished_sending
                 output.finished_recving = finished_recving
             return output

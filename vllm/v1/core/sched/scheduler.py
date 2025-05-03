@@ -721,11 +721,6 @@ class Scheduler(SchedulerInterface):
                 new_running.append(request)
                 continue
 
-            if req_id not in model_runner_output.req_id_to_index:
-                print(req_id)
-                print(model_runner_output.req_id_to_index)
-                continue
-
             req_index = model_runner_output.req_id_to_index[req_id]
             generated_token_ids = sampled_token_ids[req_index]
 
@@ -855,10 +850,10 @@ class Scheduler(SchedulerInterface):
 
         # P/D: update recv and send status from last step.
         for req_id in (model_runner_output.finished_recving or []):
-            logger.debug("FINISHED RECVING: %s", req_id)
+            logger.debug("Finished recving KV transfer for request %s", req_id)
             self.finished_recving_KV_req_ids.add(req_id)
         for req_id in (model_runner_output.finished_sending or []):
-            logger.debug("FINISHED SENDING: %s", req_id)
+            logger.debug("Finished sending KV transfer for request %s", req_id)
             self._free_blocks(self.requests[req_id])
 
         # Return the cached request data to the queue so they can
