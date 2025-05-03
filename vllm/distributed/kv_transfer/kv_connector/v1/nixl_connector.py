@@ -513,7 +513,7 @@ class NixlConnectorWorker:
         dst_engine_id: str,
         request_id: str,
     ):
-        # NOTE(rob): figure out a way to do this not on the hotpath.
+        # NOTE(rob): this takes ~2s. We need to get this off the hotpath.
         if dst_engine_id not in self._remote_agents:
             self._nixl_handshake(envs.VLLM_NIXL_SIDE_CHANNEL_HOST,
                                  envs.VLLM_NIXL_SIDE_CHANNEL_PORT)

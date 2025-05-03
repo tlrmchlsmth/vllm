@@ -21,15 +21,15 @@ wait_for_server() {
 }
 
 # Prefill instance.
-CUDA_VISIBLE_DEVICES=0 vllm serve $MODEL_NAME \
-    --port 8101 \
+CUDA_VISIBLE_DEVICES=0 NIXL_ROLE="SENDER" vllm serve $MODEL_NAME \
+    --port 8100 \
     --enforce-eager \
     --disable-log-requests \
     --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' &
 
 # Decode instance.
-CUDA_VISIBLE_DEVICES=1 vllm serve $MODEL_NAME \
-    --port 8201 \
+CUDA_VISIBLE_DEVICES=1 NIXL_ROLE="RECVER" vllm serve $MODEL_NAME \
+    --port 8200 \
     --enforce-eager \
     --disable-log-requests \
     --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' &
@@ -39,7 +39,7 @@ wait_for_server 8100
 wait_for_server 8200
 
 # Proxy server.
-python ${GIT_ROOT}/tests/v1/kv_connector/toy_proxy_server.py --port 8193 &
+python ${GIT_ROOT}/tests/v1/kv_connector/toy_proxy_server.py --port 8192 &
 
 # Run lm eval.
 python -m pytest -s -x ${GIT_ROOT}/tests/v1/kv_connector/test_accuracy.py
