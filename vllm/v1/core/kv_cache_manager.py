@@ -399,9 +399,8 @@ class KVCacheManager:
         Returns:
             int: The number of common prefix blocks.
         """
-        assert request.status in [
-            RequestStatus.RUNNING, RequestStatus.FINISHED_REMOTE_DECODE
-        ]
+        assert request.status in (RequestStatus.RUNNING,
+                                  RequestStatus.FINISHED_REMOTE_DECODE)
         blocks = self.req_to_blocks[request.request_id]
         num_common_blocks = 0
         for block in blocks:

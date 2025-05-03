@@ -476,11 +476,10 @@ class OpenAIServingCompletion(OpenAIServing):
 
         request_metadata.final_usage_info = usage
 
-        if final_res_batch[0].kv_transfer_params is not None:
-            remote_engine_id = final_res_batch[
-                0].kv_transfer_params.remote_engine_id
-            remote_block_ids = final_res_batch[
-                0].kv_transfer_params.remote_block_ids
+        kv_transfer_params = final_res_batch[0].kv_transfer_params
+        if kv_transfer_params is not None:
+            remote_engine_id = kv_transfer_params.remote_engine_id
+            remote_block_ids = kv_transfer_params.remote_block_ids
         else:
             remote_engine_id = None
             remote_block_ids = None
