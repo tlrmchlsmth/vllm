@@ -221,8 +221,6 @@ class NixlConnectorWorker:
 
         # Agent.
         self.nixl_wrapper = NixlWrapper(str(uuid.uuid4()), None)
-        self.agent_name = self.nixl_wrapper.name
-
         # Map of engine_id -> agent_name.
         self._remote_agents: dict[str, str] = {}
 
