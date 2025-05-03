@@ -63,11 +63,11 @@ class Request:
 
         # Disaggregated serving related
         self.do_remote_decode = (
-            False if sampling_params.kv_transfer_params is None else
-            sampling_params.kv_transfer_params.do_remote_decode)
+            sampling_params.kv_transfer_params is not None
+            and sampling_params.kv_transfer_params.do_remote_decode)
         self.do_remote_prefill = (
-            False if sampling_params.kv_transfer_params is None else
-            sampling_params.kv_transfer_params.do_remote_prefill)
+            sampling_params.kv_transfer_params is not None
+            and sampling_params.kv_transfer_params.do_remote_prefill)
         self.kv_transfer_params = sampling_params.kv_transfer_params
 
         # Sanity check

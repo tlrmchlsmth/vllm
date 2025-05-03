@@ -711,7 +711,6 @@ class Scheduler(SchedulerInterface):
         prompt_logprobs_dict = model_runner_output.prompt_logprobs_dict
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
 
-        stopped_set: set[str] = set()
         new_running: list[Request] = []
         outputs: list[EngineCoreOutput] = []
         spec_decoding_stats: Optional[SpecDecodingStats] = None
@@ -807,8 +806,6 @@ class Scheduler(SchedulerInterface):
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
             if new_token_ids:
                 # Stop request after the first token if doing a remote_decode.
-                # TODO(rob): check if it is okay to send a finished request to
-                # AsyncLLM w/o adding it to eco.finished_requests
                 # NOTE(rob): req is not freed (or preempted) in the EngineCore
                 # until the xfer is done to ensure we do not free the KV blocks.
                 kv_transfer_params = None
@@ -851,8 +848,6 @@ class Scheduler(SchedulerInterface):
 
             if not stopped:
                 new_running.append(request)
-            else:
-                stopped_set.add(request.request_id)
 
         # P/D: update recv and send status from last step.
         for req_id in (model_runner_output.finished_recving or []):
@@ -866,7 +861,9 @@ class Scheduler(SchedulerInterface):
         # be reused. Note: we cannot add stopped requests to this
         # since they are already freed above!
         for req_data in scheduler_output.scheduled_cached_reqs:
-            if req_data.req_id not in stopped_set:
+            # NOTE(rob): since we free stopped reqs above, adding stopped reqs
+            # to _cached_reqs_data will cause a memory leak.
+            if req_data.req_id not in self.finished_req_ids:
                 self._cached_reqs_data[req_data.req_id].append(req_data)
 
         self.running = new_running
