@@ -466,7 +466,7 @@ class NixlConnectorWorker:
                     self._done_recving_count[req_id] += 1
 
                     # All ranks done: free and return to scheduler.
-                    if self._done_recving_count == self.world_size - 1:
+                    if self._done_recving_count[req_id] == self.world_size - 1:
                         self._done_recving_count.pop(req_id)
                         all_done_recving.add(req_id)
 
@@ -475,7 +475,7 @@ class NixlConnectorWorker:
                     self._done_sending_count[req_id] += 1
 
                     # All ranks done: free and return to scheduler.
-                    if self._done_sending_count == self.world_size - 1:
+                    if self._done_sending_count[req_id] == self.world_size - 1:
                         self._done_sending_count.pop(req_id)
                         all_done_sending.add(req_id)
 
