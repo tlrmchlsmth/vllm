@@ -274,8 +274,13 @@ class NixlConnectorWorker:
 
         # Listen for new requests for metadata.
         host = envs.VLLM_NIXL_SIDE_CHANNEL_HOST
-        port = envs.VLLM_NIXL_SIDE_CHANNEL_PORT
-        with zmq_ctx(zmq.ROUTER, f"tcp://{host}:{port}/rank-{rank}") as sock:
+        # NOTE(rob): we need each rank to have a unique port. This
+        # hack to keeps us moving. We will switch when moving to etcd
+        # or where we have a single ZMQ socket in the scheduler.
+        port = envs.VLLM_NIXL_SIDE_CHANNEL_PORT + rank
+        path = f"tcp://{host}:{port}"
+        logger.debug("Starting listening on path: %s", path)
+        with zmq_ctx(zmq.ROUTER, path) as sock:
             ready_event.set()
             while True:
                 identity, _, msg = sock.recv_multipart()
@@ -288,7 +293,9 @@ class NixlConnectorWorker:
         """Do a NIXL handshake with a remote instance."""
 
         start_time = time.perf_counter()
-        with zmq_ctx(zmq.REQ, f"tcp://{host}:{port}/rank-{self.rank}") as sock:
+        path = f"tcp://{host}:{port + self.rank}"
+        logger.debug("Querying metadata on path: %s", path)
+        with zmq_ctx(zmq.REQ, path) as sock:
             # Send query for the request.
             sock.send(GET_META_MSG)
             metadata_bytes = sock.recv()
