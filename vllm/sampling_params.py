@@ -49,15 +49,14 @@ class KVTransferParams(
         if do_remote_decode and do_remote_prefill:
             raise ValueError(
                 "Cannot do both remote prefill and remote decode.")
-        elif do_remote_decode or do_remote_prefill:
+        if do_remote_decode or do_remote_prefill:
             return KVTransferParams(
                 do_remote_decode=do_remote_decode,
                 do_remote_prefill=do_remote_prefill,
                 remote_engine_id=remote_engine_id,
                 remote_block_ids=remote_block_ids,
             )
-        else:
-            return None
+        return None
 
 
 # maybe make msgspec?
@@ -219,9 +218,9 @@ class SamplingParams(
         logits_processors: list of functions that modify logits based on
             previously generated tokens, and optionally prompt tokens as
             a first argument.
-        truncate_prompt_tokens: If set to -1, will use the truncation size 
-            supported by the model. If set to an integer k, will use only 
-            the last k tokens from the prompt (i.e., left truncation). 
+        truncate_prompt_tokens: If set to -1, will use the truncation size
+            supported by the model. If set to an integer k, will use only
+            the last k tokens from the prompt (i.e., left truncation).
             Defaults to None (i.e., no truncation).
         guided_decoding: If provided, the engine will construct a guided
             decoding logits processor from these parameters. Defaults to None.

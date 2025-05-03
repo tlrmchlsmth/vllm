@@ -272,10 +272,3 @@ def test_no_spurious_prefix_caching():
     for block in remote_blocks:
         assert block.ref_cnt == 1
         assert block._block_hash is None
-
-
-def test_remote_prefill_no_blocks_available():
-    """
-    letTest whether we properly handle no blocks available
-    """
-    pass

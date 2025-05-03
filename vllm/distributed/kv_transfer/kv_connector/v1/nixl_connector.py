@@ -182,8 +182,6 @@ class NixlConnectorScheduler:
     def update_state_after_alloc(self, request: "Request",
                                  block_ids: list[int],
                                  num_external_tokens: int):
-        if request.do_remote_decode:
-            pass
         if request.do_remote_prefill and num_external_tokens > 0:
             self._reqs_need_recv[request.request_id] = (request, block_ids)
 
@@ -333,12 +331,11 @@ class NixlConnectorWorker:
                 kv_caches_base_addr=self.kv_caches_base_addr[self.engine_id],
                 num_blocks=self.num_blocks,
             )
-            encoder = msgspec.msgpack.Encoder()
-            encoded_data = encoder.encode(metadata)
+            encoded_data = msgspec.msgpack.encode(metadata)
             size_in_bytes = len(encoded_data)
             logger.debug("Size of encoded NixlAgentMetadata: %s bytes",
                          str(size_in_bytes))
-            _side_channel.send(encoder.encode(metadata))
+            _side_channel.send(encoded_data)
 
             logger.debug("WAITING ON RECV")
             ack = _side_channel.recv()
@@ -433,10 +430,9 @@ class NixlConnectorWorker:
         num_blocks = nixl_agent_meta.num_blocks
         logger.debug("Adding remote agent %s %s", engine_id, str(num_blocks))
 
-        agent_names = []
-        agent_name = self.nixl_wrapper.add_remote_agent(
-            nixl_agent_meta.agent_metadata)
-        agent_names.append(agent_name)
+        agent_names = [
+            self.nixl_wrapper.add_remote_agent(nixl_agent_meta.agent_metadata)
+        ]
 
         self._remote_agents[engine_id] = agent_names
         self.kv_caches_base_addr[
@@ -578,8 +574,7 @@ class NixlConnectorWorker:
         # Note(tms): The remote_block_ids only contain full computed blocks,
         # while the local_block_ids are all blocks allocated for this request,
         # so truncate the local_block_ids to account for this.
-        if len(remote_block_ids) < len(local_block_ids):
-            local_block_ids = local_block_ids[:len(remote_block_ids)]
+        del local_block_ids[len(remote_block_ids):]
         assert len(local_block_ids) == len(remote_block_ids)
 
         # NOTE(rob): this can cause the remote blocks to not be freed?
@@ -639,9 +634,9 @@ class NixlConnectorWorker:
         if i is not None:
             raise NotImplementedError("Prefill and Decode instances must have "
                                       "the same TP size.")
-        else:
-            num_blocks = self.dst_num_blocks[engine_id]
-            for reg_id in region_ids:
-                for block_id in block_ids:
-                    descs_ids.append(reg_id * num_blocks + block_id)
+
+        num_blocks = self.dst_num_blocks[engine_id]
+        for reg_id in region_ids:
+            for block_id in block_ids:
+                descs_ids.append(reg_id * num_blocks + block_id)
         return descs_ids

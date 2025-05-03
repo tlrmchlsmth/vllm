@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 import time
 from collections import defaultdict, deque
 from collections.abc import Iterable
@@ -98,7 +99,7 @@ class Scheduler(SchedulerInterface):
         self.finished_req_ids: set[str] = set()
 
         # Requests in states for tracking KV transfers for P/D disagg
-        self.finished_recving_KV_req_ids: set[str] = set()
+        self.finished_recving_kv_req_ids: set[str] = set()
 
         # OPTIMIZATION: Cache the CachedRequestData objects to avoid creating
         # them at each scheduling step.
@@ -315,7 +316,7 @@ class Scheduler(SchedulerInterface):
                 # Skip request if the remote KV recv is still waiting
                 # for the requests to arrive.
                 if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
-                    if request.request_id in self.finished_recving_KV_req_ids:
+                    if request.request_id in self.finished_recving_kv_req_ids:
                         assert self.kv_cache_manager.enable_caching
                         # Now that the KVs have been recved, we can cache
                         # them and set num_computed_tokens.
@@ -324,7 +325,7 @@ class Scheduler(SchedulerInterface):
                             num_tokens=0,
                             num_computed_tokens=(len(request.all_token_ids) -
                                                  1))
-                        self.finished_recving_KV_req_ids.remove(
+                        self.finished_recving_kv_req_ids.remove(
                             request.request_id)
                         request.status = RequestStatus.WAITING
                         self.kv_cache_manager.free(request)
@@ -369,7 +370,7 @@ class Scheduler(SchedulerInterface):
                 # Total computed tokens (local + external).
                 num_computed_tokens += num_external_tokens
 
-                if (request.do_remote_prefill and num_external_tokens > 0):
+                if request.do_remote_prefill and num_external_tokens > 0:
                     # Allocate slots for the external tokens, but skip
                     # caching until after the KV transfer is done.
                     new_blocks = self.kv_cache_manager.allocate_slots(
@@ -391,7 +392,10 @@ class Scheduler(SchedulerInterface):
                     if self.connector is not None:
                         self.connector.update_state_after_alloc(
                             request,
-                            [b.block_id for b in computed_blocks + new_blocks],
+                            [
+                                b.block_id for b in itertools.chain(
+                                    computed_blocks, new_blocks)
+                            ],
                             num_external_tokens,
                         )
                         # We should only trigger a KV transfer once per request.
@@ -439,7 +443,10 @@ class Scheduler(SchedulerInterface):
                 if self.connector is not None:
                     self.connector.update_state_after_alloc(
                         request,
-                        [b.block_id for b in computed_blocks + new_blocks],
+                        [
+                            b.block_id for b in itertools.chain(
+                                computed_blocks, new_blocks)
+                        ],
                         num_external_tokens,
                     )
 
@@ -573,9 +580,8 @@ class Scheduler(SchedulerInterface):
         # 3. If some tokens (e.g. spec tokens) are rejected later, the number of
         #    computed tokens will be adjusted in update_from_output.
         for req_id, num_scheduled_token in num_scheduled_tokens.items():
-            if req_id in self.requests:
-                self.requests[
-                    req_id].num_computed_tokens += num_scheduled_token
+            if req := self.requests.get(req_id):
+                req.num_computed_tokens += num_scheduled_token
 
         self.finished_req_ids = set()
         return scheduler_output
@@ -851,7 +857,7 @@ class Scheduler(SchedulerInterface):
         # P/D: update recv and send status from last step.
         for req_id in (model_runner_output.finished_recving or []):
             logger.debug("Finished recving KV transfer for request %s", req_id)
-            self.finished_recving_KV_req_ids.add(req_id)
+            self.finished_recving_kv_req_ids.add(req_id)
         for req_id in (model_runner_output.finished_sending or []):
             logger.debug("Finished sending KV transfer for request %s", req_id)
             self._free_blocks(self.requests[req_id])
