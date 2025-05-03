@@ -511,6 +511,12 @@ class NixlConnectorWorker:
         # saturate IB with heterogeneous TP sizes. We should remove the staging
         # blocks until we are ready.
 
+        # NOTE(rob): we could potentially do the rearranging during the load_kv!
+
+        # Note(tms): The remote_block_ids only contain full computed blocks,
+        # while the local_block_ids are all blocks allocated for this request,
+        # so truncate the local_block_ids to account for this.
+
         assert len(local_block_ids) == len(remote_block_ids)
 
         # Can this cause the remote blocks to not be freed?
