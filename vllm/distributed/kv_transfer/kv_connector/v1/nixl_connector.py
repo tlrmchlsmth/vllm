@@ -375,12 +375,6 @@ class NixlConnectorWorker:
         self.kv_caches_base_addr[
             engine_id] = nixl_agent_meta.kv_caches_base_addr
 
-        # NOTE: once we support heterogeneous TP, we will need maintain the
-        # src for each TP multiplier.
-        # NOTE(rob): Dynamo only supports D TP size > P TP size.
-        # https://github.com/vllm-project/vllm/pull/16124/files#diff-876efa5533f5dcff3fba850e8684a47d53c112e287988957c115b11691374f4bR331 # noqa: E501
-        # Create descs and xfer side handles.
-
         # Create src descs and xfer side handles.
         blocks_data = []
         for base_addr in self.kv_caches_base_addr[self.engine_id]:
