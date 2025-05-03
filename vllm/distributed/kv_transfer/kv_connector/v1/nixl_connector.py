@@ -344,8 +344,8 @@ class NixlConnectorWorker:
         descs = self.nixl_wrapper.get_reg_descs(caches_data, "VRAM")
         logger.debug("Registering descs: %s", caches_data)
         self.nixl_wrapper.register_memory(descs)
-        self._registered_descs.append(descs)
         logger.debug("Done registering descs")
+        self._registered_descs.append(descs)
 
         # After KV Caches registered, listen for new connections.
         metadata = NixlAgentMetadata(
