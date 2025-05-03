@@ -6,8 +6,8 @@ set -xe
 MODEL_NAME=Qwen/Qwen3-0.6B
 
 # Number of prefill and decode instances to create
-NUM_PREFILL_INSTANCES=2
-NUM_DECODE_INSTANCES=3
+NUM_PREFILL_INSTANCES=${NUM_PREFILL_INSTANCES:-1} # Default to 1
+NUM_DECODE_INSTANCES=${NUM_DECODE_INSTANCES:-2}   # Default to 2
 
 # Find the git repository root directory
 GIT_ROOT=$(git rev-parse --show-toplevel)
