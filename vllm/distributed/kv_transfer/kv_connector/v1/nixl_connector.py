@@ -326,7 +326,7 @@ class NixlConnectorWorker:
         kv_caches_base_addr = []
         caches_data = []
 
-        # NOTE(tms): I modified this from the original region setup code.
+        # Note(tms): I modified this from the original region setup code.
         # K and V are now in different regions. Advantage is that we can
         # elegantly support MLA and any cases where the K and V tensors
         # are non-contiguous (it's not locally guaranteed that they will be)
@@ -519,7 +519,7 @@ class NixlConnectorWorker:
 
         assert len(local_block_ids) == len(remote_block_ids)
 
-        # Can this cause the remote blocks to not be freed?
+        # NOTE(rob): this can cause the remote blocks to not be freed?
         if len(local_block_ids) == 0:
             return
 
