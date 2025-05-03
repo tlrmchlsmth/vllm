@@ -293,6 +293,9 @@ class NixlConnectorWorker:
         """Do a NIXL handshake with a remote instance."""
 
         start_time = time.perf_counter()
+        # NOTE(rob): we need each rank to have a unique port. This
+        # hack to keeps us moving. We will switch when moving to etcd
+        # or where we have a single ZMQ socket in the scheduler.
         path = f"tcp://{host}:{port + self.rank}"
         logger.debug("Querying metadata on path: %s", path)
         with zmq_ctx(zmq.REQ, path) as sock:
