@@ -1,16 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
+import contextlib
 import math
-import os
 import threading
 import uuid
 from collections import defaultdict
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Iterator
 
 import msgspec
 import torch
 import zmq
 from typing_extensions import Optional
 
+from vllm import envs
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
@@ -23,6 +24,8 @@ if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
     from vllm.forward_context import ForwardContext
     from vllm.v1.request import Request
+
+GET_META_MSG = b"get_meta_msg"
 
 logger = init_logger(__name__)
 
@@ -255,64 +258,52 @@ class NixlConnectorWorker:
         # [req_id -> list[handle]]
         self._recving_transfers: dict[str, list[Any]] = defaultdict(list[Any])
 
-    def conn_listener(self):
-        _ctx = zmq.Context()  # type: ignore
-        _side_channel = _ctx.socket(
-            zmq.ROUTER)  # XXX zmq.PAIR)  # type: ignore
+        # Background thread for establishing new connections.
+        self._nixl_handshake_listener_t: Optional[threading.Thread] = None
 
-        _side_channel.bind("tcp://localhost:5577")
-        _side_channel.setsockopt(zmq.LINGER, 0)  # type: ignore
+    @staticmethod
+    def _nixl_handshake_listener(metadata: NixlAgentMetadata,
+                                 ready_event: threading.Event):
+        """Background thread for getting new NIXL handshakes."""
+        # NOTE(rob): this is a simple implementation. We will move
+        # to a better approach like an ETCD server in the future.
 
-        logger.debug("Prefiller Listening on port 5577")
+        # NOTE(rob): to support heterogeneous TP, we will have to
+        # move this into the scheduler rather than worker, since
+        # each rank needs the metadata of all other ranks (whereas
+        # in this setup, each rank only gets one other rank's meta.
 
-        metadata = NixlAgentMetadata(
-            engine_id=self.engine_id,
-            agent_metadata=self.nixl_wrapper.get_agent_metadata(),
-            kv_caches_base_addr=self.kv_caches_base_addr[self.engine_id],
-            num_blocks=self.num_blocks,
-        )
         encoder = msgspec.msgpack.Encoder()
         encoded_data = encoder.encode(metadata)
         size_in_bytes = len(encoded_data)
         logger.debug("Size of encoded NixlAgentMetadata: %s bytes",
                      str(size_in_bytes))
 
-        while True:
-            print("Listen for new connect...")
-            identity, message = _side_channel.recv_multipart()
-            print(f"[Server] Received from {identity}: {message}")
+        # Listen for new requests for metadata.
+        host = envs.VLLM_NIXL_SIDE_CHANNEL_HOST
+        port = envs.VLLM_NIXL_SIDE_CHANNEL_PORT
+        with zmq_ctx(zmq.constants.ROUTER, f"tcp://{host}:{port}") as sock:
+            ready_event.set()
+            while True:
+                identity, msg = sock.recv_multipart()
+                if msg != GET_META_MSG:
+                    logger.warning(
+                        "Connection listenerGot unexpected message %s", msg)
+                    pass
+                sock.send_multipart((identity, encoded_data))
 
-            _side_channel.send_multipart([identity, encoder.encode(metadata)])
-            #_side_channel.send(encoder.encode(metadata))
+    def _nixl_handshake(self, host: str, port: int):
+        """Do a NIXL handshake with a remote prefill instance."""
 
-            logger.debug(
-                "WAITING ON RECV")  # XXX assuming we have a single client now
-            identity, ack = _side_channel.recv_multipart()
-            logger.debug("GOT ACK %s", ack)
+        with zmq_ctx(zmq.constants.REQ, f"tcp://{host}:{port}") as sock:
+            # Q
+            sock.send_string(GET_META_MSG)
+            metadata_bytes = sock.recv()
+            decoder = msgspec.msgpack.Decoder(NixlAgentMetadata)
+            metadata = decoder.decode(metadata_bytes)
 
-            self.hack_event.set()
-
-    def make_connection(self, host, port):
-        _ctx = zmq.Context()  # type: ignore
-        _side_channel = _ctx.socket(zmq.DEALER)
-
-        _side_channel.setsockopt_string(zmq.IDENTITY, self.engine_id)
-        _side_channel.connect(f"tcp://{host}:{port}")
-        _side_channel.setsockopt(zmq.LINGER, 0)  # type: ignore
-
-        logger.debug("Send Connect")
-        _side_channel.send(b"Connect")
-        decoder = msgspec.msgpack.Decoder(NixlAgentMetadata)
-        metadata_bytes = _side_channel.recv()
-        metadata = decoder.decode(metadata_bytes)
-
-        remote_engine_id = metadata.engine_id  #HACK
-
-        self.add_remote_agent(metadata)
-        print("SENDING ACK")
-        _side_channel.send(b"ack")
-
-        return remote_engine_id
+            # Register Remote agent.
+            self.add_remote_agent(metadata)
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in nixl."""
@@ -357,116 +348,21 @@ class NixlConnectorWorker:
 
         self._registered_descs.append(descs)
 
-        # THIS IS FOR DEBUG and INSECURE
-
-        NIXL_ROLE = os.getenv("NIXL_ROLE")
-
-        # FOR DEV, SENDER puts data in its KV caches so the RECVER can check it
-        if os.environ.get("VLLM_DEBUG_INITIAL_NIXL_PD_XFER") is not None:
-            n_blocks_to_send = min(4096, kv_caches[first_layer_name].shape[1])
-            debug_xfer_gb = 2.0 * n_blocks_to_send * self.block_len / 1e9
-            logger.debug(
-                "Starting initial NIXL PD XFER: Total %s GB, Block len %s KB",
-                debug_xfer_gb, self.block_len / 1024)
-            if NIXL_ROLE == "SENDER":
-                for b in range(n_blocks_to_send):
-                    kv_caches[first_layer_name][0, b, 0, 0, 0] = b + 100.0
-                    kv_caches[first_layer_name][1, b, 0, 0, 0] = b + 200.0
-
-            for b in range(5):
-                logger.debug("%s KV_CACHE coord %s val %f", NIXL_ROLE,
-                             (0, b, 0, 0, 0),
-                             kv_caches[first_layer_name][0, b, 0, 0, 0])
-                logger.debug("%s KV_CACHE coord %s val %f", NIXL_ROLE,
-                             (1, b, 0, 0, 0),
-                             kv_caches[first_layer_name][1, b, 0, 0, 0])
-            remote_engine_id = None  # HACK for debug send
-
-        if NIXL_ROLE == "SENDER":
-            self.hack_event = threading.Event()
-            thread = threading.Thread(target=self.conn_listener,
-                                      daemon=True,
-                                      name="nixl-conn-listener")
-            thread.start()
-
-            # HACK for debugging
-            # logger.debug(f"HACK wait for static connection establishment")
-            # while not self.hack_event.is_set():
-            #     time.sleep(1)
-
-            # logger.debug(f"HACK connection established")
-        elif NIXL_ROLE == "RECVER":
-            # HACE only enable for debugging
-            #remote_engine_id = self.make_connection("localhost", 5577) # HACK call it statically for now
-            pass
-        else:
-            raise Exception("SET NIXL_ROLE to SENDER OR RECVER")
-
-        # FOR DEV, SENDER puts data in its KV caches so the RECVER can check it
-
-        if os.environ.get("VLLM_DEBUG_INITIAL_NIXL_PD_XFER") is not None:
-            initial_xfer_req_id = "initial_xfer_req_id"
-
-        # if NIXL_ROLE == "RECVER":
-        #     logger.debug("Sending blocks")
-        #     connector_metadata = NixlConnectorMetadata()
-        #     assert remote_engine_id is not None
-        #     xfer_params = KVTransferParams(
-        #         do_remote_decode=True,
-        #         do_remote_prefill=False,
-        #         remote_block_ids=list(range(n_blocks_to_send)),
-        #         remote_engine_id=remote_engine_id  #HACK
-        #     )
-
-        #     connector_metadata.add_new_req(request_id="tms",
-        #                                    local_block_ids=list(
-        #                                        range(n_blocks_to_send)),
-        #                                    kv_transfer_params=xfer_params)
-        #     self.start_load_kv(connector_metadata)
-
-        #     # Wait for Receive to complete
-        #     logger.debug("TMS START RECEIVE XFER")
-        #     done = False
-        #     start_time = time.time()
-        #     while (not done):
-        #         finished = self.get_finished()
-        #         # NOTE: Should fix discrepancy between bytes/str finished sets
-        #         # Here we have str. For sender we have bytes.
-        #         done = "tms" in finished[1]
-        #         time.sleep(1e-5)
-        #     end_time = time.time()
-        #     execution_time = end_time - start_time
-        #     logger.debug(
-        #         "Transfer Received. Duration: %f ms Bandwidth %f GB/s",
-        #         1e3 * execution_time, debug_xfer_gb / execution_time)
-
-        # if NIXL_ROLE == "SENDER":
-        #     # Wait for Send to complete
-        #     logger.debug("TMS START SEND XFER")
-        #     done = False
-        #     start_time = time.time()
-        #     while (not done):
-        #         finished = self.get_finished()
-        #         done = "tms" in finished[0]
-        #         time.sleep(1e-5)
-        #     end_time = time.time()
-        #     execution_time = end_time - start_time
-        #     logger.debug("Transfer Sent. Duration: %f ms Bandwidth %f GB/s",
-        #                  1e3 * execution_time, debug_xfer_gb / execution_time)
-
-        #     # Put some different stuff in there
-        #     if NIXL_ROLE == "SENDER":
-        #         for b in range(n_blocks_to_send):
-        #             kv_caches[first_layer_name][0, b, 0, 0, 0] = b + 300.0
-        #             kv_caches[first_layer_name][1, b, 0, 0, 0] = b + 400.0
-
-        # for b in range(5):
-        #     print(
-        #         f"{NIXL_ROLE} KV_CACHE block b val {kv_caches[first_layer_name][0, b, 0, 0, 0]}"  #noqa
-        #     )
-        #     print(
-        #         f"{NIXL_ROLE} KV_CACHE block b val {kv_caches[first_layer_name][1, b, 0, 0, 0]}"  #noqa
-        #     )
+        # After KV Caches registered, listen for new connections.
+        metadata = NixlAgentMetadata(
+            engine_id=self.engine_id,
+            agent_metadata=self.nixl_wrapper.get_agent_metadata(),
+            kv_caches_base_addr=self.kv_caches_base_addr[self.engine_id],
+            num_blocks=self.num_blocks,
+        )
+        ready_event = threading.Event()
+        self._nixl_handshake_listener_t = threading.Thread(
+            target=self._nixl_handshake_listener,
+            args=(metadata, ready_event),
+            daemon=True,
+            name="nixl_handshake_listener")
+        self._nixl_handshake_listener_t.start()
+        ready_event.wait()
 
     def add_remote_agent(self, nixl_agent_meta: NixlAgentMetadata, tp_idx=0):
         engine_id = nixl_agent_meta.engine_id
@@ -606,11 +502,10 @@ class NixlConnectorWorker:
         dst_engine_id: str,
         request_id: str,
     ):
+        # NOTE(rob): figure out a way to do this not on the hotpath.
         if dst_engine_id not in self._remote_agents:
-            remote_engine_id = self.make_connection(
-                "localhost", 5577
-            )  # HACK: we need to be able to retrieve  host and port from Request
-            assert (dst_engine_id == remote_engine_id)
+            self._nixl_handshake(envs.VLLM_NIXL_SIDE_CHANNEL_HOST,
+                                 envs.VLLM_NIXL_SIDE_CHANNEL_PORT)
 
         # NOTE(rob): having the staging blocks be on the READER side is
         # not going to work well (since we will have to call rearrange tensors).
@@ -694,3 +589,25 @@ class NixlConnectorWorker:
                 for block_id in block_ids:
                     descs_ids.append(reg_id * num_blocks + block_id)
         return descs_ids
+
+
+@contextlib.contextmanager
+def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:
+    """Context manager for a ZMQ socket"""
+
+    ctx: Optional[zmq.Context] = None
+    try:
+        ctx = zmq.Context()
+
+        if socket_type == zmq.constants.ROUTER:
+            socket = ctx.socket(zmq.ROUTER)
+            socket.bind(addr)
+        elif socket_type == zmq.constants.REQ:
+            socket = ctx.socket(zmq.REQ)
+            socket.connect(addr)
+        else:
+            raise ValueError(f"Unexpected socket type: {socket_type}")
+
+        yield socket
+    finally:
+        ctx.destroy(linger=0)
