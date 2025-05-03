@@ -20,6 +20,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 from vllm.distributed.parallel_state import get_tensor_model_parallel_rank
 from vllm.logger import init_logger
 from vllm.sampling_params import KVTransferParams
+from vllm.utils import round_down
 from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
@@ -123,7 +124,6 @@ class NixlConnector(KVConnectorBase_V1):
     ############################################################
     # Worker Side Methods
     ############################################################
-
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         assert self.connector_worker is not None
         self.connector_worker.register_kv_caches(kv_caches)
@@ -176,9 +176,8 @@ class NixlConnectorScheduler:
         assert num_computed_tokens % self.block_size == 0
 
         if request.do_remote_prefill:
-            num_external_blocks = len(
-                request.prompt_token_ids) // self.block_size
-            rounded_num_prompt_tokens = num_external_blocks * self.block_size
+            rounded_num_prompt_tokens = round_down(
+                len(request.prompt_token_ids), self.block_size)
             return max(rounded_num_prompt_tokens - num_computed_tokens, 0)
 
         return 0
@@ -186,8 +185,6 @@ class NixlConnectorScheduler:
     def update_state_after_alloc(self, request: "Request",
                                  block_ids: list[int],
                                  num_external_tokens: int):
-        if request.do_remote_decode:
-            pass
         if request.do_remote_prefill and num_external_tokens > 0:
             self._reqs_need_recv[request.request_id] = (request, block_ids)
 
@@ -350,6 +347,7 @@ class NixlConnectorWorker:
         logger.debug("Registering descs: %s", caches_data)
         self.nixl_wrapper.register_memory(descs)
         self._registered_descs.append(descs)
+        logger.debug("Done registering descs")
 
         # After KV Caches registered, listen for new connections.
         metadata = NixlAgentMetadata(
@@ -552,7 +550,7 @@ class NixlConnectorWorker:
     def _get_block_descs_ids(self, engine_id: str,
                              block_ids: list[int]) -> list[int]:
         """Get the descs ids for a set of block ids."""
-        # NOTE(rob): should we precompute this?
+        # TODO(rob): should we precompute this?
 
         # range(1) for MLA, range(2) otherwise.
         region_ids = range(self.num_regions)
