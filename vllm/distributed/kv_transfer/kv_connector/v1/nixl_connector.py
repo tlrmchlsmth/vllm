@@ -256,7 +256,7 @@ class NixlConnectorWorker:
 
     @staticmethod
     def _nixl_handshake_listener(metadata: NixlAgentMetadata,
-                                 ready_event: threading.Event):
+                                 ready_event: threading.Event, rank: int):
         """Background thread for getting new NIXL handshakes."""
         # NOTE(rob): this is a simple implementation. We will move
         # to a better approach like an ETCD server in the future.
@@ -275,7 +275,7 @@ class NixlConnectorWorker:
         # Listen for new requests for metadata.
         host = envs.VLLM_NIXL_SIDE_CHANNEL_HOST
         port = envs.VLLM_NIXL_SIDE_CHANNEL_PORT
-        with zmq_ctx(zmq.ROUTER, f"tcp://{host}:{port}") as sock:
+        with zmq_ctx(zmq.ROUTER, f"tcp://{host}:{port}/rank-{rank}") as sock:
             ready_event.set()
             while True:
                 identity, _, msg = sock.recv_multipart()
@@ -288,7 +288,7 @@ class NixlConnectorWorker:
         """Do a NIXL handshake with a remote instance."""
 
         start_time = time.perf_counter()
-        with zmq_ctx(zmq.REQ, f"tcp://{host}:{port}") as sock:
+        with zmq_ctx(zmq.REQ, f"tcp://{host}:{port}/rank-{self.rank}") as sock:
             # Send query for the request.
             sock.send(GET_META_MSG)
             metadata_bytes = sock.recv()
@@ -357,13 +357,11 @@ class NixlConnectorWorker:
         ready_event = threading.Event()
         self._nixl_handshake_listener_t = threading.Thread(
             target=self._nixl_handshake_listener,
-            args=(metadata, ready_event),
+            args=(metadata, ready_event, self.rank),
             daemon=True,
             name="nixl_handshake_listener")
-        import os
-        if os.getenv("SKIP", None) != "1":
-            self._nixl_handshake_listener_t.start()
-            ready_event.wait()
+        self._nixl_handshake_listener_t.start()
+        ready_event.wait()
 
     def add_remote_agent(self, nixl_agent_meta: NixlAgentMetadata):
         engine_id = nixl_agent_meta.engine_id
