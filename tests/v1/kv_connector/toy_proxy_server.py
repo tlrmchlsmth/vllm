@@ -79,20 +79,27 @@ def parse_args():
 
     # For prefiller instances
     parser.add_argument("--prefiller-hosts",
+                        "--prefiller-host",
                         type=str,
                         nargs="+",
                         default=["localhost"])
     parser.add_argument("--prefiller-ports",
+                        "--prefiller-port",
                         type=int,
                         nargs="+",
                         default=[8100])
 
     # For decoder instances
     parser.add_argument("--decoder-hosts",
+                        "--decoder-host",
                         type=str,
                         nargs="+",
                         default=["localhost"])
-    parser.add_argument("--decoder-ports", type=int, nargs="+", default=[8200])
+    parser.add_argument("--decoder-ports",
+                        "--decoder-port",
+                        type=int,
+                        nargs="+",
+                        default=[8200])
 
     args = parser.parse_args()
 
