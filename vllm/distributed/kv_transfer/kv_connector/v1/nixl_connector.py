@@ -2,6 +2,7 @@
 import contextlib
 import math
 import threading
+import time
 import uuid
 from collections import defaultdict
 from typing import TYPE_CHECKING, Any, Iterator
@@ -285,25 +286,33 @@ class NixlConnectorWorker:
         with zmq_ctx(zmq.ROUTER, f"tcp://{host}:{port}") as sock:
             ready_event.set()
             while True:
-                identity, msg = sock.recv_multipart()
+                identity, _, msg = sock.recv_multipart()
                 if msg != GET_META_MSG:
                     logger.warning(
-                        "Connection listenerGot unexpected message %s", msg)
+                        "Connection listener got unexpected message %s", msg)
                     pass
-                sock.send_multipart((identity, encoded_data))
+                sock.send_multipart((identity, b"", encoded_data))
 
     def _nixl_handshake(self, host: str, port: int):
         """Do a NIXL handshake with a remote prefill instance."""
 
+        start_time = time.perf_counter()
         with zmq_ctx(zmq.REQ, f"tcp://{host}:{port}") as sock:
             # Send query for the request.
-            sock.send_string(GET_META_MSG)
+            sock.send(GET_META_MSG)
             metadata_bytes = sock.recv()
             decoder = msgspec.msgpack.Decoder(NixlAgentMetadata)
             metadata = decoder.decode(metadata_bytes)
+            got_metadata_time = time.perf_counter()
 
             # Register Remote agent.
             self.add_remote_agent(metadata)
+            setup_agent_time = time.perf_counter()
+
+            logger.debug("NIXL handshake: get metadata took: %s",
+                         got_metadata_time - start_time)
+            logger.debug("NIXL handshake: add agent took: %s",
+                         setup_agent_time - got_metadata_time)
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in nixl."""
@@ -361,8 +370,10 @@ class NixlConnectorWorker:
             args=(metadata, ready_event),
             daemon=True,
             name="nixl_handshake_listener")
-        self._nixl_handshake_listener_t.start()
-        ready_event.wait()
+        import os
+        if os.getenv("SKIP", None) != "1":
+            self._nixl_handshake_listener_t.start()
+            ready_event.wait()
 
     def add_remote_agent(self, nixl_agent_meta: NixlAgentMetadata, tp_idx=0):
         engine_id = nixl_agent_meta.engine_id

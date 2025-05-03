@@ -4,7 +4,7 @@ from openai import OpenAI
 
 # Modify OpenAI's API key and API base to use vLLM's API server.
 openai_api_key = "EMPTY"
-openai_api_base = "http://localhost:8000/v1"
+openai_api_base = "http://localhost:8193/v1"
 
 
 def main():
@@ -14,18 +14,18 @@ def main():
         base_url=openai_api_base,
     )
 
-    models = client.models.list()
-    model = models.data[0].id
+    # models = client.models.list()
+    # model = models.data[0].id
+    model = "Qwen/Qwen3-0.6B"
 
     # Completion API
     stream = False
     completion = client.completions.create(
         model=model,
-        prompt="A robot may not injure a human being",
+        prompt=
+        "The best part about working on vLLM is that I got to meet so many people across various different organizations like UCB, Google, and Meta which means",  # noqa: E501
         echo=False,
-        n=2,
-        stream=stream,
-        logprobs=3)
+        stream=stream)
 
     print("-" * 50)
     print("Completion results:")
