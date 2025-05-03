@@ -510,7 +510,7 @@ class NixlConnectorWorker:
         # Note(tms): The remote_block_ids only contain full computed blocks,
         # while the local_block_ids are all blocks allocated for this request,
         # so truncate the local_block_ids to account for this.
-
+        del local_block_ids[len(remote_block_ids):]
         assert len(local_block_ids) == len(remote_block_ids)
 
         # NOTE(rob): this can cause the remote blocks to not be freed?
