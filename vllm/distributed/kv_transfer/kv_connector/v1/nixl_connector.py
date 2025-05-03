@@ -550,8 +550,7 @@ class NixlConnectorWorker:
         # Begin async xfer.
         self.nixl_wrapper.transfer(handle)
 
-        # We will check for completion using this handle in
-        # a future engine step.
+        # Use handle to check completion in future step().
         self._recving_transfers[request_id].append(handle)
 
     def _get_block_descs_ids(self, engine_id: str,
