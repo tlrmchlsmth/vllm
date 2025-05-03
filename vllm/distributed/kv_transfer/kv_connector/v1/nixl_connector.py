@@ -432,7 +432,6 @@ class NixlConnectorWorker:
         """Get requests that are done sending or recving."""
         done_sending = self._get_new_notifs()
         done_recving = self._pop_done_transfers(self._recving_transfers)
-
         if len(done_sending) > 0 or len(done_recving) > 0:
             logger.debug(
                 "Rank %s, get_finished: %s requests done sending "
