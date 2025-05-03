@@ -726,11 +726,6 @@ class Scheduler(SchedulerInterface):
                 new_running.append(request)
                 continue
 
-            if req_id not in model_runner_output.req_id_to_index:
-                print(req_id)
-                print(model_runner_output.req_id_to_index)
-                continue
-
             req_index = model_runner_output.req_id_to_index[req_id]
             generated_token_ids = sampled_token_ids[req_index]
 

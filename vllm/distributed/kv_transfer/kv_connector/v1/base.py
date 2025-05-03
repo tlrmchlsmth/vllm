@@ -62,7 +62,6 @@ class KVConnectorBase_V1(ABC):
         self._vllm_config = vllm_config
         self._role = role
 
-    @abstractmethod
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """
         Initialize with the KV caches. Useful for pre-registering the
@@ -71,7 +70,7 @@ class KVConnectorBase_V1(ABC):
         Args: kv_caches:
             dictionary of layer names, kv cache
         """
-        pass
+        return
 
     def get_finished(self) -> tuple[set[str], set[str]]:
         """Get the finished recving and sending requests."""
