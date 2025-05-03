@@ -292,7 +292,7 @@ class NixlConnectorWorker:
                 sock.send_multipart((identity, b"", encoded_data))
 
     def _nixl_handshake(self, host: str, port: int):
-        """Do a NIXL handshake with a remote prefill instance."""
+        """Do a NIXL handshake with a remote instance."""
 
         start_time = time.perf_counter()
         with zmq_ctx(zmq.REQ, f"tcp://{host}:{port}") as sock:
