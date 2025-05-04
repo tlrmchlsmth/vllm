@@ -495,8 +495,6 @@ class NixlConnectorWorker:
         """Get req_ids which got a remote xfer message."""
 
         notified_req_ids: set[str] = set()
-        # TODO: handle the TP case (N notifies for TP=N).
-        # See: vllm/worker/worker_base.py L476 in DynamoPR.
         for req_ids in self.nixl_wrapper.get_new_notifs().values():
             for req_id in req_ids:
                 assert req_id not in notified_req_ids
