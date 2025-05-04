@@ -493,7 +493,7 @@ class NixlConnectorWorker:
             finished_req_ids = list(done_recving.union(done_sending))
             self.tp_group.send_object(finished_req_ids, dst=0)
 
-            # Unused as only Rank 0 results are send to scheduler.
+            # Unused as only Rank 0 results are sent to scheduler.
             return done_sending, done_recving
 
     def _get_new_notifs(self) -> set[str]:
