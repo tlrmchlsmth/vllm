@@ -253,13 +253,16 @@ class NixlConnectorWorker:
 
         # In progress transfers.
         # [req_id -> list[handle]]
-        self._recving_transfers: dict[str, list[Any]] = defaultdict(list[Any])
+        self._recving_transfers: defaultdict[str, list[Any]] = defaultdict(
+            list[Any])
 
         # Complete transfer tracker. Used by the rank 0 to track finished
         # transactions on ranks 1 to N-1.
         # [req_id -> count]
-        self._done_recving_count: defaultdict[str, int] = defaultdict(0)
-        self._done_sending_count: defaultdict[str, int] = defaultdict(0)
+        self._done_recving_count: defaultdict[str,
+                                              int] = defaultdict(lambda: 0)
+        self._done_sending_count: defaultdict[str,
+                                              int] = defaultdict(lambda: 0)
 
         # Background thread for establishing new connections.
         self._nixl_handshake_listener_t: Optional[threading.Thread] = None
@@ -441,53 +444,51 @@ class NixlConnectorWorker:
         if self.world_size == 1:
             return done_sending, done_recving
 
-        # All ranks must complete xfer before being "finished".
-        # TODO: better comment.
+        # In TP>1 setup, each rank exchanges KVs with its counterpart
+        # ranks independently. This functions runs a worker and used
+        # to create the done_sending and done_recving sets that are
+        # returned to the scheduler via ModelRunnerOutput by Rank 0.
+        # To avoid race condition and ensure all ranks are done before
+        # scheduling, Rank 1 ... N-1 workers communicate to Rank 0
+        # and Rank 0 returns to scheduler once all are complete.
         if self.rank == 0:
             for req_id in done_sending:
                 self._done_sending_count[req_id] += 1
             for req_id in done_recving:
                 self._done_recving_count[req_id] += 1
 
-            # Return ids of txns that have finished on all ranks.
-            all_done_sending: set[str] = set()
-            all_done_recving: set[str] = set()
-
             # Update the counts of how many ranks have finished.
             # Get notifies from other ranks that txns are done.
-            finished_req_ids: list[str] = []
+            other_ranks_finished_ids: list[str] = []
             for i in range(1, self.world_size):
-                finished_req_ids.append(self.tp_group.recv_object(src=i))
-
-            for req_id in finished_req_ids:
-                # Case 1: req_id is recving.
+                other_ranks_finished_ids.extend(
+                    self.tp_group.recv_object(src=i))
+            for req_id in other_ranks_finished_ids:
                 if (req_id in self._done_recving_count
                         or req_id in self._recving_transfers):
                     self._done_recving_count[req_id] += 1
-
-                    # All ranks done: free and return to scheduler.
-                    if self._done_recving_count[req_id] == self.world_size - 1:
-                        self._done_recving_count.pop(req_id)
-                        all_done_recving.add(req_id)
-
-                # Case 2: req_id is sending.
                 else:
                     self._done_sending_count[req_id] += 1
 
-                    # All ranks done: free and return to scheduler.
-                    if self._done_sending_count[req_id] == self.world_size - 1:
-                        self._done_sending_count.pop(req_id)
-                        all_done_sending.add(req_id)
+            # Return ids that have finished on all ranks to the scheduler.
+            all_done_sending: set[str] = set()
+            all_done_recving: set[str] = set()
+            for req_id in list(self._done_recving_count.keys()):
+                if self._done_recving_count[req_id] == self.world_size:
+                    self._done_recving_count.pop(req_id)
+                    all_done_recving.add(req_id)
+            for req_id in list(self._done_sending_count.keys()):
+                if self._done_sending_count[req_id] == self.world_size:
+                    self._done_sending_count.pop(req_id)
+                    all_done_sending.add(req_id)
 
             return all_done_sending, all_done_recving
 
         else:
-            # Notify rank 0 of transaction completion.
             finished_req_ids = list(done_recving.union(done_sending))
-            self.tp_group.send_object(req_id, dst=0)
+            self.tp_group.send_object(finished_req_ids, dst=0)
 
-            # NOTE(rob): these are unused since only rank 0 returns
-            # ModelRunnerOutput.
+            # NOTE(rob): unused as only Rank 0 sends to sched.
             return done_sending, done_recving
 
     def _get_new_notifs(self) -> set[str]:
