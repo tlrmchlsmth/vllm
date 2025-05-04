@@ -445,12 +445,12 @@ class NixlConnectorWorker:
             return done_sending, done_recving
 
         # In TP>1 setup, each rank exchanges KVs with its counterpart
-        # ranks independently. This functions runs a worker and used
-        # to create the done_sending and done_recving sets that are
-        # returned to the scheduler via ModelRunnerOutput by Rank 0.
-        # To avoid race condition and ensure all ranks are done before
-        # scheduling, Rank 1 ... N-1 workers communicate to Rank 0
-        # and Rank 0 returns to scheduler once all are complete.
+        # ranks independently. get_finished() runs in a worker creates
+        # the done_sending and done_recving sets that are sent to the
+        # scheduler via ModelRunnerOutput by Rank 0. To avoid race
+        # ensure trnxs are done before adding to finished, Ranks 1 to
+        # N-1 communicate to Rank 0 once their transaction is done.
+        # Rank 0 only returns finished once all ranks are complete.
         if self.rank == 0:
             for req_id in done_sending:
                 self._done_sending_count[req_id] += 1
