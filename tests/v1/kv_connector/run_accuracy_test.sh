@@ -157,7 +157,7 @@ run_tests_for_model() {
 
   # Run lm eval for this model
   echo "Running tests for $model_name"
-  MODEL_NAME=$model_name python -m pytest -s -x ${GIT_ROOT}/tests/v1/kv_connector/test_accuracy.py
+  TEST_MODEL=$model_name python -m pytest -s -x ${GIT_ROOT}/tests/v1/kv_connector/test_accuracy.py
 
   # Clean up before running next model
   cleanup_instances
