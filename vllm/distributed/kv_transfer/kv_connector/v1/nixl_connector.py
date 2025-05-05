@@ -306,8 +306,8 @@ class NixlConnectorWorker:
         """Do a NIXL handshake with a remote instance."""
 
         start_time = time.perf_counter()
-        # NOTE(rob): we need each rank to have a unique port. This
-        # hack to keeps us moving. We will switch when moving to etcd
+        # NOTE(rob): we need each rank to have a unique port. This is
+        # a hack to keep us moving. We will switch when moving to etcd
         # or where we have a single ZMQ socket in the scheduler.
         path = f"tcp://{host}:{port + self.rank}"
         logger.debug("Querying metadata on path: %s", path)
@@ -446,7 +446,17 @@ class NixlConnectorWorker:
                 self._remote_agents[engine_id], descs)
 
     def get_finished(self) -> tuple[set[str], set[str]]:
-        """Get requests that are done sending or recving."""
+        """
+        Get requests that are done sending or recving.
+
+        In TP>1 setup, each rank exchanges KVs with its counterpart
+        ranks independently. get_finished() runs in a worker creates
+        the done_sending and done_recving sets that are sent to the
+        scheduler via ModelRunnerOutput by Rank 0. To ensure trnxs
+        are done before adding to finished, Ranks 1 to N-1 communicate
+        to Rank 0 once their transaction is done + Rank 0 returns
+        finished sets to Scheduler only once all ranks are done.
+        """
         done_sending = self._get_new_notifs()
         done_recving = self._pop_done_transfers(self._recving_transfers)
         if len(done_sending) > 0 or len(done_recving) > 0:
@@ -458,21 +468,14 @@ class NixlConnectorWorker:
         if self.world_size == 1:
             return done_sending, done_recving
 
-        # In TP>1 setup, each rank exchanges KVs with its counterpart
-        # ranks independently. get_finished() runs in a worker creates
-        # the done_sending and done_recving sets that are sent to the
-        # scheduler via ModelRunnerOutput by Rank 0. To avoid race
-        # ensure trnxs are done before adding to finished, Ranks 1 to
-        # N-1 communicate to Rank 0 once their transaction is done.
-        # Rank 0 only returns finished once all ranks are complete.
+        # Rank 0: get finished from all other ranks.
         if self.rank == 0:
             for req_id in done_sending:
                 self._done_sending_count[req_id] += 1
             for req_id in done_recving:
                 self._done_recving_count[req_id] += 1
 
-            # Update the counts of how many ranks have finished.
-            # Get notifies from other ranks that txns are done.
+            # Keep track of how many other ranks have finished.
             other_ranks_finished_ids: list[str] = []
             for i in range(1, self.world_size):
                 other_ranks_finished_ids.extend(
@@ -484,33 +487,33 @@ class NixlConnectorWorker:
                 else:
                     self._done_sending_count[req_id] += 1
 
-            # Return ids that have finished on all ranks to the scheduler.
-            all_done_sending: set[str] = set()
+            # Return ids that finished on all ranks to the scheduler.
             all_done_recving: set[str] = set()
             for req_id in list(self._done_recving_count.keys()):
                 if self._done_recving_count[req_id] == self.world_size:
-                    self._done_recving_count.pop(req_id)
+                    del self._done_recving_count[req_id]
                     all_done_recving.add(req_id)
+
+            all_done_sending: set[str] = set()
             for req_id in list(self._done_sending_count.keys()):
                 if self._done_sending_count[req_id] == self.world_size:
-                    self._done_sending_count.pop(req_id)
+                    del self._done_sending_count[req_id]
                     all_done_sending.add(req_id)
 
             return all_done_sending, all_done_recving
 
+        # Ranks 1 to N-1: send finished ids to Rank 0.
         else:
             finished_req_ids = list(done_recving.union(done_sending))
             self.tp_group.send_object(finished_req_ids, dst=0)
 
-            # NOTE(rob): unused as only Rank 0 sends to sched.
+            # Unused as only Rank 0 results are sent to scheduler.
             return done_sending, done_recving
 
     def _get_new_notifs(self) -> set[str]:
         """Get req_ids which got a remote xfer message."""
 
         notified_req_ids: set[str] = set()
-        # TODO: handle the TP case (N notifies for TP=N).
-        # See: vllm/worker/worker_base.py L476 in DynamoPR.
         for req_ids in self.nixl_wrapper.get_new_notifs().values():
             for req_id in req_ids:
                 assert req_id not in notified_req_ids
@@ -590,17 +593,8 @@ class NixlConnectorWorker:
         # saturate IB with heterogeneous TP sizes. We should remove the staging
         # blocks until we are ready.
 
-        # NOTE(rob): we could potentially do the rearranging during the load_kv!
-
-        # Note(tms): The remote_block_ids only contain full computed blocks,
-        # while the local_block_ids are all blocks allocated for this request,
-        # so truncate the local_block_ids to account for this.
-        del local_block_ids[len(remote_block_ids):]
+        assert len(local_block_ids) > 0
         assert len(local_block_ids) == len(remote_block_ids)
-
-        # NOTE(rob): this can cause the remote blocks to not be freed?
-        if len(local_block_ids) == 0:
-            return
 
         # Get side handles.
         local_xfer_side_handle = self.src_xfer_side_handle
@@ -632,7 +626,6 @@ class NixlConnectorWorker:
     def _get_block_descs_ids(self, engine_id: str,
                              block_ids: list[int]) -> list[int]:
         """Get the descs ids for a set of block ids."""
-        # TODO(rob): should we precompute this?
 
         # range(1) for MLA, range(2) otherwise.
         region_ids = range(self.num_regions)
