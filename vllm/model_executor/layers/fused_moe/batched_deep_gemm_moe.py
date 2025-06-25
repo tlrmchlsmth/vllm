@@ -312,7 +312,7 @@ def silu_and_mul_masked_post_quant_fwd(
         NUM_STAGE=NUM_STAGES,
         num_warps=num_warps,
     )
-    return
+    return output, output_scale
 
 
 class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
