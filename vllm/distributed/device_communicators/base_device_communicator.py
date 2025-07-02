@@ -8,6 +8,9 @@ import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup
 
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 class Cache:
 
@@ -49,6 +52,8 @@ class All2AllManagerBase:
 
         # all2all communication often has separate implementations for
         # intra-node and inter-node communication
+        same_node_mask = in_the_same_node_as(cpu_group, source_rank=0)
+        logger.debug(f"Same node as rank 0 {same_node_mask}")
         self.internode = not all(in_the_same_node_as(cpu_group, source_rank=0))
 
     def get_handle(self, kwargs):

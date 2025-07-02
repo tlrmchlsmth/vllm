@@ -1229,80 +1229,118 @@ def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
         logger.warning(
             "torch._C._host_emptyCache() only available in Pytorch >=2.5")
 
+def in_the_same_node_as(
+    pg: Union[ProcessGroup, "StatelessProcessGroup"],
+    source_rank: int = 0,
+) -> list[bool]:
+    """
+    A collective op that returns, for every rank in `pg`, whether it shares
+    the same node (i.e. can attach to the same shared-memory segment) as
+    `source_rank`.
+    """
+    logger.debug("Called in_the_same_node_as(pg=%s, source_rank=%s)", pg, source_rank)
 
-def in_the_same_node_as(pg: Union[ProcessGroup, StatelessProcessGroup],
-                        source_rank: int = 0) -> list[bool]:
-    """
-    This is a collective operation that returns if each rank is in the same node
-    as the source rank. It tests if processes are attached to the same
-    memory system (shared access to shared memory).
-    """
+    # ---------------------------------------------------------------------
+    # Work out local/global ids for this process
+    # ---------------------------------------------------------------------
     if isinstance(pg, ProcessGroup):
-        assert torch.distributed.get_backend(
-            pg) != torch.distributed.Backend.NCCL, (
-                "in_the_same_node_as should be tested with a non-NCCL group.")
-        # local rank inside the group
+        backend = torch.distributed.get_backend(pg)
+        assert backend != Backend.NCCL, (
+            "in_the_same_node_as should be tested with a non-NCCL group."
+        )
         rank = torch.distributed.get_rank(group=pg)
         world_size = torch.distributed.get_world_size(group=pg)
-
-        # global ranks of the processes in the group
         ranks = torch.distributed.get_process_group_ranks(pg)
-    else:
+        logger.debug(
+            "[ProcessGroup] backend=%s rank=%s world_size=%s global_ranks=%s",
+            backend,
+            rank,
+            world_size,
+            ranks,
+        )
+    else:  # StatelessProcessGroup-style wrapper
         rank = pg.rank
         world_size = pg.world_size
         ranks = list(range(world_size))
+        logger.debug(
+            "[StatelessProcessGroup] rank=%s world_size=%s global_ranks=%s",
+            rank,
+            world_size,
+            ranks,
+        )
 
-    # local tensor in each process to store the result
+    # ---------------------------------------------------------------------
+    # Local result tensor (1 == same node as source, 0 otherwise)
+    # ---------------------------------------------------------------------
     is_in_the_same_node = torch.tensor([0] * world_size, dtype=torch.int32)
 
     magic_message = b"magic_message"
     shm = None
 
     try:
-        with contextlib.suppress(OSError):
-            if rank == source_rank:
-                # create a shared memory segment
-                shm = shared_memory.SharedMemory(create=True, size=128)
-                shm.buf[:len(magic_message)] = magic_message
-                if isinstance(pg, ProcessGroup):
-                    torch.distributed.broadcast_object_list(
-                        [shm.name], src=ranks[source_rank], group=pg)
-                else:
-                    pg.broadcast_obj(shm.name, src=source_rank)
-                is_in_the_same_node[rank] = 1
+        if rank == source_rank:
+            logger.debug("Rank %s is the source rank – creating shared memory", rank)
+            shm = shared_memory.SharedMemory(create=True, size=128)
+            shm.buf[: len(magic_message)] = magic_message
+            logger.debug(
+                "Shared memory created (name=%s). Broadcasting name to all ranks", shm.name
+            )
+            if isinstance(pg, ProcessGroup):
+                torch.distributed.broadcast_object_list(
+                    [shm.name], src=ranks[source_rank], group=pg
+                )
             else:
-                # try to open the shared memory segment
-                if isinstance(pg, ProcessGroup):
-                    recv = [None]
-                    torch.distributed.broadcast_object_list(
-                        recv, src=ranks[source_rank], group=pg)
-                    name = recv[0]
-                else:
-                    name = pg.broadcast_obj(None, src=source_rank)
-                # fix to https://stackoverflow.com/q/62748654/9191338
-                # Python incorrectly tracks shared memory even if it is not
-                # created by the process. The following patch is a workaround.
-                with patch("multiprocessing.resource_tracker.register",
-                           lambda *args, **kwargs: None):
-                    shm = shared_memory.SharedMemory(name=name)
-                if shm.buf[:len(magic_message)] == magic_message:
-                    is_in_the_same_node[rank] = 1
+                pg.broadcast_obj(shm.name, src=source_rank)
+            is_in_the_same_node[rank] = 1
+        else:
+            logger.debug("Rank %s waiting for shared-memory name broadcast", rank)
+            if isinstance(pg, ProcessGroup):
+                recv = [None]
+                torch.distributed.broadcast_object_list(
+                    recv, src=ranks[source_rank], group=pg
+                )
+                name = recv[0]
+            else:
+                name = pg.broadcast_obj(None, src=source_rank)
+            logger.debug("Rank %s received shared-memory name=%s", rank, name)
+
+            # Work around Python resource-tracker bug for foreign SHM segments
+            with patch("multiprocessing.resource_tracker.register", lambda *_, **__: None):
+                shm = shared_memory.SharedMemory(name=name)
+
+            if shm.buf[: len(magic_message)] == magic_message:
+                is_in_the_same_node[rank] = 1
+                logger.debug("Rank %s verified magic message – same node", rank)
+            else:
+                logger.debug("Rank %s did NOT match magic message – different node", rank)
+
     except Exception as e:
         logger.error("Error ignored in is_in_the_same_node: %s", e)
     finally:
         if shm:
+            logger.debug("Rank %s closing shared-memory handle", rank)
             shm.close()
 
+    # ---------------------------------------------------------------------
+    # Synchronize ranks before cleanup
+    # ---------------------------------------------------------------------
     if isinstance(pg, ProcessGroup):
         torch.distributed.barrier(group=pg)
     else:
         pg.barrier()
+    logger.debug("Rank %s passed barrier", rank)
 
-    # clean up the shared memory segment
+    # ---------------------------------------------------------------------
+    # Cleanup of shared-memory segment by the source rank
+    # ---------------------------------------------------------------------
     with contextlib.suppress(OSError):
         if rank == source_rank and shm:
+            logger.debug("Source rank %s unlinking shared memory", rank)
             shm.unlink()
 
+    # ---------------------------------------------------------------------
+    # Gather results across the process group
+    # ---------------------------------------------------------------------
     if isinstance(pg, ProcessGroup):
         torch.distributed.all_reduce(is_in_the_same_node, group=pg)
         aggregated_data = is_in_the_same_node
@@ -1312,7 +1350,9 @@ def in_the_same_node_as(pg: Union[ProcessGroup, StatelessProcessGroup],
             rank_data = pg.broadcast_obj(is_in_the_same_node, src=i)
             aggregated_data += rank_data
 
-    return [x == 1 for x in aggregated_data.tolist()]
+    result = [x == 1 for x in aggregated_data.tolist()]
+    logger.debug("Aggregated data: %s -> result=%s", aggregated_data.tolist(), result)
+    return result
 
 
 def is_global_first_rank() -> bool:
