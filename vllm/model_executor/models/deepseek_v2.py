@@ -31,12 +31,16 @@ import torch
 from torch import nn
 from transformers import DeepseekV2Config, DeepseekV3Config
 
+import vllm.envs as envs
 from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (CacheConfig, ModelConfig, VllmConfig,
                          get_current_vllm_config)
 from vllm.distributed import (get_ep_group, get_pp_group,
-                              get_tensor_model_parallel_world_size)
+                              get_tensor_model_parallel_world_size,
+                              tensor_model_parallel_all_gather,
+                              tensor_model_parallel_all_reduce,
+                              tensor_model_parallel_reduce_scatter)
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -234,6 +238,7 @@ class DeepseekV2Attention(nn.Module):
         max_position_embeddings: int = 8192,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        reduce_results: bool = False,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -251,6 +256,7 @@ class DeepseekV2Attention(nn.Module):
         self.scaling = self.qk_head_dim**-0.5
         self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
+        self.reduce_results = reduce_results
 
         if self.q_lora_rank is not None:
             self.q_a_proj = ReplicatedLinear(self.hidden_size,
@@ -293,7 +299,8 @@ class DeepseekV2Attention(nn.Module):
                                         self.hidden_size,
                                         bias=False,
                                         quant_config=quant_config,
-                                        prefix=f"{prefix}.o_proj")
+                                        prefix=f"{prefix}.o_proj",
+                                        reduce_results=self.reduce_results)
         if rope_scaling:
             rope_scaling["rope_type"] = 'deepseek_yarn'
 
@@ -360,8 +367,8 @@ class DeepseekV2Attention(nn.Module):
             self.qk_head_dim)[..., :self.v_head_dim].reshape(
                 -1, self.num_local_heads * self.v_head_dim)
         output, _ = self.o_proj(attn_output)
-        return output
 
+        return output
 
 class DeepseekV2MLAAttention(nn.Module):
     """
@@ -386,6 +393,7 @@ class DeepseekV2MLAAttention(nn.Module):
         max_position_embeddings: int = 8192,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        reduce_results: bool = False,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -394,14 +402,16 @@ class DeepseekV2MLAAttention(nn.Module):
         self.qk_rope_head_dim = qk_rope_head_dim
         self.qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
         self.v_head_dim = v_head_dim
+        self.reduce_results = reduce_results
 
         self.q_lora_rank = q_lora_rank
         self.kv_lora_rank = kv_lora_rank
 
         self.num_heads = num_heads
-        tp_size = get_tensor_model_parallel_world_size()
-        assert num_heads % tp_size == 0
-        self.num_local_heads = num_heads // tp_size
+        self.tp_size = get_tensor_model_parallel_world_size()
+        self.enable_expert_parallel = config.parallel_config.enable_expert_parallel
+        assert num_heads % self.tp_size == 0
+        self.num_local_heads = num_heads // self.tp_size
 
         self.scaling = self.qk_head_dim**-0.5
         self.rope_theta = rope_theta
@@ -450,7 +460,8 @@ class DeepseekV2MLAAttention(nn.Module):
                                         self.hidden_size,
                                         bias=False,
                                         quant_config=quant_config,
-                                        prefix=f"{prefix}.o_proj")
+                                        prefix=f"{prefix}.o_proj",
+                                        reduce_results = self.reduce_results)
 
         if rope_scaling:
             rope_scaling["rope_type"] = 'deepseek_yarn'
@@ -493,6 +504,7 @@ class DeepseekV2MLAAttention(nn.Module):
 
         self.prefix = prefix
         self.debug_layer_idx = int(self.prefix.split(".")[-2])
+
 
     def forward(
         self,
@@ -551,10 +563,24 @@ class DeepseekV2DecoderLayer(nn.Module):
         rope_scaling = getattr(config, "rope_scaling", None)
         max_position_embeddings = getattr(config, "max_position_embeddings",
                                           8192)
-        # DecoderLayers are created with `make_layers` which passes the prefix
-        # with the layer's index.
+
         layer_idx = int(prefix.split(sep='.')[-1])
         self.layer_idx = layer_idx
+        is_moe_layer = (config.n_routed_experts is not None
+                        and layer_idx >= config.first_k_dense_replace
+                        and layer_idx % config.moe_layer_freq == 0)
+
+        # EP MoE layers using DeepEP expect sequence parallel inputs to avoid duplicate work
+        # and return sequence parallel outputs. 
+        # In this case, we use a reducescatter operation after attention rather than an allreduce,
+        # and allgather the outputs of the MoE layer.
+        self.sequence_parallel = (envs.VLLM_ALL2ALL_BACKEND in ("deepep_high_throughput", 
+                                                                "deepep_low_latency") 
+                                  and self.enable_expert_parallel
+                                  and isinstance(self.mlp, DeepseekV2MoE))
+
+        # DecoderLayers are created with `make_layers` which passes the prefix
+        # with the layer's index.
         if model_config.use_mla:
             attn_cls = DeepseekV2MLAAttention
         else:
@@ -574,12 +600,11 @@ class DeepseekV2DecoderLayer(nn.Module):
             max_position_embeddings=max_position_embeddings,
             cache_config=cache_config,
             quant_config=quant_config,
+            reduce_results = not self.sequence_parallel,
             prefix=f"{prefix}.self_attn",
         )
 
-        if (config.n_routed_experts is not None
-                and layer_idx >= config.first_k_dense_replace
-                and layer_idx % config.moe_layer_freq == 0):
+        if is_moe_layer:
             self.mlp = DeepseekV2MoE(
                 config=config,
                 quant_config=quant_config,
@@ -594,6 +619,7 @@ class DeepseekV2DecoderLayer(nn.Module):
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp",
             )
+
         self.input_layernorm = RMSNorm(config.hidden_size,
                                        eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size,
@@ -618,6 +644,9 @@ class DeepseekV2DecoderLayer(nn.Module):
             hidden_states=hidden_states,
         )
 
+        if self.sequence_parallel:
+            hidden_states = tensor_model_parallel_reduce_scatter(hidden_states, 0)
+
         if hidden_states.dtype == torch.float16:
             # Fix FP16 overflow
             # We scale both hidden_states and residual before
@@ -632,6 +661,9 @@ class DeepseekV2DecoderLayer(nn.Module):
         hidden_states, residual = self.post_attention_layernorm(
             hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
+
+        if self.sequence_parallel:
+            hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
 
         if isinstance(self.mlp,
                       DeepseekV2MLP) and hidden_states.dtype == torch.float16:
