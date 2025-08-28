@@ -579,6 +579,8 @@ class DeepseekV2DecoderLayer(nn.Module):
                                       "deepep_low_latency")
                                   and parallel_config.enable_expert_parallel
                                   and is_moe_layer)
+        self.tp_size = get_tensor_model_parallel_world_size()
+        self.tp_rank = get_tensor_model_parallel_rank()
 
         # DecoderLayers are created with `make_layers` which passes the prefix
         # with the layer's index.
@@ -638,14 +640,11 @@ class DeepseekV2DecoderLayer(nn.Module):
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
 
-            tp_size = get_tensor_model_parallel_world_size()
-            tp_rank = get_tensor_model_parallel_rank()
-
             if self.sequence_parallel:
                 seq_len = hidden_states.size(0)
-                assert (seq_len % tp_size == 0)
-                chunk = seq_len // tp_size
-                start = tp_rank * chunk
+                assert (seq_len % self.tp_size == 0)
+                chunk = seq_len // self.tp_size
+                start = self.tp_rank * chunk
                 residual = hidden_states.narrow(0, start, chunk).contiguous()
 
         else:
@@ -653,8 +652,22 @@ class DeepseekV2DecoderLayer(nn.Module):
                 hidden_states, residual)
 
             if self.sequence_parallel:
+                print("aaaaaaaaaaaaaaa")
+                print(f"HS shape {hidden_states.shape}")
+                print(f"RESID shape {residual.shape}")
+                print("aaaaaaaaaaaaaaa")
                 hidden_states = tensor_model_parallel_all_gather(
                     hidden_states, 0)
+                print("bbbbbbbbbbbbbbb")
+                print(f"HS shape {hidden_states.shape}")
+                print(f"RESID shape {residual.shape}")
+                print("bbbbbbbbbbbbbbb")
+
+        print("AAAAAAAAAAAAAAA")
+        print("before attn")
+        print(f"HS shape {hidden_states.shape}")
+        print(f"RESID shape {residual.shape}")
+        print("AAAAAAAAAAAAAAA")
 
         hidden_states = self.self_attn(
             positions=positions,
@@ -688,6 +701,12 @@ class DeepseekV2DecoderLayer(nn.Module):
             # The scaling of DeepseekV2MOE output would be done in the forward
             # of DeepseekV2MOE
             hidden_states *= 1. / self.routed_scaling_factor
+
+        print("CCCCCCCCCCCCCCC")
+        print("end")
+        print(f"HS shape {hidden_states.shape}")
+        print(f"RESID shape {residual.shape}")
+        print("CCCCCCCCCCCCCCC")
 
         return hidden_states, residual
 
