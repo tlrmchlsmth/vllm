@@ -577,7 +577,7 @@ class DeepseekV2DecoderLayer(nn.Module):
                                   in ("deepep_high_throughput",
                                       "deepep_low_latency")
                                   and parallel_config.enable_expert_parallel
-                                  and isinstance(self.mlp, DeepseekV2MoE))
+                                  and is_moe_layer)
 
         # DecoderLayers are created with `make_layers` which passes the prefix
         # with the layer's index.
