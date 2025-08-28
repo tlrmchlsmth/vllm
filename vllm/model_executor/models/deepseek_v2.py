@@ -573,11 +573,11 @@ class DeepseekV2DecoderLayer(nn.Module):
         # duplicate work and return sequence parallel outputs.
         # In this case, we use a reducescatter operation after attention rather
         # than an allreduce, and allgather the outputs of the MoE layer.
-        self.sequence_parallel = (
-            envs.VLLM_ALL2ALL_BACKEND
-            in ("deepep_high_throughput", "deepep_low_latency")
-            and config.parallel_config.enable_expert_parallel
-            and isinstance(self.mlp, DeepseekV2MoE))
+        self.sequence_parallel = (envs.VLLM_ALL2ALL_BACKEND
+                                  in ("deepep_high_throughput",
+                                      "deepep_low_latency")
+                                  and parallel_config.enable_expert_parallel
+                                  and isinstance(self.mlp, DeepseekV2MoE))
 
         # DecoderLayers are created with `make_layers` which passes the prefix
         # with the layer's index.
@@ -645,6 +645,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         )
 
         if self.sequence_parallel:
+            print("doing reduce scatter")
             hidden_states = tensor_model_parallel_reduce_scatter(
                 hidden_states, 0)
 
@@ -664,6 +665,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         hidden_states = self.mlp(hidden_states)
 
         if self.sequence_parallel:
+            print("doing all gather")
             hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
 
         if isinstance(self.mlp,
