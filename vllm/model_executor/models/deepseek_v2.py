@@ -37,6 +37,7 @@ from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig, VllmConfig,
                          get_current_vllm_config)
 from vllm.distributed import (get_ep_group, get_pp_group,
+                              get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_gather,
                               tensor_model_parallel_reduce_scatter)
@@ -636,9 +637,25 @@ class DeepseekV2DecoderLayer(nn.Module):
         if residual is None:
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
+
+            tp_size = get_tensor_model_parallel_world_size()
+            tp_rank = get_tensor_model_parallel_rank()
+
+            if self.sequence_parallel:
+                seq_len = hidden_states.size(0)
+                assert (seq_len % tp_size == 0)
+                chunk = seq_len // tp_size
+                start = tp_rank * chunk
+                residual = hidden_states.narrow(0, start, chunk).contiguous()
+
         else:
             hidden_states, residual = self.input_layernorm(
                 hidden_states, residual)
+
+            if self.sequence_parallel:
+                hidden_states = tensor_model_parallel_all_gather(
+                    hidden_states, 0)
+
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
@@ -662,9 +679,6 @@ class DeepseekV2DecoderLayer(nn.Module):
         hidden_states, residual = self.post_attention_layernorm(
             hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
-
-        if self.sequence_parallel:
-            hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
 
         if isinstance(self.mlp,
                       DeepseekV2MLP) and hidden_states.dtype == torch.float16:
