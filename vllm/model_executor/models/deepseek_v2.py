@@ -645,7 +645,6 @@ class DeepseekV2DecoderLayer(nn.Module):
         )
 
         if self.sequence_parallel:
-            print("doing reduce scatter")
             hidden_states = tensor_model_parallel_reduce_scatter(
                 hidden_states, 0)
 
@@ -665,7 +664,6 @@ class DeepseekV2DecoderLayer(nn.Module):
         hidden_states = self.mlp(hidden_states)
 
         if self.sequence_parallel:
-            print("doing all gather")
             hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
 
         if isinstance(self.mlp,
