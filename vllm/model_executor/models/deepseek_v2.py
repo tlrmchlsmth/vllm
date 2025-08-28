@@ -809,7 +809,7 @@ class DeepseekV2Model(nn.Module):
 
         hidden_states, _ = self.norm(hidden_states, residual)
 
-        if self.layers[self.end_layer].sequence_parallel:
+        if self.layers[self.end_layer - 1].sequence_parallel:
             hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
         return hidden_states
 
