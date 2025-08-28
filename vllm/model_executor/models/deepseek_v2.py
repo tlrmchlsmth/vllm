@@ -651,7 +651,8 @@ class DeepseekV2DecoderLayer(nn.Module):
             hidden_states, residual = self.input_layernorm(
                 hidden_states, residual)
 
-            if self.sequence_parallel:
+            #if self.sequence_parallel:
+            if hidden_states.size(0) < positions.size(0):
                 print("aaaaaaaaaaaaaaa")
                 print(f"HS shape {hidden_states.shape}")
                 print(f"RESID shape {residual.shape}")
@@ -675,7 +676,6 @@ class DeepseekV2DecoderLayer(nn.Module):
         )
 
         print("BBBBBBBBBBBBBBB")
-        print("before attn")
         print(f"HS shape {hidden_states.shape}")
         print(f"RESID shape {residual.shape}")
         print("BBBBBBBBBBBBBBB")
@@ -685,7 +685,6 @@ class DeepseekV2DecoderLayer(nn.Module):
                 hidden_states, 0)
 
         print("CCCCCCCCCCCCCCC")
-        print("before attn")
         print(f"HS shape {hidden_states.shape}")
         print(f"RESID shape {residual.shape}")
         print("CCCCCCCCCCCCCCC")
