@@ -409,7 +409,6 @@ class DeepseekV2MLAAttention(nn.Module):
 
         self.num_heads = num_heads
         self.tp_size = get_tensor_model_parallel_world_size()
-        self.enable_expert_parallel = config.parallel_config.enable_expert_parallel
         assert num_heads % self.tp_size == 0
         self.num_local_heads = num_heads // self.tp_size
 
@@ -563,6 +562,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         rope_scaling = getattr(config, "rope_scaling", None)
         max_position_embeddings = getattr(config, "max_position_embeddings",
                                           8192)
+        
 
         layer_idx = int(prefix.split(sep='.')[-1])
         self.layer_idx = layer_idx
@@ -576,7 +576,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         # and allgather the outputs of the MoE layer.
         self.sequence_parallel = (envs.VLLM_ALL2ALL_BACKEND in ("deepep_high_throughput", 
                                                                 "deepep_low_latency") 
-                                  and self.enable_expert_parallel
+                                  and config.parallel_config.enable_expert_parallel
                                   and isinstance(self.mlp, DeepseekV2MoE))
 
         # DecoderLayers are created with `make_layers` which passes the prefix
