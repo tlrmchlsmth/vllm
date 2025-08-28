@@ -1491,30 +1491,25 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
          max_query_len) = self._prepare_inputs(scheduler_output)
 
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
-        print("1111111111111111111")
+
+        # Pad tokens to multiple of tensor_parallel_size when
+        # enabled collective fusion for SP
+        tp_size = self.vllm_config.parallel_config.tensor_parallel_size
+        enabled_sp = self.compilation_config.pass_config. \
+            enable_sequence_parallelism and tp_size > 1
+        enabled_sp = True
+        num_input_tokens = round_up(num_scheduled_tokens, tp_size)
+        if enabled_sp:
+            print(f"rounding up num tokens {num_scheduled_tokens} to "
+                  f"next multiple of {tp_size}")
+            num_input_tokens = round_up(num_input_tokens, tp_size)
+
         if (self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-                and num_scheduled_tokens <= self.cudagraph_batch_sizes[-1]):
+                and num_input_tokens <= self.cudagraph_batch_sizes[-1]):
             # Use CUDA graphs.
             # Add padding to the batch size.
             num_input_tokens = self.vllm_config.pad_for_cudagraph(
-                num_scheduled_tokens)
-        else:
-            print("2222222222222222222")
-            # Eager mode.
-            # Pad tokens to multiple of tensor_parallel_size when
-            # enabled collective fusion for SP
-            tp_size = self.vllm_config.parallel_config.tensor_parallel_size
-            enabled_sp = self.compilation_config.pass_config. \
-                enable_sequence_parallelism and tp_size > 1
-            enabled_sp = True
-            if enabled_sp:
-                print("3333333333333333333")
-                print(f"rounding up num tokens {num_scheduled_tokens} to "
-                      f"next multiple of {tp_size}")
-                num_input_tokens = round_up(num_scheduled_tokens, tp_size)
-            else:
-                print("4444444444444444444")
-                num_input_tokens = num_scheduled_tokens
+                num_input_tokens)
 
         # Padding for DP
         num_pad, num_tokens_across_dp = self.get_dp_padding(num_input_tokens)
