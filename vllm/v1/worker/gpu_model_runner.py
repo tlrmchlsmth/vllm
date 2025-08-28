@@ -1361,6 +1361,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         tp = self.vllm_config.parallel_config.tensor_parallel_size
         enabled_sp = self.compilation_config.pass_config. \
             enable_sequence_parallelism
+        enabled_sp = True
         if enabled_sp:
             # When sequence parallelism is enabled, we always pad num_tokens
             # to be a multiple of tensor_parallel_size (tp) earlier
@@ -1501,8 +1502,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # Pad tokens to multiple of tensor_parallel_size when
             # enabled collective fusion for SP
             tp_size = self.vllm_config.parallel_config.tensor_parallel_size
-            if self.compilation_config.pass_config. \
-                enable_sequence_parallelism and tp_size > 1:
+            enabled_sp = self.compilation_config.pass_config. \
+                enable_sequence_parallelism and tp_size > 1
+            enabled_sp = True
+            if enabled_sp:
                 num_input_tokens = round_up(num_scheduled_tokens, tp_size)
             else:
                 num_input_tokens = num_scheduled_tokens
