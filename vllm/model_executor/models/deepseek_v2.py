@@ -674,9 +674,21 @@ class DeepseekV2DecoderLayer(nn.Module):
             hidden_states=hidden_states,
         )
 
+        print("BBBBBBBBBBBBBBB")
+        print("before attn")
+        print(f"HS shape {hidden_states.shape}")
+        print(f"RESID shape {residual.shape}")
+        print("BBBBBBBBBBBBBBB")
+
         if self.sequence_parallel:
             hidden_states = tensor_model_parallel_reduce_scatter(
                 hidden_states, 0)
+
+        print("CCCCCCCCCCCCCCC")
+        print("before attn")
+        print(f"HS shape {hidden_states.shape}")
+        print(f"RESID shape {residual.shape}")
+        print("CCCCCCCCCCCCCCC")
 
         if hidden_states.dtype == torch.float16:
             # Fix FP16 overflow
@@ -691,6 +703,13 @@ class DeepseekV2DecoderLayer(nn.Module):
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(
             hidden_states, residual)
+
+        print("DDDDDDDDDDDDDDD")
+        print("before attn")
+        print(f"HS shape {hidden_states.shape}")
+        print(f"RESID shape {residual.shape}")
+        print("DDDDDDDDDDDDDDD")
+
         hidden_states = self.mlp(hidden_states)
 
         if isinstance(self.mlp,
@@ -702,11 +721,11 @@ class DeepseekV2DecoderLayer(nn.Module):
             # of DeepseekV2MOE
             hidden_states *= 1. / self.routed_scaling_factor
 
-        print("CCCCCCCCCCCCCCC")
+        print("ZZZZZZZZZZZZZZZ")
         print("end")
         print(f"HS shape {hidden_states.shape}")
         print(f"RESID shape {residual.shape}")
-        print("CCCCCCCCCCCCCCC")
+        print("ZZZZZZZZZZZZZZZ")
 
         return hidden_states, residual
 
