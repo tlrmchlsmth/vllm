@@ -34,12 +34,11 @@ from transformers import DeepseekV2Config, DeepseekV3Config
 import vllm.envs as envs
 from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import (CacheConfig, ModelConfig, VllmConfig,
+from vllm.config import (CacheConfig, ModelConfig, ParallelConfig, VllmConfig,
                          get_current_vllm_config)
 from vllm.distributed import (get_ep_group, get_pp_group,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_gather,
-                              tensor_model_parallel_all_reduce,
                               tensor_model_parallel_reduce_scatter)
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import FusedMoE
@@ -370,6 +369,7 @@ class DeepseekV2Attention(nn.Module):
 
         return output
 
+
 class DeepseekV2MLAAttention(nn.Module):
     """
     Main reference: DeepseekV2 paper, and FlashInfer Implementation
@@ -460,7 +460,7 @@ class DeepseekV2MLAAttention(nn.Module):
                                         bias=False,
                                         quant_config=quant_config,
                                         prefix=f"{prefix}.o_proj",
-                                        reduce_results = self.reduce_results)
+                                        reduce_results=self.reduce_results)
 
         if rope_scaling:
             rope_scaling["rope_type"] = 'deepseek_yarn'
@@ -503,7 +503,6 @@ class DeepseekV2MLAAttention(nn.Module):
 
         self.prefix = prefix
         self.debug_layer_idx = int(self.prefix.split(".")[-2])
-
 
     def forward(
         self,
@@ -551,6 +550,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         self,
         config: Union[DeepseekV2Config, DeepseekV3Config],
         prefix: str,
+        parallel_config: ParallelConfig,
         model_config: ModelConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
@@ -562,7 +562,6 @@ class DeepseekV2DecoderLayer(nn.Module):
         rope_scaling = getattr(config, "rope_scaling", None)
         max_position_embeddings = getattr(config, "max_position_embeddings",
                                           8192)
-        
 
         layer_idx = int(prefix.split(sep='.')[-1])
         self.layer_idx = layer_idx
@@ -570,14 +569,15 @@ class DeepseekV2DecoderLayer(nn.Module):
                         and layer_idx >= config.first_k_dense_replace
                         and layer_idx % config.moe_layer_freq == 0)
 
-        # EP MoE layers using DeepEP expect sequence parallel inputs to avoid duplicate work
-        # and return sequence parallel outputs. 
-        # In this case, we use a reducescatter operation after attention rather than an allreduce,
-        # and allgather the outputs of the MoE layer.
-        self.sequence_parallel = (envs.VLLM_ALL2ALL_BACKEND in ("deepep_high_throughput", 
-                                                                "deepep_low_latency") 
-                                  and config.parallel_config.enable_expert_parallel
-                                  and isinstance(self.mlp, DeepseekV2MoE))
+        # EP MoE layers using DeepEP expect sequence parallel inputs to avoid
+        # duplicate work and return sequence parallel outputs.
+        # In this case, we use a reducescatter operation after attention rather
+        # than an allreduce, and allgather the outputs of the MoE layer.
+        self.sequence_parallel = (
+            envs.VLLM_ALL2ALL_BACKEND
+            in ("deepep_high_throughput", "deepep_low_latency")
+            and config.parallel_config.enable_expert_parallel
+            and isinstance(self.mlp, DeepseekV2MoE))
 
         # DecoderLayers are created with `make_layers` which passes the prefix
         # with the layer's index.
@@ -600,7 +600,7 @@ class DeepseekV2DecoderLayer(nn.Module):
             max_position_embeddings=max_position_embeddings,
             cache_config=cache_config,
             quant_config=quant_config,
-            reduce_results = not self.sequence_parallel,
+            reduce_results=not self.sequence_parallel,
             prefix=f"{prefix}.self_attn",
         )
 
@@ -645,7 +645,8 @@ class DeepseekV2DecoderLayer(nn.Module):
         )
 
         if self.sequence_parallel:
-            hidden_states = tensor_model_parallel_reduce_scatter(hidden_states, 0)
+            hidden_states = tensor_model_parallel_reduce_scatter(
+                hidden_states, 0)
 
         if hidden_states.dtype == torch.float16:
             # Fix FP16 overflow
@@ -687,6 +688,7 @@ class DeepseekV2Model(nn.Module):
 
         config = vllm_config.model_config.hf_config
         model_config = vllm_config.model_config
+        parallel_config = vllm_config.parallel_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         enable_eplb = vllm_config.parallel_config.enable_eplb
@@ -708,6 +710,7 @@ class DeepseekV2Model(nn.Module):
             lambda prefix: DeepseekV2DecoderLayer(
                 config,
                 prefix,
+                parallel_config=parallel_config,
                 model_config=model_config,
                 cache_config=cache_config,
                 quant_config=quant_config,
