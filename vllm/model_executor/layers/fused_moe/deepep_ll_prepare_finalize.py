@@ -185,14 +185,14 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         cu_tokens_across_dp_cpu = get_forward_context(
         ).dp_metadata.cu_tokens_across_dp_cpu
 
+        print("=============================================")
+        print(f"Tokens across EP: {num_tokens_across_ep_cpu}")
+        print(f"Tokens across DP: {num_tokens_across_dp_cpu}")
+        print(f"CU Tokens across EP: {cu_tokens_across_ep_cpu}")
+        print(f"CU Tokens across DP: {cu_tokens_across_dp_cpu}")
+        print(f"max tokens per rank: {self.max_tokens_per_rank}")
+        print("=============================================")
         if cu_tokens_across_ep_cpu[-1] != 8 * cu_tokens_across_dp_cpu[-1]:
-            print(f"Tokens across EP: {num_tokens_across_ep_cpu}")
-            print(f"Tokens across DP: {num_tokens_across_dp_cpu}")
-
-            print(f"CU Tokens across EP: {cu_tokens_across_ep_cpu}")
-            print(f"CU Tokens across DP: {cu_tokens_across_dp_cpu}")
-
-            print(f"max tokens per rank: {self.max_tokens_per_rank}")
             raise AssertionError
 
         expert_x, expert_x_scale = self._do_quant(
