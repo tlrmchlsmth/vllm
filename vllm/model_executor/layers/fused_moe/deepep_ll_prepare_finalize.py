@@ -177,7 +177,8 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                                                 async_finish=False,
                                                 return_recv_hook=False)
 
-        num_tokens_across_ep_cpu = num_tokens_across_ep(expert_num_tokens)
+        num_tokens = expert_num_tokens.sum().item()
+        num_tokens_across_ep_cpu = num_tokens_across_ep(num_tokens)
         cu_tokens_across_ep_cpu = torch.cumsum(num_tokens_across_ep_cpu, dim=0)
         num_tokens_across_dp_cpu = get_forward_context(
         ).dp_metadata.num_tokens_across_dp_cpu
