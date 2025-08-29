@@ -660,7 +660,7 @@ class DeepseekV2DecoderLayer(nn.Module):
             hidden_states, residual = self.input_layernorm(
                 hidden_states, residual)
 
-            if hidden_states.size(0) < positions.size(0):
+            if hidden_states.shape[0] < positions.shape[0]:
                 # Previous layer was an MoE, so hidden_states are SP
                 # and must be gathered for attn
                 hidden_states = tensor_model_parallel_all_gather(
@@ -676,6 +676,8 @@ class DeepseekV2DecoderLayer(nn.Module):
             # Use a reduce scatter to sum hidden_states and make them SP
             hidden_states = tensor_model_parallel_reduce_scatter(
                 hidden_states, 0)
+            if residual.shape[0] < hidden_states.shape[0]:
+                residual = self.sp_chunk(residual)
 
         if hidden_states.dtype == torch.float16:
             raise AssertionError
@@ -697,6 +699,7 @@ class DeepseekV2DecoderLayer(nn.Module):
 
         if isinstance(self.mlp,
                       DeepseekV2MLP) and hidden_states.dtype == torch.float16:
+            raise AssertionError
             # Fix FP16 overflow
             # Scaling the DeepseekV2MLP output, it is the input of
             # input_layernorm of next decoder layer.
