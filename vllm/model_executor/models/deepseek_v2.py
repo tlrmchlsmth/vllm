@@ -631,6 +631,7 @@ class DeepseekV2DecoderLayer(nn.Module):
                                                 eps=config.rms_norm_eps)
         self.routed_scaling_factor = config.routed_scaling_factor
 
+    # Chunk x for sequence parallelism
     def sp_chunk(self, x):
         if not self.sequence_parallel:
             return x
@@ -649,17 +650,18 @@ class DeepseekV2DecoderLayer(nn.Module):
     ) -> torch.Tensor:
         # Self Attention
         if residual is None:
+            # No chunking because first layer is dense MLP
+            assert isinstance(self.mlp, DeepseekV2MLP)
             residual = hidden_states
-            residual = self.sp_chunk(residual)
-
             hidden_states = self.input_layernorm(hidden_states)
 
         else:
             hidden_states, residual = self.input_layernorm(
                 hidden_states, residual)
 
-            #if self.sequence_parallel:
             if hidden_states.size(0) < positions.size(0):
+                # Previous layer was an MoE, so hidden_states are SP
+                # and must be gathered for attn
                 hidden_states = tensor_model_parallel_all_gather(
                     hidden_states, 0)
 
@@ -669,10 +671,13 @@ class DeepseekV2DecoderLayer(nn.Module):
         )
 
         if self.sequence_parallel:
+            # If this layer is SP, attn o_proj doesn't all_reduce outputs.
+            # Use a reduce scatter to sum hidden_states and make them SP
             hidden_states = tensor_model_parallel_reduce_scatter(
                 hidden_states, 0)
 
         if hidden_states.dtype == torch.float16:
+            raise AssertionError
             # Fix FP16 overflow
             # We scale both hidden_states and residual before
             # rmsnorm, and rmsnorm result would not affect by scale.
