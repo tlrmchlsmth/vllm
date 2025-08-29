@@ -660,6 +660,12 @@ class DeepseekV2DecoderLayer(nn.Module):
             hidden_states, residual = self.input_layernorm(
                 hidden_states, residual)
 
+            if hidden_states.size(0) < positions.size(0):
+                # Previous layer was an MoE, so hidden_states are SP
+                # and must be gathered for attn
+                hidden_states = tensor_model_parallel_all_gather(
+                    hidden_states, 0)
+
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
@@ -688,14 +694,6 @@ class DeepseekV2DecoderLayer(nn.Module):
             hidden_states, residual)
 
         hidden_states = self.mlp(hidden_states)
-
-        if self.sequence_parallel:
-            # Gather for next layer's attn
-            # TODO: Keeping it simple. We do extra work in subsequent layernorms
-            # by doing the AG here
-            hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
-            residual = tensor_model_parallel_all_gather(residual,
-                                                        0)  #ok yeah this sucks
 
         if isinstance(self.mlp,
                       DeepseekV2MLP) and hidden_states.dtype == torch.float16:
@@ -787,8 +785,11 @@ class DeepseekV2Model(nn.Module):
                 "residual": residual
             })
 
+        assert (hidden_states.shape == residual.shape)
         hidden_states, _ = self.norm(hidden_states, residual)
 
+        if self.layers[self.end_layer - 1].sequence_parallel:
+            hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
         return hidden_states
 
 
