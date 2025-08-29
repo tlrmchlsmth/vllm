@@ -580,7 +580,6 @@ class DeepseekV2DecoderLayer(nn.Module):
                                       "deepep_low_latency")
                                   and parallel_config.enable_expert_parallel
                                   and is_moe_layer)
-        self.sequence_parallel = True
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
 
