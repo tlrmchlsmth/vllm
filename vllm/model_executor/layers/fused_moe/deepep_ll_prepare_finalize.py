@@ -191,6 +191,8 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
             print(f"CU Tokens across EP: {cu_tokens_across_ep_cpu}")
             print(f"CU Tokens across DP: {cu_tokens_across_dp_cpu}")
+
+            print(f"max tokens per rank: {self.max_tokens_per_rank}")
             raise AssertionError
 
         expert_x, expert_x_scale = self._do_quant(
