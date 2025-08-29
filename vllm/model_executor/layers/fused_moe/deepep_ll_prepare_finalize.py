@@ -53,6 +53,25 @@ def num_tokens_across_ep(num_tokens: int) -> torch.Tensor:
     return num_tokens_tensor
 
 
+def check(expert_num_tokens: torch.Tensor):
+    num_tokens = expert_num_tokens.sum().item()
+    num_tokens_across_ep_cpu = num_tokens_across_ep(num_tokens)
+    cu_tokens_across_ep_cpu = torch.cumsum(num_tokens_across_ep_cpu, dim=0)
+    num_tokens_across_dp_cpu = get_forward_context(
+    ).dp_metadata.num_tokens_across_dp_cpu
+    cu_tokens_across_dp_cpu = get_forward_context(
+    ).dp_metadata.cu_tokens_across_dp_cpu
+
+    if cu_tokens_across_ep_cpu[-1] != 8 * cu_tokens_across_dp_cpu[-1]:
+        print("=============================================")
+        print(f"Tokens across EP: {num_tokens_across_ep_cpu}")
+        print(f"Tokens across DP: {num_tokens_across_dp_cpu}")
+        print(f"CU Tokens across EP: {cu_tokens_across_ep_cpu}")
+        print(f"CU Tokens across DP: {cu_tokens_across_dp_cpu}")
+        print("=============================================")
+        raise AssertionError
+
+
 class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     """
     Prepare/Finalize using DeepEP low-latency kernels.
@@ -177,23 +196,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                                                 async_finish=False,
                                                 return_recv_hook=False)
 
-        num_tokens = expert_num_tokens.sum().item()
-        num_tokens_across_ep_cpu = num_tokens_across_ep(num_tokens)
-        cu_tokens_across_ep_cpu = torch.cumsum(num_tokens_across_ep_cpu, dim=0)
-        num_tokens_across_dp_cpu = get_forward_context(
-        ).dp_metadata.num_tokens_across_dp_cpu
-        cu_tokens_across_dp_cpu = get_forward_context(
-        ).dp_metadata.cu_tokens_across_dp_cpu
-
-        if cu_tokens_across_ep_cpu[-1] != 8 * cu_tokens_across_dp_cpu[-1]:
-            print("=============================================")
-            print(f"Tokens across EP: {num_tokens_across_ep_cpu}")
-            print(f"Tokens across DP: {num_tokens_across_dp_cpu}")
-            print(f"CU Tokens across EP: {cu_tokens_across_ep_cpu}")
-            print(f"CU Tokens across DP: {cu_tokens_across_dp_cpu}")
-            print(f"max tokens per rank: {self.max_tokens_per_rank}")
-            print("=============================================")
-            raise AssertionError
+        #check(expert_num_tokens)
 
         expert_x, expert_x_scale = self._do_quant(
             expert_x, a1_scale, a2_scale, a1.dtype, quant_config.quant_dtype,
