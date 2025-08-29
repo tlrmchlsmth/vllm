@@ -656,6 +656,7 @@ class DeepseekV2DecoderLayer(nn.Module):
             hidden_states = self.input_layernorm(hidden_states)
 
         else:
+            assert (hidden_states.shape == residual.shape)
             hidden_states, residual = self.input_layernorm(
                 hidden_states, residual)
 
@@ -682,6 +683,7 @@ class DeepseekV2DecoderLayer(nn.Module):
                 residual *= 1. / self.routed_scaling_factor
 
         # Fully Connected
+        assert (hidden_states.shape == residual.shape)
         hidden_states, residual = self.post_attention_layernorm(
             hidden_states, residual)
 
@@ -692,6 +694,8 @@ class DeepseekV2DecoderLayer(nn.Module):
             # TODO: Keeping it simple. We do extra work in subsequent layernorms
             # by doing the AG here
             hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
+            residual = tensor_model_parallel_all_gather(residual,
+                                                        0)  #ok yeah this sucks
 
         if isinstance(self.mlp,
                       DeepseekV2MLP) and hidden_states.dtype == torch.float16:
