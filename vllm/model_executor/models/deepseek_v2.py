@@ -678,7 +678,7 @@ class DeepseekV2DecoderLayer(nn.Module):
             # Use a reduce scatter to sum hidden_states and make them SP
             hidden_states = tensor_model_parallel_reduce_scatter(
                 hidden_states, 0)
-            if residual.shape[0] < hidden_states.shape[0]:
+            if hidden_states.shape[0] < residual.shape[0]:
                 residual = self.sp_chunk(residual)
 
         if hidden_states.dtype == torch.float16:
