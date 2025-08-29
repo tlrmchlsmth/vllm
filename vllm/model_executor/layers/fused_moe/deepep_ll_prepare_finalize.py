@@ -4,8 +4,10 @@ from typing import Optional, Union
 
 import deep_ep
 import torch
+import torch.distributed as dist
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate)
@@ -31,6 +33,24 @@ def dequant_fp8(expert_x_fp8: torch.Tensor,
         num_experts, -1, DEEPEP_QUANT_BLOCK_SIZE)
     expert_x_scales = expert_x_scales.view(num_experts, -1, 1)
     return (expert_x_fp32 * expert_x_scales).view(expert_x_fp8.size())
+
+
+def num_tokens_across_ep(num_tokens: int) -> torch.Tensor:
+    """
+    Gather the num_tokens across all EP ranks and return results in a
+    CPU tensor of size ep_size.
+    """
+    from vllm.distributed.parallel_state import get_world_group
+    ep_size = get_world_group().world_size
+    ep_rank = get_world_group().rank_in_group
+
+    num_tokens_across_ep = [0] * ep_size
+    num_tokens_across_ep[ep_rank] = num_tokens
+    num_tokens_tensor = torch.tensor(num_tokens_across_ep,
+                                     device="cpu",
+                                     dtype=torch.int32)
+    dist.all_reduce(num_tokens_tensor, group=get_world_group().cpu_group)
+    return num_tokens_tensor
 
 
 class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
@@ -156,6 +176,21 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                                                 use_fp8=self.use_fp8_dispatch,
                                                 async_finish=False,
                                                 return_recv_hook=False)
+
+        num_tokens_across_ep_cpu = num_tokens_across_ep(expert_num_tokens)
+        cu_tokens_across_ep_cpu = torch.cumsum(num_tokens_across_ep_cpu, dim=0)
+        num_tokens_across_dp_cpu = get_forward_context(
+        ).dp_metadata.num_tokens_across_dp_cpu
+        cu_tokens_across_dp_cpu = get_forward_context(
+        ).dp_metadata.cu_tokens_across_dp_cpu
+
+        if cu_tokens_across_ep_cpu[-1] != 8 * cu_tokens_across_dp_cpu[-1]:
+            print(f"Tokens across EP: {num_tokens_across_ep_cpu}")
+            print(f"Tokens across DP: {num_tokens_across_dp_cpu}")
+
+            print(f"CU Tokens across EP: {cu_tokens_across_ep_cpu}")
+            print(f"CU Tokens across DP: {cu_tokens_across_dp_cpu}")
+            raise AssertionError
 
         expert_x, expert_x_scale = self._do_quant(
             expert_x, a1_scale, a2_scale, a1.dtype, quant_config.quant_dtype,
