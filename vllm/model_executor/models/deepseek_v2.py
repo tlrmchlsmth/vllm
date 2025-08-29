@@ -580,7 +580,7 @@ class DeepseekV2DecoderLayer(nn.Module):
                                       "deepep_low_latency")
                                   and parallel_config.enable_expert_parallel
                                   and is_moe_layer)
-        self.sequence_parallel = False
+        self.sequence_parallel = True
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
 
@@ -631,6 +631,16 @@ class DeepseekV2DecoderLayer(nn.Module):
                                                 eps=config.rms_norm_eps)
         self.routed_scaling_factor = config.routed_scaling_factor
 
+    def sp_chunk(self, x):
+        if not self.sequence_parallel:
+            return x
+
+        seq_len = x.size(0)
+        assert (seq_len % self.tp_size == 0)
+        chunk = seq_len // self.tp_size
+        start = self.tp_rank * chunk
+        return x.narrow(0, start, chunk).contiguous()
+
     def forward(
         self,
         positions: torch.Tensor,
@@ -640,14 +650,9 @@ class DeepseekV2DecoderLayer(nn.Module):
         # Self Attention
         if residual is None:
             residual = hidden_states
-            hidden_states = self.input_layernorm(hidden_states)
+            residual = self.sp_chunk(residual)
 
-            if self.sequence_parallel:
-                seq_len = hidden_states.size(0)
-                assert (seq_len % self.tp_size == 0)
-                chunk = seq_len // self.tp_size
-                start = self.tp_rank * chunk
-                residual = hidden_states.narrow(0, start, chunk).contiguous()
+            hidden_states = self.input_layernorm(hidden_states)
 
         else:
             hidden_states, residual = self.input_layernorm(
