@@ -40,8 +40,7 @@ from vllm.config import (CacheConfig, ModelConfig, ParallelConfig, VllmConfig,
 from vllm.distributed import (get_ep_group, get_pp_group,
                               get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
-                              tensor_model_parallel_all_gather,
-                              tensor_model_parallel_reduce_scatter)
+                              tensor_model_parallel_all_gather)
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -81,8 +80,6 @@ class DeepseekV2MLP(nn.Module):
         super().__init__()
 
         if replicated_linear:
-            print("REPLICATED LINEAR MLP")
-
             self.gate_up_proj = MergedReplicatedLinear(
                 hidden_size, [intermediate_size] * 2,
                 bias=False,
@@ -634,7 +631,8 @@ class DeepseekV2DecoderLayer(nn.Module):
             max_position_embeddings=max_position_embeddings,
             cache_config=cache_config,
             quant_config=quant_config,
-            reduce_results=not self.sequence_parallel,
+            #reduce_results=not self.sequence_parallel,
+            reduce_results=True,
             prefix=f"{prefix}.self_attn",
         )
 
@@ -706,10 +704,12 @@ class DeepseekV2DecoderLayer(nn.Module):
         if self.sequence_parallel:
             # If this layer is SP, attn o_proj doesn't all_reduce outputs.
             # Use a reduce scatter to sum hidden_states and make them SP
-            hidden_states = tensor_model_parallel_reduce_scatter(
-                hidden_states, 0)
+            hidden_states = self.sp_chunk(hidden_states)
+            #hidden_states = tensor_model_parallel_reduce_scatter(
+            #    hidden_states, 0)
             if hidden_states.shape[0] < residual.shape[0]:
                 residual = self.sp_chunk(residual)
+            assert hidden_states.contiguous()
 
         if hidden_states.dtype == torch.float16:
             raise AssertionError
