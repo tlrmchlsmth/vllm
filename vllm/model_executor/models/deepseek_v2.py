@@ -93,6 +93,7 @@ class DeepseekV2MLP(nn.Module):
                                               quant_config=quant_config,
                                               prefix=f"{prefix}.down_proj")
         else:
+            raise AssertionError
             self.gate_up_proj = MergedColumnParallelLinear(
                 hidden_size, [intermediate_size] * 2,
                 bias=False,
@@ -206,6 +207,9 @@ class DeepseekV2MoE(nn.Module):
         hidden_states = hidden_states.view(-1, hidden_dim)
         if self.n_shared_experts is not None:
             shared_output = self.shared_experts(hidden_states)
+        else:
+            raise AssertionError
+
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
 
@@ -214,6 +218,7 @@ class DeepseekV2MoE(nn.Module):
                 hidden_states=hidden_states,
                 router_logits=router_logits) * self.routed_scaling_factor
         else:
+            raise AssertionError
             # Fix FP16 overflow
             # See DeepseekV2DecoderLayer for more details.
             final_hidden_states = self.experts(hidden_states=hidden_states,
@@ -222,12 +227,16 @@ class DeepseekV2MoE(nn.Module):
             if hidden_states.dtype != torch.float16:
                 final_hidden_states = final_hidden_states + shared_output
             else:
+                raise AssertionError
                 # Fix FP16 overflow
                 # See DeepseekV2DecoderLayer for more details.
                 final_hidden_states = final_hidden_states + shared_output \
                     * (1. / self.routed_scaling_factor)
+        else:
+            raise AssertionError
 
         if not self.sequence_parallel and self.tp_size > 1:
+            raise AssertionError
             final_hidden_states = (
                 self.experts.maybe_all_reduce_tensor_model_parallel(
                     final_hidden_states))
