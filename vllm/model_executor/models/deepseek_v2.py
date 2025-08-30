@@ -688,6 +688,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         if residual is None:
             # No chunking because first layer is dense MLP
             assert isinstance(self.mlp, DeepseekV2MLP)
+            assert not self.sequence_parallel
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
 
@@ -696,7 +697,7 @@ class DeepseekV2DecoderLayer(nn.Module):
             hidden_states, residual = self.input_layernorm(
                 hidden_states, residual)
 
-            if self.sequence_parallel and not self.previous_layer_is_sp:
+            if self.sequence_parallel and self.previous_layer_is_sp:
                 # Previous layer was an MoE, so hidden_states are SP
                 # and must be gathered for attn
                 hidden_states = tensor_model_parallel_all_gather(
