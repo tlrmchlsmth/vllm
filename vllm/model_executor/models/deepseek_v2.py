@@ -687,10 +687,11 @@ class DeepseekV2DecoderLayer(nn.Module):
         residual: Optional[torch.Tensor],
     ) -> torch.Tensor:
         # Sanity check.
-        t0 = tensor_model_parallel_all_reduce(hidden_states.clone())
-        t1 = tensor_model_parallel_all_gather(
-            tensor_model_parallel_reduce_scatter(hidden_states, 0), 0)
-        assert torch.allclose(t0, t1, atol=5e-4, rtol=5e-4)
+        if self.sequence_parallel:
+            t0 = tensor_model_parallel_all_reduce(hidden_states.clone())
+            t1 = tensor_model_parallel_all_gather(
+                tensor_model_parallel_reduce_scatter(hidden_states, 0), 0)
+            assert torch.allclose(t0, t1, atol=5e-4, rtol=5e-4)
 
         # Self Attention
         if residual is None:
