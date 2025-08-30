@@ -599,8 +599,9 @@ class DeepseekV2DecoderLayer(nn.Module):
                         and layer_idx >= config.first_k_dense_replace
                         and layer_idx % config.moe_layer_freq == 0)
         previous_layer_is_moe = (config.n_routed_experts is not None
-                                 and layer_idx >= config.first_k_dense_replace
-                                 and layer_idx % config.moe_layer_freq == 0)
+                                 and (layer_idx - 1)
+                                 >= config.first_k_dense_replace and
+                                 (layer_idx - 1) % config.moe_layer_freq == 0)
 
         # EP MoE layers using DeepEP expect sequence parallel inputs to avoid
         # duplicate work and return sequence parallel outputs.
