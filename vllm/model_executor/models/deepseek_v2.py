@@ -41,6 +41,7 @@ from vllm.distributed import (get_ep_group, get_pp_group,
                               get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_gather,
+                              tensor_model_parallel_all_reduce,
                               tensor_model_parallel_reduce_scatter)
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import FusedMoE
@@ -685,6 +686,12 @@ class DeepseekV2DecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         residual: Optional[torch.Tensor],
     ) -> torch.Tensor:
+        # Sanity check.
+        t0 = tensor_model_parallel_all_reduce(hidden_states.clone())
+        t1 = tensor_model_parallel_all_gather(
+            tensor_model_parallel_reduce_scatter(hidden_states, 0), 0)
+        assert torch.allclose(t0, t1, atol=5e-4, rtol=5e-4)
+
         # Self Attention
         if residual is None:
             # No chunking because first layer is dense MLP
