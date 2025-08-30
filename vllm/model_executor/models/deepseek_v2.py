@@ -81,6 +81,8 @@ class DeepseekV2MLP(nn.Module):
         super().__init__()
 
         if replicated_linear:
+            print("REPLICATED LINEAR MLP")
+
             self.gate_up_proj = MergedReplicatedLinear(
                 hidden_size, [intermediate_size] * 2,
                 bias=False,
@@ -93,7 +95,6 @@ class DeepseekV2MLP(nn.Module):
                                               quant_config=quant_config,
                                               prefix=f"{prefix}.down_proj")
         else:
-            raise AssertionError
             self.gate_up_proj = MergedColumnParallelLinear(
                 hidden_size, [intermediate_size] * 2,
                 bias=False,
