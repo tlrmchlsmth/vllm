@@ -709,7 +709,7 @@ class DeepseekV2DecoderLayer(nn.Module):
             #    hidden_states, 0)
             if hidden_states.shape[0] < residual.shape[0]:
                 residual = self.sp_chunk(residual)
-            assert hidden_states.contiguous()
+            assert hidden_states.is_contiguous()
 
         if hidden_states.dtype == torch.float16:
             raise AssertionError
