@@ -76,6 +76,7 @@ class DeepseekV2MLP(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
         reduce_results: bool = True,
         prefix: str = "",
+        replicated_linear: bool = False,
     ) -> None:
         super().__init__()
         self.gate_up_proj = MergedColumnParallelLinear(
@@ -83,12 +84,20 @@ class DeepseekV2MLP(nn.Module):
             bias=False,
             quant_config=quant_config,
             prefix=f"{prefix}.gate_up_proj")
-        self.down_proj = RowParallelLinear(intermediate_size,
-                                           hidden_size,
-                                           bias=False,
-                                           quant_config=quant_config,
-                                           reduce_results=reduce_results,
-                                           prefix=f"{prefix}.down_proj")
+
+        if replicated_linear:
+            self.down_proj = ReplicatedLinear(intermediate_size,
+                                              hidden_size,
+                                              bias=False,
+                                              quant_config=quant_config,
+                                              prefix=f"{prefix}.down_proj")
+        else:
+            self.down_proj = RowParallelLinear(intermediate_size,
+                                               hidden_size,
+                                               bias=False,
+                                               quant_config=quant_config,
+                                               reduce_results=reduce_results,
+                                               prefix=f"{prefix}.down_proj")
         if hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {hidden_act}. "
                              "Only silu is supported for now.")
@@ -109,6 +118,7 @@ class DeepseekV2MoE(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
         enable_eplb: bool = False,
+        sequence_parallel=False,
     ):
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
@@ -119,6 +129,7 @@ class DeepseekV2MoE(nn.Module):
         self.ep_size = self.ep_group.size()
         self.n_routed_experts: int = config.n_routed_experts
         self.n_shared_experts: int = config.n_shared_experts
+        self.sequence_parallel = sequence_parallel
 
         if config.hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {config.hidden_act}. "
@@ -179,6 +190,7 @@ class DeepseekV2MoE(nn.Module):
                 reduce_results=self.experts.must_reduce_shared_expert_outputs(
                 ),
                 prefix=f"{prefix}.shared_experts",
+                replicated_linear=self.sequence_parallel,
             )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -207,7 +219,7 @@ class DeepseekV2MoE(nn.Module):
                 final_hidden_states = final_hidden_states + shared_output \
                     * (1. / self.routed_scaling_factor)
 
-        if self.tp_size > 1:
+        if not self.sequence_parallel and self.tp_size > 1:
             final_hidden_states = (
                 self.experts.maybe_all_reduce_tensor_model_parallel(
                     final_hidden_states))
@@ -614,6 +626,7 @@ class DeepseekV2DecoderLayer(nn.Module):
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp",
                 enable_eplb=enable_eplb,
+                sequence_parallel=self.sequence_parallel,
             )
         else:
             self.mlp = DeepseekV2MLP(
