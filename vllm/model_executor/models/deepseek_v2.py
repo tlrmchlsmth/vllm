@@ -79,19 +79,26 @@ class DeepseekV2MLP(nn.Module):
         replicated_linear: bool = False,
     ) -> None:
         super().__init__()
-        self.gate_up_proj = MergedColumnParallelLinear(
-            hidden_size, [intermediate_size] * 2,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.gate_up_proj")
 
         if replicated_linear:
+            self.gate_up_proj = MergedReplicatedLinear(
+                hidden_size, [intermediate_size] * 2,
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.gate_up_proj")
+
             self.down_proj = ReplicatedLinear(intermediate_size,
                                               hidden_size,
                                               bias=False,
                                               quant_config=quant_config,
                                               prefix=f"{prefix}.down_proj")
         else:
+            self.gate_up_proj = MergedColumnParallelLinear(
+                hidden_size, [intermediate_size] * 2,
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.gate_up_proj")
+
             self.down_proj = RowParallelLinear(intermediate_size,
                                                hidden_size,
                                                bias=False,
