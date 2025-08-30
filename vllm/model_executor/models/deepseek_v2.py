@@ -687,7 +687,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         residual: Optional[torch.Tensor],
     ) -> torch.Tensor:
         # Sanity check.
-        if positions.shape(0) == hidden_states.shape(0):
+        if positions.shape[0] == hidden_states.shape[0]:
             t0 = tensor_model_parallel_all_reduce(hidden_states.clone())
             t1 = tensor_model_parallel_all_gather(
                 tensor_model_parallel_reduce_scatter(hidden_states, 0), 0)
