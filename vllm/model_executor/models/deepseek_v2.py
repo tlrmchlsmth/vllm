@@ -40,7 +40,8 @@ from vllm.config import (CacheConfig, ModelConfig, ParallelConfig, VllmConfig,
 from vllm.distributed import (get_ep_group, get_pp_group,
                               get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
-                              tensor_model_parallel_all_gather)
+                              tensor_model_parallel_all_gather,
+                              tensor_model_parallel_reduce_scatter)
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -437,9 +438,9 @@ class DeepseekV2MLAAttention(nn.Module):
         self.kv_lora_rank = kv_lora_rank
 
         self.num_heads = num_heads
-        self.tp_size = get_tensor_model_parallel_world_size()
-        assert num_heads % self.tp_size == 0
-        self.num_local_heads = num_heads // self.tp_size
+        tp_size = get_tensor_model_parallel_world_size()
+        assert num_heads % tp_size == 0
+        self.num_local_heads = num_heads // tp_size
 
         self.scaling = self.qk_head_dim**-0.5
         self.rope_theta = rope_theta
@@ -597,6 +598,9 @@ class DeepseekV2DecoderLayer(nn.Module):
         is_moe_layer = (config.n_routed_experts is not None
                         and layer_idx >= config.first_k_dense_replace
                         and layer_idx % config.moe_layer_freq == 0)
+        previous_layer_is_moe = (config.n_routed_experts is not None
+                                 and layer_idx >= config.first_k_dense_replace
+                                 and layer_idx % config.moe_layer_freq == 0)
 
         # EP MoE layers using DeepEP expect sequence parallel inputs to avoid
         # duplicate work and return sequence parallel outputs.
@@ -607,6 +611,11 @@ class DeepseekV2DecoderLayer(nn.Module):
                                       "deepep_low_latency")
                                   and parallel_config.enable_expert_parallel
                                   and is_moe_layer)
+        self.previous_layer_is_sp = (envs.VLLM_ALL2ALL_BACKEND
+                                     in ("deepep_high_throughput",
+                                         "deepep_low_latency")
+                                     and parallel_config.enable_expert_parallel
+                                     and previous_layer_is_moe)
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
 
@@ -631,8 +640,7 @@ class DeepseekV2DecoderLayer(nn.Module):
             max_position_embeddings=max_position_embeddings,
             cache_config=cache_config,
             quant_config=quant_config,
-            #reduce_results=not self.sequence_parallel,
-            reduce_results=True,
+            reduce_results=not self.sequence_parallel,
             prefix=f"{prefix}.self_attn",
         )
 
@@ -684,13 +692,11 @@ class DeepseekV2DecoderLayer(nn.Module):
             hidden_states = self.input_layernorm(hidden_states)
 
         else:
-            if hidden_states.shape != residual.shape:
-                print(f"{hidden_states.shape} == {residual.shape}")
             assert (hidden_states.shape == residual.shape)
             hidden_states, residual = self.input_layernorm(
                 hidden_states, residual)
 
-            if hidden_states.shape[0] < positions.shape[0]:
+            if self.sequence_parallel and not self.previous_layer_is_sp:
                 # Previous layer was an MoE, so hidden_states are SP
                 # and must be gathered for attn
                 hidden_states = tensor_model_parallel_all_gather(
@@ -704,10 +710,9 @@ class DeepseekV2DecoderLayer(nn.Module):
         if self.sequence_parallel:
             # If this layer is SP, attn o_proj doesn't all_reduce outputs.
             # Use a reduce scatter to sum hidden_states and make them SP
-            hidden_states = self.sp_chunk(hidden_states)
-            #hidden_states = tensor_model_parallel_reduce_scatter(
-            #    hidden_states, 0)
-            if hidden_states.shape[0] < residual.shape[0]:
+            hidden_states = tensor_model_parallel_reduce_scatter(
+                hidden_states, 0)
+            if not self.previous_layer_is_sp:
                 residual = self.sp_chunk(residual)
             assert hidden_states.is_contiguous()
 
@@ -723,8 +728,6 @@ class DeepseekV2DecoderLayer(nn.Module):
                 residual *= 1. / self.routed_scaling_factor
 
         # Fully Connected
-        if hidden_states.shape != residual.shape:
-            print(f"{hidden_states.shape} == {residual.shape}")
         assert (hidden_states.shape == residual.shape)
         hidden_states, residual = self.post_attention_layernorm(
             hidden_states, residual)
@@ -822,8 +825,6 @@ class DeepseekV2Model(nn.Module):
                 "residual": residual
             })
 
-        if hidden_states.shape != residual.shape:
-            print(f"{hidden_states.shape} == {residual.shape}")
         assert (hidden_states.shape == residual.shape)
         hidden_states, _ = self.norm(hidden_states, residual)
 
