@@ -126,10 +126,11 @@ class DeviceCommunicatorBase:
         output_tensor = torch.empty(output_size,
                                     dtype=input_.dtype,
                                     device=input_.device)
+
+        x = input_.contiguous()
+
         # All-gather.
-        dist.all_gather_into_tensor(output_tensor,
-                                    input_,
-                                    group=self.device_group)
+        dist.all_gather_into_tensor(output_tensor, x, group=self.device_group)
         # Reshape
         output_tensor = output_tensor.reshape((self.world_size, ) + input_size)
         output_tensor = output_tensor.movedim(0, dim)
@@ -137,7 +138,7 @@ class DeviceCommunicatorBase:
                                               (self.world_size *
                                                input_size[dim], ) +
                                               input_size[dim + 1:])
-        return output_tensor
+        return output_tensor.contiguous()
 
     def all_gatherv(
         self,
