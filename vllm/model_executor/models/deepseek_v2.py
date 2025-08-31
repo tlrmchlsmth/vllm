@@ -203,9 +203,9 @@ class DeepseekV2MoE(nn.Module):
             )
 
         assert isinstance(self.shared_experts.gate_up_proj,
-                          MergedColumnParallelLinear)
+                          MergedReplicatedLinear)
         assert isinstance(self.shared_experts.down_proj,
-                          RowParallelLinear)
+                          ReplicatedLinear)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
