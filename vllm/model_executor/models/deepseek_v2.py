@@ -202,6 +202,11 @@ class DeepseekV2MoE(nn.Module):
                 replicated_linear=self.sequence_parallel,
             )
 
+        assert isinstance(self.shared_experts.gate_up_proj,
+                          MergedColumnParallelLinear)
+        assert isinstance(self.shared_experts.down_proj,
+                          RowParallelLinear)
+
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
@@ -600,9 +605,10 @@ class DeepseekV2DecoderLayer(nn.Module):
                         and layer_idx >= config.first_k_dense_replace
                         and layer_idx % config.moe_layer_freq == 0)
         previous_layer_is_moe = (config.n_routed_experts is not None
-                                 and (layer_idx - 1)
-                                 >= config.first_k_dense_replace and
-                                 (layer_idx - 1) % config.moe_layer_freq == 0)
+                                 and ((layer_idx - 1) >= 
+                                      config.first_k_dense_replace) 
+                                 and ((layer_idx - 1) % 
+                                      config.moe_layer_freq == 0))
 
         # EP MoE layers using DeepEP expect sequence parallel inputs to avoid
         # duplicate work and return sequence parallel outputs.
@@ -706,7 +712,7 @@ class DeepseekV2DecoderLayer(nn.Module):
             hidden_states, residual = self.input_layernorm(
                 hidden_states, residual)
 
-            if self.sequence_parallel and self.previous_layer_is_sp:
+            if self.previous_layer_is_sp:
                 # Previous layer was an MoE, so hidden_states are SP
                 # and must be gathered for attn
                 hidden_states = tensor_model_parallel_all_gather(
@@ -725,6 +731,7 @@ class DeepseekV2DecoderLayer(nn.Module):
             if not self.previous_layer_is_sp:
                 residual = self.sp_chunk(residual)
             assert hidden_states.is_contiguous()
+            assert residual.is_contiguous()
 
         if hidden_states.dtype == torch.float16:
             raise AssertionError
