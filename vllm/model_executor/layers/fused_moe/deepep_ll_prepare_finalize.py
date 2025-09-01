@@ -4,8 +4,10 @@ from typing import Optional, Union
 
 import deep_ep
 import torch
+import torch.distributed as dist
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.distributed.parallel_state import get_tp_group
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate)
@@ -15,6 +17,89 @@ from vllm.model_executor.layers.fused_moe.utils import (
 # DeepEP kernels quantize dispatch inputs in 128 element chunks.
 DEEPEP_QUANT_BLOCK_SIZE = 128
 DEEPEP_QUANT_BLOCK_SHAPE = [DEEPEP_QUANT_BLOCK_SIZE, DEEPEP_QUANT_BLOCK_SIZE]
+
+
+def _shape_vector(t: torch.Tensor,
+                  max_ndim: int = 8,
+                  device=None,
+                  dtype=torch.float64):
+    """Encode shape into a fixed-length vector (padded with -1)."""
+    shp = list(t.shape)
+    vec = torch.full((max_ndim, ), -1, dtype=dtype, device=device)
+    vec[:min(len(shp), max_ndim)] = torch.tensor(shp[:max_ndim],
+                                                 dtype=dtype,
+                                                 device=device)
+    return vec
+
+
+@torch.no_grad()
+def tp_all_equal(
+    x: torch.Tensor,
+    tp_group,
+    *,
+    atol: float = 1e-6,
+    rtol: float = 1e-5,
+    quick_only: bool = False,
+    max_ndim_for_shape: int = 8,
+):
+    """
+    Returns (all_equal: bool, details: dict).
+    - First does a lightweight all_gather of fingerprints (shape + stats).
+    - If fingerprints differ, returns False immediately.
+    - If quick_only=False and fingerprints differ, it falls back to a full
+      elementwise check by broadcasting rank-0's tensor to the group and
+      comparing with torch.allclose.
+    """
+    assert dist.is_initialized(), "torch.distributed must be initialized"
+
+    ws = dist.get_world_size(group=tp_group)
+
+    # Build a compact fingerprint: [shape vector..., numel, mean, std, L1]
+    xf = x.float()
+    device = x.device
+    shape_vec = _shape_vector(x, max_ndim_for_shape, device=device)
+    stats = torch.tensor(
+        [
+            x.numel(),
+            xf.mean().item(),
+            xf.std(unbiased=False).item(),
+            xf.abs().sum().item()
+        ],
+        dtype=torch.float64,
+        device=device,
+    )
+    fp_local = torch.cat([shape_vec, stats])  # fixed-size
+    # all_gather requires equal-sized tensors
+    bufs = [torch.zeros_like(fp_local) for _ in range(ws)]
+    dist.all_gather(bufs, fp_local, group=tp_group)
+    fps = torch.stack(bufs, dim=0)  # [tp, F]
+
+    # Quick decision: if all fingerprints match within tolerance, call it equal.
+    same_fp = torch.all(torch.isclose(fps, fps[0], rtol=rtol, atol=atol))
+    if same_fp:
+        return True, {"mode": "fingerprint", "fingerprints": fps}
+
+    if quick_only:
+        return False, {"mode": "fingerprint_mismatch", "fingerprints": fps}
+
+    # Full check: broadcast rank-0 tensor and compare elementwise.
+    # Prepare a ref tensor that will be overwritten by broadcast
+    ref = x.clone()
+    dist.broadcast(ref, src=0, group=tp_group)
+    # If shapes differ, this will fail fast:
+    same_shape = (tuple(ref.shape) == tuple(x.shape))
+    if not same_shape:
+        return False, {
+            "mode": "shape_mismatch",
+            "ref_shape": tuple(ref.shape),
+            "local_shape": tuple(x.shape)
+        }
+
+    equal = torch.allclose(x,
+                           ref.to(dtype=x.dtype, device=x.device),
+                           rtol=rtol,
+                           atol=atol)
+    return bool(equal), {"mode": "elementwise", "equal": bool(equal)}
 
 
 def dequant_fp8(expert_x_fp8: torch.Tensor,
@@ -184,6 +269,12 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         if apply_router_weight_on_input:
             # weights have already been applied.
             combine_topk_weights = torch.ones_like(topk_weights)
+
+        all_equal, info = tp_all_equal(fused_expert_output,
+                                       get_tp_group(),
+                                       atol=1e-5,
+                                       rtol=1e-4)
+        print("TP activations equal?", all_equal, "| details:", info["mode"])
 
         # TODO (varun) : Enable zero copy mode
         _, event, hook = self.buffer.low_latency_combine(
