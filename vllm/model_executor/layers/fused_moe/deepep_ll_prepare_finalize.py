@@ -32,14 +32,12 @@ def _shape_vector(t: torch.Tensor,
 
 
 @torch.no_grad()
-def tp_all_equal(
+def check_tp_all_equal(
     x: torch.Tensor,
     tp_group,
     *,
     atol: float = 1e-6,
     rtol: float = 1e-5,
-    quick_only: bool = False,
-    max_ndim_for_shape: int = 8,
 ):
     """
     Returns (all_equal: bool, details: dict).
@@ -47,63 +45,9 @@ def tp_all_equal(
     Uses vLLM's TP group collectives:
       - tp_group.all_gather(tensor) -> list[tensor per rank]
     Steps:
-      1) All-gather compact fingerprints. If quick_only=True, decide from these.
-      2) Confirm shapes match across ranks (early exit if not).
-      3) All-gather full flattened tensors and compare every pair with allclose.
-      4) Build a consensus boolean via a final all_gather of a 1-element flag.
+      1) All-gather full flattened tensors and compare every pair with allclose.
     """
-    device = x.device
-
-    # ---- (1) Fingerprints via tp_group.all_gather ----
-    xf = x.float()
-    shape_vec = _shape_vector(x, max_ndim_for_shape, device=device)
-    stats = torch.tensor(
-        [
-            x.numel(),
-            xf.mean().item(),
-            xf.std(unbiased=False).item(),
-            xf.abs().sum().item()
-        ],
-        dtype=torch.float64,
-        device=device,
-    )
-    fp_local = torch.cat([shape_vec, stats])  # fixed-size
-    fps = tp_group.all_gather(fp_local)
-
-    same_fp = torch.all(torch.isclose(fps, fps[0], rtol=rtol, atol=atol))
-    if quick_only:
-        return bool(same_fp), {"mode": "fingerprint", "fingerprints": fps}
-
-    # ---- (2) Shapes agreement (early out) ----
-    local_shape = tuple(x.shape)
-    shp_info_local = torch.tensor(
-        [len(local_shape)] + list(local_shape)[:max_ndim_for_shape],
-        dtype=torch.int64,
-        device=device,
-    )
-    shp_len = 1 + max_ndim_for_shape
-    if shp_info_local.numel() < shp_len:
-        pad = torch.full((shp_len - shp_info_local.numel(), ),
-                         -1,
-                         dtype=torch.int64,
-                         device=device)
-        shp_info_local = torch.cat([shp_info_local, pad])
-
-    shp_list = tp_group.all_gather(shp_info_local)
-    gathered_shapes = []
-    for t in shp_list:
-        num_dim = int(t.item())
-        dims = []
-        for d in t[1:1 + num_dim]:
-            if int(d.item()) == -1:
-                break
-            dims.append(int(d.item()))
-        gathered_shapes.append(tuple(dims))
-
-    if len(set(gathered_shapes)) != 1:
-        return False, {"mode": "shape_mismatch", "shapes": gathered_shapes}
-
-    # ---- (3) Gather full tensors and compare pairwise ----
+    # ---- Gather full tensors and compare pairwise ----
     flat = x.to(dtype=torch.float32).contiguous().view(-1)
     all_flat = tp_group.all_gather(flat)
 
@@ -114,22 +58,12 @@ def tp_all_equal(
             if not torch.allclose(
                     all_flat[i], all_flat[j], rtol=rtol, atol=atol):
                 mismatch_pairs.append((i, j))
+                print(f"Mismatch: {torch.mean(all_flat[i])} vs "
+                      f"{torch.mean(all_flat[j])}")
 
     all_equal_local = (len(mismatch_pairs) == 0)
-
-    # ---- (4) Group-wide consensus via all_gather of a flag ----
-    flag = torch.tensor([1 if all_equal_local else 0],
-                        device=device,
-                        dtype=torch.int32)
-    flags = tp_group.all_gather(flag)
-    all_equal = torch.all(flags == 1)
-
-    details = {
-        "mode": "all_gather_elementwise",
-        "pairwise_mismatches": mismatch_pairs,
-        "fingerprint_agreed": bool(same_fp),
-    }
-    return bool(all_equal), details
+    assert (all_equal_local)
+    return bool(all_equal_local)
 
 
 def dequant_fp8(expert_x_fp8: torch.Tensor,
@@ -300,11 +234,10 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             # weights have already been applied.
             combine_topk_weights = torch.ones_like(topk_weights)
 
-        all_equal, info = tp_all_equal(fused_expert_output,
-                                       get_tp_group(),
-                                       atol=1e-5,
-                                       rtol=1e-4)
-        print("TP activations equal?", all_equal, "| details:", info["mode"])
+        check_tp_all_equal(fused_expert_output,
+                           get_tp_group(),
+                           atol=1e-5,
+                           rtol=1e-4)
 
         # TODO (varun) : Enable zero copy mode
         _, event, hook = self.buffer.low_latency_combine(
