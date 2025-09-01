@@ -106,7 +106,7 @@ def tp_all_equal(
 
     # ---- (3) Gather full tensors and compare pairwise ----
     flat = x.to(dtype=torch.float32).contiguous().view(-1)
-    flat_list = tp_group.all_gather(
+    flat_list = tp_group.allgather(
         flat)  # list of [numel] float32; shapes are equal so numel matches
     all_flat = torch.stack(flat_list, dim=0)  # [tp, numel]
 
