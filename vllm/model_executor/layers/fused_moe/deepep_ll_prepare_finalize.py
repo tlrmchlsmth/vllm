@@ -234,11 +234,6 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             # weights have already been applied.
             combine_topk_weights = torch.ones_like(topk_weights)
 
-        check_tp_all_equal(fused_expert_output,
-                           get_tp_group(),
-                           atol=1e-5,
-                           rtol=1e-4)
-
         # TODO (varun) : Enable zero copy mode
         _, event, hook = self.buffer.low_latency_combine(
             fused_expert_output,
@@ -249,3 +244,8 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             zero_copy=False,
             return_recv_hook=False,
             out=output)
+
+        check_tp_all_equal(fused_expert_output,
+                           get_tp_group(),
+                           atol=1e-5,
+                           rtol=1e-4)
