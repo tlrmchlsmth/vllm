@@ -4,7 +4,6 @@ from typing import Optional, Union
 
 import deep_ep
 import torch
-import torch.distributed as dist
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.distributed.parallel_state import get_tp_group
@@ -44,19 +43,19 @@ def tp_all_equal(
 ):
     """
     Returns (all_equal: bool, details: dict).
-    - First does a lightweight all_gather of fingerprints (shape + stats).
-    - If fingerprints differ, returns False immediately.
-    - If quick_only=False and fingerprints differ, it falls back to a full
-      elementwise check by broadcasting rank-0's tensor to the group and
-      comparing with torch.allclose.
+
+    Uses vLLM's TP group collectives:
+      - tp_group.all_gather(tensor) -> list[tensor per rank]
+    Steps:
+      1) All-gather compact fingerprints. If quick_only=True, decide from these.
+      2) Confirm shapes match across ranks (early exit if not).
+      3) All-gather full flattened tensors and compare every pair with allclose.
+      4) Build a consensus boolean via a final all_gather of a 1-element flag.
     """
-    assert dist.is_initialized(), "torch.distributed must be initialized"
-
-    ws = dist.get_world_size(group=tp_group)
-
-    # Build a compact fingerprint: [shape vector..., numel, mean, std, L1]
-    xf = x.float()
     device = x.device
+
+    # ---- (1) Fingerprints via tp_group.all_gather ----
+    xf = x.float()
     shape_vec = _shape_vector(x, max_ndim_for_shape, device=device)
     stats = torch.tensor(
         [
@@ -69,37 +68,71 @@ def tp_all_equal(
         device=device,
     )
     fp_local = torch.cat([shape_vec, stats])  # fixed-size
-    # all_gather requires equal-sized tensors
-    bufs = [torch.zeros_like(fp_local) for _ in range(ws)]
-    dist.all_gather(bufs, fp_local, group=tp_group)
-    fps = torch.stack(bufs, dim=0)  # [tp, F]
+    fp_list = tp_group.all_gather(fp_local)
+    fps = torch.stack(fp_list, dim=0)  # [tp, F]
 
-    # Quick decision: if all fingerprints match within tolerance, call it equal.
     same_fp = torch.all(torch.isclose(fps, fps[0], rtol=rtol, atol=atol))
-    if same_fp:
-        return True, {"mode": "fingerprint", "fingerprints": fps}
-
     if quick_only:
-        return False, {"mode": "fingerprint_mismatch", "fingerprints": fps}
+        return bool(same_fp), {"mode": "fingerprint", "fingerprints": fps}
 
-    # Full check: broadcast rank-0 tensor and compare elementwise.
-    # Prepare a ref tensor that will be overwritten by broadcast
-    ref = x.clone()
-    dist.broadcast(ref, src=0, group=tp_group)
-    # If shapes differ, this will fail fast:
-    same_shape = (tuple(ref.shape) == tuple(x.shape))
-    if not same_shape:
-        return False, {
-            "mode": "shape_mismatch",
-            "ref_shape": tuple(ref.shape),
-            "local_shape": tuple(x.shape)
-        }
+    # ---- (2) Shapes agreement (early out) ----
+    local_shape = tuple(x.shape)
+    shp_info_local = torch.tensor(
+        [len(local_shape)] + list(local_shape)[:max_ndim_for_shape],
+        dtype=torch.int64,
+        device=device,
+    )
+    shp_len = 1 + max_ndim_for_shape
+    if shp_info_local.numel() < shp_len:
+        pad = torch.full((shp_len - shp_info_local.numel(), ),
+                         -1,
+                         dtype=torch.int64,
+                         device=device)
+        shp_info_local = torch.cat([shp_info_local, pad])
 
-    equal = torch.allclose(x,
-                           ref.to(dtype=x.dtype, device=x.device),
-                           rtol=rtol,
-                           atol=atol)
-    return bool(equal), {"mode": "elementwise", "equal": bool(equal)}
+    shp_list = tp_group.all_gather(shp_info_local)
+    gathered_shapes = []
+    for t in shp_list:
+        num_dim = int(t[0].item())
+        dims = []
+        for d in t[1:1 + num_dim]:
+            if int(d.item()) == -1:
+                break
+            dims.append(int(d.item()))
+        gathered_shapes.append(tuple(dims))
+
+    if len(set(gathered_shapes)) != 1:
+        return False, {"mode": "shape_mismatch", "shapes": gathered_shapes}
+
+    # ---- (3) Gather full tensors and compare pairwise ----
+    flat = x.to(dtype=torch.float32).contiguous().view(-1)
+    flat_list = tp_group.all_gather(
+        flat)  # list of [numel] float32; shapes are equal so numel matches
+    all_flat = torch.stack(flat_list, dim=0)  # [tp, numel]
+
+    tp = all_flat.size(0)
+    mismatch_pairs = []
+    for i in range(tp):
+        for j in range(i + 1, tp):
+            if not torch.allclose(
+                    all_flat[i], all_flat[j], rtol=rtol, atol=atol):
+                mismatch_pairs.append((i, j))
+
+    all_equal_local = (len(mismatch_pairs) == 0)
+
+    # ---- (4) Group-wide consensus via all_gather of a flag ----
+    flag = torch.tensor([1 if all_equal_local else 0],
+                        device=device,
+                        dtype=torch.int32)
+    flags = tp_group.all_gather(flag)
+    all_equal = all(int(f.item()) == 1 for f in flags)
+
+    details = {
+        "mode": "all_gather_elementwise",
+        "pairwise_mismatches": mismatch_pairs,
+        "fingerprint_agreed": bool(same_fp),
+    }
+    return bool(all_equal), details
 
 
 def dequant_fp8(expert_x_fp8: torch.Tensor,
