@@ -68,7 +68,7 @@ def tp_all_equal(
         device=device,
     )
     fp_local = torch.cat([shape_vec, stats])  # fixed-size
-    fp_list = tp_group.all_gather(fp_local)
+    fp_list = tp_group.allgather(fp_local)
     fps = torch.stack(fp_list, dim=0)  # [tp, F]
 
     same_fp = torch.all(torch.isclose(fps, fps[0], rtol=rtol, atol=atol))
@@ -90,7 +90,7 @@ def tp_all_equal(
                          device=device)
         shp_info_local = torch.cat([shp_info_local, pad])
 
-    shp_list = tp_group.all_gather(shp_info_local)
+    shp_list = tp_group.allgather(shp_info_local)
     gathered_shapes = []
     for t in shp_list:
         num_dim = int(t[0].item())
@@ -124,7 +124,7 @@ def tp_all_equal(
     flag = torch.tensor([1 if all_equal_local else 0],
                         device=device,
                         dtype=torch.int32)
-    flags = tp_group.all_gather(flag)
+    flags = tp_group.allgather(flag)
     all_equal = all(int(f.item()) == 1 for f in flags)
 
     details = {
