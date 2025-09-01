@@ -68,7 +68,7 @@ def tp_all_equal(
         device=device,
     )
     fp_local = torch.cat([shape_vec, stats])  # fixed-size
-    fp_list = tp_group.allgather(fp_local)
+    fp_list = tp_group.all_gather(fp_local)
     fps = torch.stack(fp_list, dim=0)  # [tp, F]
 
     same_fp = torch.all(torch.isclose(fps, fps[0], rtol=rtol, atol=atol))
@@ -90,7 +90,7 @@ def tp_all_equal(
                          device=device)
         shp_info_local = torch.cat([shp_info_local, pad])
 
-    shp_list = tp_group.allgather(shp_info_local)
+    shp_list = tp_group.all_gather(shp_info_local)
     gathered_shapes = []
     for t in shp_list:
         num_dim = int(t[0].item())
@@ -106,7 +106,7 @@ def tp_all_equal(
 
     # ---- (3) Gather full tensors and compare pairwise ----
     flat = x.to(dtype=torch.float32).contiguous().view(-1)
-    flat_list = tp_group.allgather(
+    flat_list = tp_group.all_gather(
         flat)  # list of [numel] float32; shapes are equal so numel matches
     all_flat = torch.stack(flat_list, dim=0)  # [tp, numel]
 
@@ -124,7 +124,7 @@ def tp_all_equal(
     flag = torch.tensor([1 if all_equal_local else 0],
                         device=device,
                         dtype=torch.int32)
-    flags = tp_group.allgather(flag)
+    flags = tp_group.all_gather(flag)
     all_equal = all(int(f.item()) == 1 for f in flags)
 
     details = {
@@ -304,7 +304,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             combine_topk_weights = torch.ones_like(topk_weights)
 
         all_equal, info = tp_all_equal(fused_expert_output,
-                                       get_tp_group().device_group,
+                                       get_tp_group(),
                                        atol=1e-5,
                                        rtol=1e-4)
         print("TP activations equal?", all_equal, "| details:", info["mode"])
