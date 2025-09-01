@@ -68,8 +68,7 @@ def tp_all_equal(
         device=device,
     )
     fp_local = torch.cat([shape_vec, stats])  # fixed-size
-    fp_list = tp_group.all_gather(fp_local)
-    fps = torch.stack(fp_list, dim=0)  # [tp, F]
+    fps = tp_group.all_gather(fp_local)
 
     same_fp = torch.all(torch.isclose(fps, fps[0], rtol=rtol, atol=atol))
     if quick_only:
@@ -106,9 +105,7 @@ def tp_all_equal(
 
     # ---- (3) Gather full tensors and compare pairwise ----
     flat = x.to(dtype=torch.float32).contiguous().view(-1)
-    flat_list = tp_group.all_gather(
-        flat)  # list of [numel] float32; shapes are equal so numel matches
-    all_flat = torch.stack(flat_list, dim=0)  # [tp, numel]
+    all_flat = tp_group.all_gather(flat)
 
     tp = all_flat.size(0)
     mismatch_pairs = []
@@ -125,7 +122,7 @@ def tp_all_equal(
                         device=device,
                         dtype=torch.int32)
     flags = tp_group.all_gather(flag)
-    all_equal = all(int(f.item()) == 1 for f in flags)
+    all_equal = torch.all(flags == 1)
 
     details = {
         "mode": "all_gather_elementwise",
