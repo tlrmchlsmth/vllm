@@ -92,7 +92,7 @@ def tp_all_equal(
     shp_list = tp_group.all_gather(shp_info_local)
     gathered_shapes = []
     for t in shp_list:
-        num_dim = int(t[0].item())
+        num_dim = int(t.item())
         dims = []
         for d in t[1:1 + num_dim]:
             if int(d.item()) == -1:
