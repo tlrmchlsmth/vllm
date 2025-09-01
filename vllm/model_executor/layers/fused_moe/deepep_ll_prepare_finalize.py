@@ -271,7 +271,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             combine_topk_weights = torch.ones_like(topk_weights)
 
         all_equal, info = tp_all_equal(fused_expert_output,
-                                       get_tp_group(),
+                                       get_tp_group().device_group,
                                        atol=1e-5,
                                        rtol=1e-4)
         print("TP activations equal?", all_equal, "| details:", info["mode"])
