@@ -1707,6 +1707,10 @@ class FusedMoE(CustomOp):
         max_tokens_across_dp = ctx.dp_metadata.max_tokens_across_dp_cpu
         moe_dp_chunk_size_per_rank = self.moe_config.max_num_tokens
         if self.is_sequence_parallel:
+            logger.warning(
+                "Using SP %s. Decreasing max_tokens_across_dp from %s to %s",
+                self.sp_size, max_tokens_across_dp,
+                cdiv(max_tokens_across_dp, self.sp_size))
             max_tokens_across_dp = cdiv(max_tokens_across_dp, self.sp_size)
 
         num_tokens = full_hidden_states.size(0)
@@ -1719,6 +1723,8 @@ class FusedMoE(CustomOp):
             # clamp start and end
             chunk_start = min(chunk_start, num_tokens - 1)
             chunk_end = min(chunk_end, num_tokens)
+            logger.warning("chunk start %s. chunk end %s. num tokens %s",
+                           chunk_start, chunk_end, num_tokens)
             with ctx.dp_metadata.chunked_sizes(moe_dp_chunk_size_per_rank,
                                                chunk_idx):
                 process_chunk(chunk_start,
