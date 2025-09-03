@@ -40,6 +40,7 @@ from vllm.distributed import (get_ep_group, get_pp_group,
                               get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_gather)
+from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -63,6 +64,8 @@ from .interfaces import MixtureOfExperts, SupportsLoRA, SupportsPP
 from .utils import (PPMissingLayer, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
+
+logger = init_logger(__name__)
 
 
 class DeepseekV2MLP(nn.Module):
@@ -246,6 +249,7 @@ class DeepseekV2MoE(nn.Module):
     # Chunk x along the num_tokens axis for sequence parallelism
     def sequence_parallel_chunk(self, x: torch.Tensor):
         seq_len = x.size(0)
+        logger.warning("sp_chunk x.shape %s", x.shape)
 
         # all_gather needs the sequence length to be divisible by tp_size
         remainder = seq_len % self.tp_size
@@ -256,10 +260,15 @@ class DeepseekV2MoE(nn.Module):
             pad = x.new_zeros(pad_shape)
             x = torch.cat([x, pad], dim=0)
             seq_len = x.size(0)
+            logger.warning("after padding x.shape %s", x.shape)
 
         chunk = seq_len // self.tp_size
         start = self.tp_rank * chunk
-        return x.narrow(0, start, chunk).contiguous()
+        output = x.narrow(0, start, chunk).contiguous()
+
+        logger.warning("result x.shape %s", output.shape)
+
+        return output
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
