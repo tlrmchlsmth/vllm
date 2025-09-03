@@ -29,6 +29,7 @@ from itertools import islice
 from typing import Any, Optional, Union
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 from transformers import DeepseekV2Config, DeepseekV3Config
 
@@ -249,26 +250,17 @@ class DeepseekV2MoE(nn.Module):
     # Chunk x along the num_tokens axis for sequence parallelism
     def sequence_parallel_chunk(self, x: torch.Tensor):
         seq_len = x.size(0)
-        logger.warning("sp_chunk x.shape %s", x.shape)
 
         # all_gather needs the sequence length to be divisible by tp_size
         remainder = seq_len % self.tp_size
         if remainder != 0:
             pad_len = self.tp_size - remainder
-            pad_shape = list(x.shape)
-            pad_shape[0] = pad_len
-            pad = x.new_zeros(pad_shape)
-            x = torch.cat([x, pad], dim=0)
-            seq_len = x.size(0)
-            logger.warning("after padding x.shape %s", x.shape)
+            x = F.pad(x, (0, 0, 0, pad_len))
 
-        chunk = seq_len // self.tp_size
+        assert x.shape[0] % self.tp_size == 0
+        chunk = x.shape[0] // self.tp_size
         start = self.tp_rank * chunk
-        output = x.narrow(0, start, chunk).contiguous()
-
-        logger.warning("result x.shape %s", output.shape)
-
-        return output
+        return x.narrow(0, start, chunk).contiguous()
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
@@ -280,6 +272,7 @@ class DeepseekV2MoE(nn.Module):
         # reduce_scatter instead of chunking here.
         if self.is_sequence_parallel:
             hidden_states = self.sequence_parallel_chunk(hidden_states)
+            assert hidden_states.shape[0] > 0
 
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
