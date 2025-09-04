@@ -60,7 +60,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.utils import direct_register_custom_op
+from vllm.utils import direct_register_custom_op, round_up
 
 from .interfaces import MixtureOfExperts, SupportsLoRA, SupportsPP
 from .utils import (PPMissingLayer, is_pp_missing_parameter,
@@ -150,23 +150,11 @@ def sequence_parallel_op(x: torch.Tensor):
 
 
 def sequence_parallel_op_fake(x: torch.Tensor):
-    tp_size = get_tensor_model_parallel_world_size()
-    tp_rank = get_tensor_model_parallel_rank()
-
-    seq_len = x.size(0)
-
-    # all_gather needs the sequence length to be divisible by tp_size
-    remainder = seq_len % tp_size
-    if remainder != 0:
-        pad_len = tp_size - remainder
-        # generate random rows with the same dtype/device as x
-        pad = torch.randn(pad_len, x.size(1), dtype=x.dtype, device=x.device)
-        x = torch.cat([x, pad], dim=0)
-
-    chunk = x.shape[0] // tp_size
-    start = tp_rank * chunk
-    y = torch.narrow(x, 0, start, chunk)
-    return y.contiguous()
+    seq_len = round_up(x.size(0), 2)
+    shape = list(x.shape)
+    shape[0] = seq_len
+    out = torch.empty(shape, dtype=x.dtype, device=x.device)
+    return out
 
 
 direct_register_custom_op(
