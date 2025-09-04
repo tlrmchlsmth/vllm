@@ -60,7 +60,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.utils import direct_register_custom_op, round_up
+from vllm.utils import cdiv, direct_register_custom_op
 
 from .interfaces import MixtureOfExperts, SupportsLoRA, SupportsPP
 from .utils import (PPMissingLayer, is_pp_missing_parameter,
@@ -150,7 +150,8 @@ def sequence_parallel_op(x: torch.Tensor) -> torch.Tensor:
 
 
 def sequence_parallel_op_fake(x: torch.Tensor) -> torch.Tensor:
-    seq_len = round_up(x.size(0), 2)
+    tp_size = get_tensor_model_parallel_world_size()
+    seq_len = cdiv(x.size(0), tp_size)
     shape = list(x.shape)
     shape[0] = seq_len
     out = torch.empty(shape, dtype=x.dtype, device=x.device)
