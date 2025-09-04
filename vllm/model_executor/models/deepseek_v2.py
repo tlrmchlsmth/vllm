@@ -30,6 +30,7 @@ from typing import Any, Optional, Union
 
 import torch
 from torch import nn
+from torch._dynamo import graph_break
 from transformers import DeepseekV2Config, DeepseekV3Config
 
 import vllm.envs as envs
@@ -248,8 +249,9 @@ class DeepseekV2MoE(nn.Module):
 
     # Chunk x along the num_tokens axis for sequence parallelism
     def sequence_parallel_chunk(self, x: torch.Tensor):
-        torch._assert(x.shape[0] != 0, "no tokens in sp chunk input")
-        torch._assert(len(x.shape) == 2, "x isn't 2D")
+        graph_break()
+        logger.warning("begin spc x.shape %s", x.shape)
+        logger.warning("len(x.shape) %s", len(x.shape))
 
         seq_len = x.size(0)
 
@@ -264,13 +266,13 @@ class DeepseekV2MoE(nn.Module):
                               device=x.device)
             x = torch.cat([x, pad], dim=0)
 
-        torch._assert(x.shape[0] != 0, "no tokens after padding")
+        logger.warning("x.shape %s", x.shape)
         chunk = x.shape[0] // self.tp_size
-        torch._assert(chunk > 0, "chunk 0")
+        logger.warning("chunk %s", chunk)
         start = self.tp_rank * chunk
         #TODO: is the contiguous necessary?
         y = torch.narrow(x, 0, start, chunk)
-        torch._assert(y.is_contiguous(), "y must be contiguous")
+        logger.warning("y.is_contiguous %s", y.is_contiguous())
         return y.contiguous()
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
