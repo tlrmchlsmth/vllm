@@ -29,7 +29,6 @@ from itertools import islice
 from typing import Any, Optional, Union
 
 import torch
-import torch.nn.functional as F
 from torch import nn
 from transformers import DeepseekV2Config, DeepseekV3Config
 
@@ -257,7 +256,12 @@ class DeepseekV2MoE(nn.Module):
         remainder = seq_len % self.tp_size
         if remainder != 0:
             pad_len = self.tp_size - remainder
-            x = F.pad(x, (0, 0, 0, pad_len))
+            # generate random rows with the same dtype/device as x
+            pad = torch.randn(pad_len,
+                              x.size(1),
+                              dtype=x.dtype,
+                              device=x.device)
+            x = torch.cat([x, pad], dim=0)
 
         assert x.shape[0] % self.tp_size == 0
         chunk = x.shape[0] // self.tp_size
