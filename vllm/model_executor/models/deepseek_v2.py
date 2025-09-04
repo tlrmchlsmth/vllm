@@ -259,8 +259,10 @@ class DeepseekV2MoE(nn.Module):
 
         assert x.shape[0] % self.tp_size == 0
         chunk = x.shape[0] // self.tp_size
+        assert chunk > 0
         start = self.tp_rank * chunk
-        return x.narrow(0, start, chunk).contiguous()
+        #TODO: is the contiguous necessary?
+        return torch.narrow(x, 0, start, chunk).contiguous()
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
