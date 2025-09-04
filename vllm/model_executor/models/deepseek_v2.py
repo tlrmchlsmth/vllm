@@ -266,6 +266,8 @@ class DeepseekV2MoE(nn.Module):
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
 
+        logger.warning("hidden states shape %s", hidden_states.shape)
+
         # Chunk the hidden states so they aren't replicated across TP ranks.
         # This avoids duplicate computation in self.experts.
         # TODO: We can replace the all_reduce at the end of attn with a
@@ -273,10 +275,13 @@ class DeepseekV2MoE(nn.Module):
         if self.is_sequence_parallel:
             hidden_states = self.sequence_parallel_chunk(hidden_states)
             assert hidden_states.shape[0] > 0
+        logger.warning("chunked hidden states shape %s", hidden_states.shape)
 
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
 
+        logger.warning("hidden states into self.experts shape %s",
+                       hidden_states.shape)
         fused_moe_out = self.experts(hidden_states=hidden_states,
                                      router_logits=router_logits)
 

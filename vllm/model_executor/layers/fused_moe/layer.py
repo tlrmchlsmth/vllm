@@ -1632,6 +1632,9 @@ class FusedMoE(CustomOp):
         full_hidden_states: torch.Tensor,
         full_router_logits: torch.Tensor,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        logger.warning("forward impl chunked full hidden states shape %s",
+                       full_hidden_states.shape)
+
         assert self.batched_hidden_states is not None
         assert self.batched_router_logits is not None
         assert self.batched_hidden_states.dtype == full_hidden_states.dtype
