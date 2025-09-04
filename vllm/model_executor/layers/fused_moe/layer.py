@@ -1624,7 +1624,7 @@ class FusedMoE(CustomOp):
                 shared_output, fused_output = self.forward_impl(
                     hidden_states, router_logits)
             else:
-                assert hidden_states.shape[0] != 0
+                torch._assert(hidden_states.shape[0] != 0, "no tokens")
                 shared_output, fused_output = torch.ops.vllm.moe_forward_shared(
                     hidden_states, router_logits, self.layer_name)
             return (shared_output[..., :og_hidden_states],

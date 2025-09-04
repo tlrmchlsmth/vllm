@@ -248,7 +248,8 @@ class DeepseekV2MoE(nn.Module):
 
     # Chunk x along the num_tokens axis for sequence parallelism
     def sequence_parallel_chunk(self, x: torch.Tensor):
-        assert (len(x.shape) == 2)
+        torch._assert(x.shape[0] != 0, "no tokens in sp chunk input")
+        torch._assert(len(x.shape) == 2, "x isn't 2D")
 
         seq_len = x.size(0)
 
@@ -263,12 +264,14 @@ class DeepseekV2MoE(nn.Module):
                               device=x.device)
             x = torch.cat([x, pad], dim=0)
 
-        assert x.shape[0] % self.tp_size == 0
+        torch._assert(x.shape[0] != 0, "no tokens after padding")
         chunk = x.shape[0] // self.tp_size
-        assert chunk > 0
+        torch._assert(chunk > 0, "chunk 0")
         start = self.tp_rank * chunk
         #TODO: is the contiguous necessary?
-        return torch.narrow(x, 0, start, chunk).contiguous()
+        y = torch.narrow(x, 0, start, chunk)
+        torch._assert(y.is_contiguous())
+        return y.contiguous()
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
@@ -280,12 +283,14 @@ class DeepseekV2MoE(nn.Module):
         # reduce_scatter instead of chunking here.
         if self.is_sequence_parallel:
             hidden_states = self.sequence_parallel_chunk(hidden_states)
-            assert hidden_states.shape[0] > 0
+            torch._assert(hidden_states.shape[0] != 0,
+                          "no tokens after sp chunk")
 
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
 
-        assert hidden_states.shape[0] > 0
+        torch._assert(hidden_states.shape[0] != 0,
+                      "no tokens when calling experts")
         fused_moe_out = self.experts(hidden_states=hidden_states,
                                      router_logits=router_logits)
 
