@@ -58,7 +58,9 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+from vllm.utils import direct_register_custom_op
 
 from .interfaces import MixtureOfExperts, SupportsLoRA, SupportsPP
 from .utils import (PPMissingLayer, is_pp_missing_parameter,
@@ -120,6 +122,61 @@ class DeepseekV2MLP(nn.Module):
         x = self.act_fn(gate_up)
         x, _ = self.down_proj(x)
         return x
+
+
+# Chunk x along the num_tokens axis for sequence parallelism
+def sequence_parallel_op(x: torch.Tensor):
+    tp_size = get_tensor_model_parallel_world_size()
+    tp_rank = get_tensor_model_parallel_rank()
+
+    seq_len = x.size(0)
+
+    # all_gather needs the sequence length to be divisible by tp_size
+    remainder = seq_len % tp_size
+    if remainder != 0:
+        pad_len = tp_size - remainder
+        # generate random rows with the same dtype/device as x
+        pad = torch.randn(pad_len, x.size(1), dtype=x.dtype, device=x.device)
+        x = torch.cat([x, pad], dim=0)
+
+    logger.warning("x.shape %s", x.shape)
+    chunk = x.shape[0] // tp_size
+    logger.warning("chunk %s", chunk)
+    start = tp_rank * chunk
+    #TODO: is the contiguous necessary?
+    y = torch.narrow(x, 0, start, chunk)
+    logger.warning("y.is_contiguous %s", y.is_contiguous())
+    return y.contiguous()
+
+
+def sequence_parallel_op_fake(x: torch.Tensor):
+    tp_size = get_tensor_model_parallel_world_size()
+    tp_rank = get_tensor_model_parallel_rank()
+
+    seq_len = x.size(0)
+
+    # all_gather needs the sequence length to be divisible by tp_size
+    remainder = seq_len % tp_size
+    if remainder != 0:
+        pad_len = tp_size - remainder
+        # generate random rows with the same dtype/device as x
+        pad = torch.randn(pad_len, x.size(1), dtype=x.dtype, device=x.device)
+        x = torch.cat([x, pad], dim=0)
+
+    chunk = x.shape[0] // tp_size
+    start = tp_rank * chunk
+    y = torch.narrow(x, 0, start, chunk)
+    return y.contiguous()
+
+
+direct_register_custom_op(
+    op_name="sequence_parallel_op",
+    op_func=sequence_parallel_op,
+    mutates_args=[],
+    fake_impl=sequence_parallel_op_fake,
+    dispatch_key=current_platform.dispatch_key,
+    tags=(torch.Tag.needs_fixed_stride_order, ),
+)
 
 
 class DeepseekV2MoE(nn.Module):
@@ -282,7 +339,7 @@ class DeepseekV2MoE(nn.Module):
         # TODO: We can replace the all_reduce at the end of attn with a
         # reduce_scatter instead of chunking here.
         if self.is_sequence_parallel:
-            hidden_states = self.sequence_parallel_chunk(hidden_states)
+            hidden_states = torch.ops.vllm.sequence_parallel_op(hidden_states)
             torch._assert(hidden_states.shape[0] != 0,
                           "no tokens after sp chunk")
 
