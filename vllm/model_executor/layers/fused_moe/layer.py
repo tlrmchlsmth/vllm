@@ -1745,6 +1745,8 @@ class FusedMoE(CustomOp):
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        logger.warning("forward impl hidden states shape %s",
+                       hidden_states.shape)
         assert self.quant_method is not None
         # Route to the chunked forward path using the FlashInfer Cutlass kernel
         # only when data parallelism (DP) is enabled.
@@ -1880,6 +1882,7 @@ def moe_forward(
     router_logits: torch.Tensor,
     layer_name: str,
 ) -> torch.Tensor:
+    logger.warning("moe_forward hidden states shape %s", hidden_states.shape)
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
     assert self.shared_experts is None

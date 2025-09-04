@@ -277,6 +277,7 @@ class DeepseekV2MoE(nn.Module):
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
 
+        assert hidden_states.shape[0] > 0
         fused_moe_out = self.experts(hidden_states=hidden_states,
                                      router_logits=router_logits)
 
