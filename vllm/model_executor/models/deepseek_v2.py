@@ -30,7 +30,6 @@ from typing import Any, Optional, Union
 
 import torch
 from torch import nn
-from torch._dynamo import graph_break
 from transformers import DeepseekV2Config, DeepseekV3Config
 
 import vllm.envs as envs
@@ -249,7 +248,6 @@ class DeepseekV2MoE(nn.Module):
 
     # Chunk x along the num_tokens axis for sequence parallelism
     def sequence_parallel_chunk(self, x: torch.Tensor):
-        graph_break()
         logger.warning("begin spc x.shape %s", x.shape)
         logger.warning("len(x.shape) %s", len(x.shape))
 
