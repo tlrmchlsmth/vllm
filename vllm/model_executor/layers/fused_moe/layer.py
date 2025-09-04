@@ -1600,11 +1600,11 @@ class FusedMoE(CustomOp):
     ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         assert hidden_states.shape[0] != 0
         og_hidden_states = hidden_states.shape[-1]
-        if self.hidden_size != og_hidden_states:
-            hidden_states = F.pad(hidden_states,
-                                  (0, self.hidden_size - og_hidden_states),
-                                  mode='constant',
-                                  value=0.0)
+        #if self.hidden_size != og_hidden_states:
+        #    hidden_states = F.pad(hidden_states,
+        #                          (0, self.hidden_size - og_hidden_states),
+        #                          mode='constant',
+        #                          value=0.0)
         assert hidden_states.shape[0] != 0
 
         if self.shared_experts is None:
@@ -1635,6 +1635,7 @@ class FusedMoE(CustomOp):
         full_hidden_states: torch.Tensor,
         full_router_logits: torch.Tensor,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        assert full_hidden_states.shape[0] != 0
         logger.warning("forward impl chunked full hidden states shape %s",
                        full_hidden_states.shape)
 
@@ -1917,6 +1918,7 @@ def moe_forward_shared(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     logger.warning("moe_forward_shared hidden states shape %s",
                    hidden_states.shape)
+    assert hidden_states.shape[0] != 0
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
     assert self.shared_experts is not None
