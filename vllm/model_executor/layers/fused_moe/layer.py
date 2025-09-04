@@ -1598,12 +1598,14 @@ class FusedMoE(CustomOp):
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        assert hidden_states.shape[0] != 0
         og_hidden_states = hidden_states.shape[-1]
         if self.hidden_size != og_hidden_states:
             hidden_states = F.pad(hidden_states,
                                   (0, self.hidden_size - og_hidden_states),
                                   mode='constant',
                                   value=0.0)
+        assert hidden_states.shape[0] != 0
 
         if self.shared_experts is None:
             if current_platform.is_tpu():
@@ -1622,6 +1624,7 @@ class FusedMoE(CustomOp):
                 shared_output, fused_output = self.forward_impl(
                     hidden_states, router_logits)
             else:
+                assert hidden_states.shape[0] != 0
                 shared_output, fused_output = torch.ops.vllm.moe_forward_shared(
                     hidden_states, router_logits, self.layer_name)
             return (shared_output[..., :og_hidden_states],

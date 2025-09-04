@@ -249,6 +249,8 @@ class DeepseekV2MoE(nn.Module):
 
     # Chunk x along the num_tokens axis for sequence parallelism
     def sequence_parallel_chunk(self, x: torch.Tensor):
+        assert (len(x.shape) == 2)
+
         seq_len = x.size(0)
 
         # all_gather needs the sequence length to be divisible by tp_size
