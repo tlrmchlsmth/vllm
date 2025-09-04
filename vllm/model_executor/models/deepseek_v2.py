@@ -270,7 +270,7 @@ class DeepseekV2MoE(nn.Module):
         start = self.tp_rank * chunk
         #TODO: is the contiguous necessary?
         y = torch.narrow(x, 0, start, chunk)
-        torch._assert(y.is_contiguous())
+        torch._assert(y.is_contiguous(), "y must be contiguous")
         return y.contiguous()
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -315,7 +315,10 @@ class DeepseekV2MoE(nn.Module):
         if self.is_sequence_parallel:
             # TODO: Do we need the .contiguous call?
             final_hidden_states = tensor_model_parallel_all_gather(
-                final_hidden_states, 0).contiguous()
+                final_hidden_states, 0)
+            torch._assert(final_hidden_states.is_contiguous(),
+                          "172b0815f44f5bcdd9d37cd429d44cf1bcff6e50")
+            final_hidden_states = final_hidden_states.is_contiguous()
             final_hidden_states = final_hidden_states[:num_tokens]
         elif self.tp_size > 1:
             final_hidden_states = (
