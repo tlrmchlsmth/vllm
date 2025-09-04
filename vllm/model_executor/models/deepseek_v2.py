@@ -318,7 +318,7 @@ class DeepseekV2MoE(nn.Module):
                 final_hidden_states, 0)
             torch._assert(final_hidden_states.is_contiguous(),
                           "172b0815f44f5bcdd9d37cd429d44cf1bcff6e50")
-            final_hidden_states = final_hidden_states.is_contiguous()
+            final_hidden_states = final_hidden_states.contiguous()
             final_hidden_states = final_hidden_states[:num_tokens]
         elif self.tp_size > 1:
             final_hidden_states = (
