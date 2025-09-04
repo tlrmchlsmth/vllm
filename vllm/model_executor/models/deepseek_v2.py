@@ -125,7 +125,7 @@ class DeepseekV2MLP(nn.Module):
 
 
 # Chunk x along the num_tokens axis for sequence parallelism
-def sequence_parallel_op(x: torch.Tensor):
+def sequence_parallel_op(x: torch.Tensor) -> torch.Tensor:
     tp_size = get_tensor_model_parallel_world_size()
     tp_rank = get_tensor_model_parallel_rank()
 
@@ -149,7 +149,7 @@ def sequence_parallel_op(x: torch.Tensor):
     return y.contiguous()
 
 
-def sequence_parallel_op_fake(x: torch.Tensor):
+def sequence_parallel_op_fake(x: torch.Tensor) -> torch.Tensor:
     seq_len = round_up(x.size(0), 2)
     shape = list(x.shape)
     shape[0] = seq_len
