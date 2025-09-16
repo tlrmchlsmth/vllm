@@ -180,7 +180,7 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
         assert hidden_states.dim(
         ) <= 2, "Qwen3MoeSparseMoeBlock only supports 1D or 2D inputs"
         is_input_1d = hidden_states.dim() == 1
-        hidden_dim = hidden_states.shape[-1]
+        num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
 
         if self.is_sequence_parallel:
@@ -194,6 +194,7 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
         if self.is_sequence_parallel:
             final_hidden_states = tensor_model_parallel_all_gather(
                 final_hidden_states, 0)
+            final_hidden_states = final_hidden_states[:num_tokens]
 
         # return to 1d if input is 1d
         return final_hidden_states.squeeze(0) if is_input_1d else \
