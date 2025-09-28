@@ -699,6 +699,7 @@ def init_worker_distributed_environment(
 
     # TODO: Move somewhere better.
     os.environ['NVSHMEM_ENABLE_NIC_PE_MAPPING'] = '1'
+    logger.info("Rank %s setting NVSHMEM_HCA_LIST to ibp%s:1", rank, rank % 8)
     os.environ['NVSHMEM_HCA_LIST'] = f'ibp{rank % 8}:1'
 
     parallel_config = vllm_config.parallel_config
