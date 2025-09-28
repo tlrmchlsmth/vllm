@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
 import threading
 from typing import Optional, Union
 from weakref import WeakValueDictionary
@@ -121,6 +122,10 @@ class DeviceCommunicatorBase:
         self.is_ep_communicator = "ep" in unique_name
         self.use_all2all = self.is_ep_communicator and use_ep
         self.all2all_manager: Optional[All2AllManagerBase] = None
+
+        if self.is_ep_communicator:
+            os.environ['NVSHMEM_ENABLE_NIC_PE_MAPPING'] = '1'
+            os.environ['NVSHMEM_HCA_LIST'] = f'ibp_{cpu_group.local_rank}:1'
 
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
         dist.all_reduce(input_, group=self.device_group)
