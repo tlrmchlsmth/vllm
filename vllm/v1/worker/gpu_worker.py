@@ -696,6 +696,11 @@ def init_worker_distributed_environment(
     backend: str = "nccl",
 ) -> None:
     """Initialize the distributed environment."""
+
+    # TODO: Move somewhere better.
+    os.environ['NVSHMEM_ENABLE_NIC_PE_MAPPING'] = '1'
+    os.environ['NVSHMEM_HCA_LIST'] = f'ibp_{local_rank}:1'
+
     parallel_config = vllm_config.parallel_config
     set_custom_all_reduce(not parallel_config.disable_custom_all_reduce)
 
