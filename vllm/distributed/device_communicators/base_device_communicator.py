@@ -9,6 +9,8 @@ import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup
 
+from vllm.distributed.parallel_state import get_world_group
+
 
 class Cache:
 
@@ -125,7 +127,8 @@ class DeviceCommunicatorBase:
 
         if self.is_ep_communicator:
             os.environ['NVSHMEM_ENABLE_NIC_PE_MAPPING'] = '1'
-            os.environ['NVSHMEM_HCA_LIST'] = f'ibp_{cpu_group.local_rank}:1'
+            os.environ[
+                'NVSHMEM_HCA_LIST'] = f'ibp_{get_world_group().local_rank}:1'
 
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
         dist.all_reduce(input_, group=self.device_group)
