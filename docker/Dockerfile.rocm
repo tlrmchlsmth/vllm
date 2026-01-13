@@ -112,6 +112,7 @@ COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/examples /examples
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/docker/Dockerfile.rocm /docker/
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/.buildkite /.buildkite
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/vllm/v1 /vllm_v1
+COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/tools/ep_kernels/amd_wideep /amd_wideep
 
 # RIXL/UCX build stages
 FROM base AS build_rixl
@@ -379,6 +380,12 @@ ARG BASE_IMAGE
 COPY --from=export_vllm /benchmarks ${COMMON_WORKDIR}/vllm/benchmarks
 COPY --from=export_vllm /examples ${COMMON_WORKDIR}/vllm/examples
 COPY --from=export_vllm /docker ${COMMON_WORKDIR}/vllm/docker
+COPY --from=export_vllm /amd_wideep ${COMMON_WORKDIR}/vllm/amd_wideep
+
+# WideEP deps installation
+RUN apt-get update -q -y && apt-get install -q -y \
+    autoconf automake libtool flex libibverbs-dev
+RUN cd ${COMMON_WORKDIR}/vllm/amd_wideep && ./install_dependencies.sh
 
 ENV TOKENIZERS_PARALLELISM=false
 
