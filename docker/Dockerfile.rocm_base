@@ -1,4 +1,4 @@
-ARG BASE_IMAGE=rocm/dev-ubuntu-22.04:7.0-complete
+ARG BASE_IMAGE=rocm/dev-ubuntu-22.04:7.1.1-complete
 ARG TRITON_BRANCH="57c693b6"
 ARG TRITON_REPO="https://github.com/ROCm/triton.git"
 ARG PYTORCH_BRANCH="89075173"
@@ -21,6 +21,16 @@ ARG SCCACHE_ENDPOINT
 ARG SCCACHE_BUCKET_NAME=vllm-build-sccache
 ARG SCCACHE_REGION_NAME=us-west-2
 ARG SCCACHE_S3_NO_CREDENTIALS=0
+#TODO: When patch has been upstreamed, switch to the main repo/branch
+# ARG RIXL_BRANCH="<TODO>"
+# ARG RIXL_REPO="https://github.com/ROCm/RIXL.git"
+ARG RIXL_BRANCH="wheel_update"
+ARG RIXL_REPO="https://github.com/vcave/RIXL.git"
+# Needed by RIXL
+ARG ETCD_BRANCH="7c6e714f"
+ARG ETCD_REPO="https://github.com/etcd-cpp-apiv3/etcd-cpp-apiv3.git"
+ARG UCX_BRANCH="da3fac2a"
+ARG UCX_REPO="https://github.com/ROCm/ucx.git"
 
 FROM ${BASE_IMAGE} AS base
 
@@ -142,6 +152,9 @@ ARG PYTORCH_VISION_REPO
 ARG PYTORCH_AUDIO_REPO
 ARG USE_SCCACHE
 
+RUN apt-get -y update && apt-get -y install pkg-config
+RUN apt-get update && apt-get install liblzma-dev -y
+
 RUN git clone ${PYTORCH_REPO} pytorch
 RUN cd pytorch && git checkout ${PYTORCH_BRANCH} \
     && pip install -r requirements.txt && git submodule update --init --recursive \
@@ -155,6 +168,7 @@ RUN cd pytorch && git checkout ${PYTORCH_BRANCH} \
     && CMAKE_PREFIX_PATH=$(python3 -c 'import sys; print(sys.prefix)') python3 setup.py bdist_wheel --dist-dir=dist \
     && if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi \
     && pip install dist/*.whl
+
 RUN git clone ${PYTORCH_VISION_REPO} vision
 RUN cd vision && git checkout ${PYTORCH_VISION_BRANCH} \
     && if [ "$USE_SCCACHE" = "1" ]; then \

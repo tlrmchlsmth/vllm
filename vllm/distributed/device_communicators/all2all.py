@@ -9,6 +9,7 @@ import vllm.envs as envs
 from vllm.distributed import get_dp_group, get_ep_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_all2all
 from vllm.utils.import_utils import has_deep_ep, has_mori, has_pplx
 
@@ -470,7 +471,8 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
         )
 
         assert num_rdma_bytes is not None
-        return dict(
+
+        kwargs = dict(
             group=self.cpu_group,
             num_nvl_bytes=num_nvl_bytes,
             num_rdma_bytes=num_rdma_bytes,
@@ -479,6 +481,11 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
             allow_nvlink_for_low_latency_mode=True,
             allow_mnnvl=envs.VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL,
         )
+        if current_platform.is_rocm():
+            del kwargs["allow_nvlink_for_low_latency_mode"]
+            del kwargs["allow_mnnvl"]
+
+        return kwargs
 
     def get_handle(self, kwargs):
         """

@@ -71,6 +71,7 @@ def moe_mmk(
     use_w8a8: tl.constexpr,
     use_w8a16: tl.constexpr,
     per_act_token_quant: tl.constexpr,
+    USE_BF16_DOT: tl.constexpr,
 ):
     offs_k = tl.arange(0, BLOCK_K)
 
@@ -116,6 +117,11 @@ def moe_mmk(
             other=0.0,
         )
         b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_K, other=0.0)
+
+        if USE_BF16_DOT:
+            a = a.to(tl.bfloat16)
+            b = b.to(tl.bfloat16)
+
         # We accumulate along the K dimension.
         if use_w8a16:
             accumulator = tl.dot(a, b.to(compute_type), acc=accumulator)
@@ -193,6 +199,7 @@ def expert_triton_kernel(
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
+    USE_BF16_DOT: tl.constexpr,
 ):
     offs_m = tl.arange(0, BLOCK_M)
     offs_n = tl.arange(0, BLOCK_N) % N
@@ -238,6 +245,7 @@ def expert_triton_kernel(
         use_fp8_w8a8,
         use_int8_w8a16,
         per_act_token_quant,
+        USE_BF16_DOT=USE_BF16_DOT,
     )
 
     # store in C
@@ -292,6 +300,7 @@ def batched_triton_kernel(
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
+    USE_BF16_DOT: tl.constexpr,
 ):
     expert_id = tl.program_id(axis=0)
     e_num_tokens = tl.load(expert_num_tokens + expert_id)
@@ -372,6 +381,7 @@ def batched_triton_kernel(
         BLOCK_M,
         BLOCK_N,
         BLOCK_K,
+        USE_BF16_DOT=USE_BF16_DOT,
     )
 
 
@@ -444,6 +454,12 @@ def invoke_moe_batched_triton_kernel(
         stride_asm = 0
         stride_ask = 0
 
+    # Avoid "error: failed to legalize operation 'tt.fp_to_fp' that was
+    # explicitly marked illegal" error on ROCm
+    USE_BF16_DOT = current_platform.is_rocm() and (
+        current_platform.fp8_dtype() in [A.dtype, B.dtype]
+    )
+
     batched_triton_kernel[grid](
         A,
         B,
@@ -485,6 +501,7 @@ def invoke_moe_batched_triton_kernel(
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
         BLOCK_K=BLOCK_K,
+        USE_BF16_DOT=USE_BF16_DOT,
     )
 
 
@@ -1021,6 +1038,7 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
             torch.float16,
             torch.bfloat16,
             torch.float8_e4m3fn,
+            torch.float8_e4m3fnuz,
         ]
         assert expert_tokens_meta is not None
 
@@ -1050,7 +1068,7 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
             compute_type = tl.float16
         elif hidden_states.dtype == torch.float32:
             compute_type = tl.float32
-        elif hidden_states.dtype == torch.float8_e4m3fn:
+        elif hidden_states.dtype in [torch.float8_e4m3fn, torch.float8_e4m3fnuz]:
             compute_type = tl.bfloat16
         else:
             raise ValueError(f"Unsupported compute_type: {hidden_states.dtype}")
