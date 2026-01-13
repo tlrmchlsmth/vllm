@@ -9,9 +9,9 @@ import vllm.envs as envs
 from vllm.distributed import get_dp_group, get_ep_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_all2all
 from vllm.utils.import_utils import has_deep_ep, has_pplx
-from vllm.platforms import current_platform
 
 from .base_device_communicator import All2AllManagerBase, Cache
 
@@ -377,7 +377,7 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
         )
 
         assert num_rdma_bytes is not None
-    
+
         kwargs = dict(
             group=self.cpu_group,
             num_nvl_bytes=num_nvl_bytes,

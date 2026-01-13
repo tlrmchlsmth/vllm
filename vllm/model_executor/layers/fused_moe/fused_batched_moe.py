@@ -18,8 +18,8 @@ from vllm.model_executor.layers.fused_moe.utils import (
     normalize_scales_shape,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import group_broadcast
-from vllm.triton_utils import tl, triton
 from vllm.platforms import current_platform
+from vllm.triton_utils import tl, triton
 
 
 @triton.jit
@@ -58,7 +58,7 @@ def moe_mmk(
     use_w8a8: tl.constexpr,
     use_w8a16: tl.constexpr,
     per_act_token_quant: tl.constexpr,
-    USE_BF16_DOT: tl.constexpr
+    USE_BF16_DOT: tl.constexpr,
 ):
     offs_k = tl.arange(0, BLOCK_K)
 
@@ -441,9 +441,11 @@ def invoke_moe_batched_triton_kernel(
         stride_asm = 0
         stride_ask = 0
 
-    # Avoid error: failed to legalize operation 'tt.fp_to_fp' that was explicitly marked illegal
-    # error on ROCm
-    USE_BF16_DOT= current_platform.is_rocm() and (current_platform.fp8_dtype() in [A.dtype, B.dtype])
+    # Avoid "error: failed to legalize operation 'tt.fp_to_fp' that was
+    # explicitly marked illegal" error on ROCm
+    USE_BF16_DOT = current_platform.is_rocm() and (
+        current_platform.fp8_dtype() in [A.dtype, B.dtype]
+    )
 
     batched_triton_kernel[grid](
         A,
@@ -487,7 +489,6 @@ def invoke_moe_batched_triton_kernel(
         BLOCK_N=BLOCK_N,
         BLOCK_K=BLOCK_K,
         USE_BF16_DOT=USE_BF16_DOT,
-
     )
 
 
