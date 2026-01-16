@@ -2646,7 +2646,12 @@ class GPUModelRunner(
 
         assert self.eplb_state is not None
         model = self.get_model()
-        assert is_mixture_of_experts(model)
+        maybe_moe_model = (
+            model.language_model
+            if getattr(model, "language_model", None) is not None
+            else model
+        )
+        assert is_mixture_of_experts(maybe_moe_model)
         self.eplb_state.step(
             is_dummy,
             is_profile,
@@ -4236,7 +4241,13 @@ class GPUModelRunner(
             and mm_config.is_multimodal_pruning_enabled()
         )
 
-        if is_mixture_of_experts(self.model) and self.parallel_config.enable_eplb:
+        maybe_moe_model = (
+            self.model.language_model
+            if getattr(self.model, "language_model", None) is not None
+            else self.model
+        )
+        if is_mixture_of_experts(maybe_moe_model) and self.parallel_config.enable_eplb:
+            moe_model = maybe_moe_model
             logger.info_once("EPLB is enabled for model %s.", self.model_config.model)
             global_expert_load = (
                 global_expert_loads[eplb_models] if global_expert_loads else None
@@ -4248,7 +4259,7 @@ class GPUModelRunner(
             )
             assert self.eplb_state is not None
             self.eplb_state.add_model(
-                self.model,
+                moe_model,
                 self.model_config,
                 global_expert_load,
                 old_global_expert_indices,
