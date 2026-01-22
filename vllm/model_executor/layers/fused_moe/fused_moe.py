@@ -1355,23 +1355,30 @@ def fused_topk(
 
     M, _ = hidden_states.size()
 
+    topk_func = dispatch_topk_func(use_rocm_aiter=rocm_aiter_ops.is_fused_moe_enabled())
+    tmp_indices_type = (
+        torch.int32 if topk_func == rocm_aiter_ops.topk_softmax else indices_type
+    )
+
     topk_weights = torch.empty(
         M, topk, dtype=torch.float32, device=hidden_states.device
     )
     topk_ids = torch.empty(
         M,
         topk,
-        dtype=torch.int32 if indices_type is None else indices_type,
+        dtype=tmp_indices_type,
         device=hidden_states.device,
     )
     token_expert_indices = torch.empty(
         M, topk, dtype=torch.int32, device=hidden_states.device
     )
 
-    topk_func = dispatch_topk_func(use_rocm_aiter=rocm_aiter_ops.is_fused_moe_enabled())
     topk_weights, topk_ids = topk_func(
         topk_weights, topk_ids, token_expert_indices, gating_output, renormalize
     )
+
+    if tmp_indices_type != indices_type:
+        topk_ids = topk_ids.to(indices_type)
 
     return topk_weights, topk_ids, token_expert_indices
 
