@@ -272,11 +272,11 @@ def rocm_aiter_fused_experts(
 
 class AiterExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def __init__(self, quant_config: FusedMoEQuantConfig):
-        self.old_quant_config = deepcopy(quant_config)
+        self._aiter_quant_config = deepcopy(quant_config)
 
-        # AiterExperts needs a1 to be bfloat16.
-        quant_config._a1 = FusedMoEQuantDesc()
-        quant_config._a2 = FusedMoEQuantDesc()
+        quant_config = FusedMoEQuantConfig(
+            FusedMoEQuantDesc(), FusedMoEQuantDesc(), quant_config._w1, quant_config._w2
+        )
         super().__init__(quant_config)
 
     @property
@@ -336,7 +336,7 @@ class AiterExperts(mk.FusedMoEPermuteExpertsUnpermute):
         # a_scales for static quantization. Update this to fit better
         # with the interface once all quant integrations are complete.
         assert a1q_scale is None
-        assert a2_scale == self.old_quant_config.a2_scale
+        assert a2_scale == self._aiter_quant_config.a2_scale
 
         result = rocm_aiter_fused_experts(
             hidden_states=hidden_states,
@@ -347,7 +347,7 @@ class AiterExperts(mk.FusedMoEPermuteExpertsUnpermute):
             activation=activation,
             apply_router_weight_on_input=apply_router_weight_on_input,
             expert_map=expert_map,
-            quant_config=self.old_quant_config,
+            quant_config=self._aiter_quant_config,
         )
         assert result.shape == output.shape
         output.copy_(result)
