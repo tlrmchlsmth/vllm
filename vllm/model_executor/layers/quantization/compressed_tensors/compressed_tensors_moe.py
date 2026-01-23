@@ -56,6 +56,7 @@ from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
     make_nvfp4_moe_quant_config,
     select_nvfp4_moe_backend,
 )
+from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import AiterExperts
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compressed_tensors_wNa16 import (  # noqa
     WNA16_SUPPORTED_BITS,
     WNA16_SUPPORTED_TYPES_MAP,
@@ -829,7 +830,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         self,
         routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ) -> mk.FusedMoEPrepareAndFinalize | None:
-        if self.fp8_backend in [Fp8MoeBackend.MARLIN, Fp8MoeBackend.AITER]:
+        if self.fp8_backend in [Fp8MoeBackend.MARLIN]:
             return None
         else:
             return super().maybe_make_prepare_finalize(routing_tables)
@@ -897,7 +898,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             TritonOrDeepGemmExperts,
         )
 
-        assert self.fp8_backend not in [Fp8MoeBackend.AITER, Fp8MoeBackend.MARLIN]
+        assert self.fp8_backend not in [Fp8MoeBackend.MARLIN]
 
         if (
             prepare_finalize.activation_format
@@ -925,6 +926,9 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             if self.fp8_backend == Fp8MoeBackend.DEEPGEMM:
                 logger.debug("TritonOrDeepGemmExperts(%s)", self.__class__.__name__)
                 return TritonOrDeepGemmExperts(self.moe_quant_config)
+            if self.fp8_backend == Fp8MoeBackend.AITER:
+                logger.debug("AiterExperts(%s)", self.__class__.__name__)
+                return AiterExperts(quant_config=self.moe_quant_config)
             else:
                 logger.debug("TritonExperts(%s)", self.__class__.__name__)
                 return TritonExperts(self.moe_quant_config)
