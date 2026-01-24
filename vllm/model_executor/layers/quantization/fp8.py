@@ -879,7 +879,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ) -> mk.FusedMoEPrepareAndFinalize | None:
         if self.fp8_backend in [
-            Fp8MoeBackend.AITER,
             Fp8MoeBackend.MARLIN,
             Fp8MoeBackend.FLASHINFER_TRTLLM,
         ]:
@@ -905,10 +904,17 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             TritonOrDeepGemmExperts,
         )
 
-        if self.fp8_backend in [Fp8MoeBackend.MARLIN, Fp8MoeBackend.AITER]:
+        if self.fp8_backend in [Fp8MoeBackend.MARLIN]:
             raise NotImplementedError(
                 "Marlin and ROCm AITER are not supported with all2all yet."
             )
+
+        if (
+            prepare_finalize.activation_format
+            == FusedMoEActivationFormat.BatchedExperts
+            and self.fp8_backend in [Fp8MoeBackend.AITER]
+        ):
+            raise NotImplementedError("ROCm AITER is not supported with Batched format")
 
         assert self.moe_quant_config is not None
 
@@ -956,6 +962,16 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 False,
             )
             return TritonOrDeepGemmExperts(self.moe_quant_config)
+        elif self.fp8_backend == Fp8MoeBackend.AITER:
+            from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+                AiterExperts,
+            )
+
+            logger.debug(
+                "AiterExperts(%s)",
+                self.__class__.__name__,
+            )
+            return AiterExperts(self.moe_quant_config)
         else:
             assert self.fp8_backend == Fp8MoeBackend.TRITON
             logger.debug(

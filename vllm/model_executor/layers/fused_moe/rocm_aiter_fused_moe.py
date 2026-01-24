@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from copy import deepcopy
 from enum import IntEnum
 from functools import lru_cache
 
@@ -10,6 +11,7 @@ from vllm._aiter_ops import rocm_aiter_ops
 from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
     FusedMoEQuantConfig,
+    FusedMoEQuantDesc,
 )
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
@@ -269,7 +271,12 @@ def rocm_aiter_fused_experts(
 
 
 class AiterExperts(mk.FusedMoEPermuteExpertsUnpermute):
-    def __init__(self, quant_config):
+    def __init__(self, quant_config: FusedMoEQuantConfig):
+        self._aiter_quant_config = deepcopy(quant_config)
+
+        quant_config = FusedMoEQuantConfig(
+            FusedMoEQuantDesc(), FusedMoEQuantDesc(), quant_config._w1, quant_config._w2
+        )
         super().__init__(quant_config)
 
     @property
@@ -329,8 +336,7 @@ class AiterExperts(mk.FusedMoEPermuteExpertsUnpermute):
         # a_scales for static quantization. Update this to fit better
         # with the interface once all quant integrations are complete.
         assert a1q_scale is None
-        assert a2_scale == self.quant_config.a2_scale
-        assert expert_tokens_meta is None
+        assert a2_scale == self._aiter_quant_config.a2_scale
 
         result = rocm_aiter_fused_experts(
             hidden_states=hidden_states,
@@ -341,7 +347,7 @@ class AiterExperts(mk.FusedMoEPermuteExpertsUnpermute):
             activation=activation,
             apply_router_weight_on_input=apply_router_weight_on_input,
             expert_map=expert_map,
-            quant_config=self.quant_config,
+            quant_config=self._aiter_quant_config,
         )
         assert result.shape == output.shape
         output.copy_(result)
