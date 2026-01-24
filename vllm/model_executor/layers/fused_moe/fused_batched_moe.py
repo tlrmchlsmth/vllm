@@ -10,6 +10,9 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
 )
+from vllm.model_executor.layers.fused_moe.batched_masked_silu_mul_quant import (
+    silu_mul_fp8_quant,
+)
 from vllm.model_executor.layers.fused_moe.fused_moe import try_get_optimal_moe_config
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate,
@@ -33,6 +36,9 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+
+# Default group size for FP8 block quantization
+FUSED_QUANT_GROUP_SIZE = 128
 
 
 @triton.jit
@@ -1005,6 +1011,47 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         output = (num_experts, max_num_tokens * num_dp, K)
         return (workspace13, workspace2, output)
 
+    def activation_mul_quant(
+        self,
+        activation: str,
+        input: torch.Tensor,
+        output: torch.Tensor,
+        act_scale: torch.Tensor | None,
+        expert_num_tokens: torch.Tensor,
+        use_fused_silu_mul_quant: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if use_fused_silu_mul_quant:
+            assert act_scale is None, (
+                "fused silu mul quant kernel only supports dynamic scales"
+            )
+            assert activation == "silu"
+
+        if use_fused_silu_mul_quant:
+            amq, amq_scales = silu_mul_fp8_quant(input, expert_num_tokens)
+        else:
+            E, max_num_tokens, N = input.size()
+            activation_out_dim = self.adjust_N_for_activation(N, activation)
+            # TODO (bnell): use triton utility from batched deep gemm.
+            self.activation(
+                activation,
+                output.view(-1, activation_out_dim),
+                input.view(-1, N),
+            )
+
+            amq, amq_scales = batched_moe_kernel_quantize_input(
+                output,
+                act_scale,
+                max_num_tokens,
+                E,
+                N,
+                expert_num_tokens,
+                self.quant_dtype,
+                self.per_act_token_quant,
+                self.block_shape,
+            )
+
+        return amq, amq_scales
+
     def apply(
         self,
         output: torch.Tensor,
@@ -1082,9 +1129,21 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
             workspace2, (E, max_num_tokens, activation_out_dim)
         )
 
-        # TODO(bnell): should this be done for any quantized type?
-        if self.quant_config.use_fp8_w8a8:
+        # Check if we can use the fused silu + mul + fp8 quant kernel.
+        # N here is the output dim of w1 (= 2*H for gated activations).
+        # The kernel requires H % group_size == 0, so we check N % (2*group_size) == 0.
+        use_fused_silu_mul_quant = (
+            activation == "silu"
+            and self.quant_config.use_fp8_w8a8
+            and self.block_shape is not None
+            and self.block_shape[1] == FUSED_QUANT_GROUP_SIZE
+            and not self.per_act_token_quant
+            and N % (2 * FUSED_QUANT_GROUP_SIZE) == 0
+        )
+
+        if not use_fused_silu_mul_quant:
             intermediate_cache1.fill_(0)
+            intermediate_cache2.fill_(0)
 
         a1q_scale = normalize_batched_scales_shape(a1q_scale, E)
 
@@ -1106,34 +1165,22 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
             block_shape=self.block_shape,
         )
 
-        intermediate_cache2.fill_(0)
-
-        # TODO (bnell): use triton utility from batched deep gemm.
-        self.activation(
+        amq, amq_scales = self.activation_mul_quant(
             activation,
-            intermediate_cache2.view(-1, activation_out_dim),
-            intermediate_cache1.view(-1, N),
-        )
-
-        qintermediate_cache2, a2q_scale = batched_moe_kernel_quantize_input(
+            intermediate_cache1,
             intermediate_cache2,
             a2_scale,
-            max_num_tokens,
-            E,
-            N,
             expert_num_tokens,
-            self.quant_dtype,
-            self.per_act_token_quant,
-            self.block_shape,
+            use_fused_silu_mul_quant=use_fused_silu_mul_quant,
         )
 
         invoke_moe_batched_triton_kernel(
-            A=qintermediate_cache2,
+            A=amq,
             B=w2,
             C=output,
             expert_num_tokens=expert_num_tokens,
             compute_type=compute_type,
-            A_scale=a2q_scale,
+            A_scale=amq_scales,
             B_scale=self.w2_scale,
             B_zp=self.w2_zp,
             use_fp8_w8a8=self.quant_config.use_fp8_w8a8,

@@ -23,6 +23,7 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNaiveEP,
     MoEPrepareAndFinalizeNoEP,
 )
+from vllm.model_executor.layers.quantization.utils.fp8_utils import is_fp8
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_deep_ep, has_mori, has_pplx
 
@@ -194,7 +195,7 @@ def maybe_make_prepare_finalize(
         # Note: We may want to use FP8 dispatch just to reduce
         # data movement.
         use_fp8_dispatch = (
-            quant_config.quant_dtype == current_platform.fp8_dtype()
+            is_fp8(quant_config.quant_dtype)
             and quant_config.block_shape == DEEPEP_QUANT_BLOCK_SHAPE
         )
 
