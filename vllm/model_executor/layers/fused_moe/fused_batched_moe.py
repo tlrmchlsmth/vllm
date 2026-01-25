@@ -5,11 +5,16 @@
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm import envs
 from vllm.model_executor.layers.fused_moe.batched_masked_silu_mul_quant import (
     silu_mul_fp8_quant,
 )
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
-from vllm.model_executor.layers.fused_moe.fused_moe import try_get_optimal_moe_config
+from vllm.model_executor.layers.fused_moe.fused_moe import (
+    get_config_file_name,
+    get_moe_configs,
+    try_get_optimal_moe_config,
+)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate,
     TopKWeightAndReduceNaiveBatched,
@@ -290,10 +295,13 @@ def batched_triton_kernel(
     use_int8_w8a16: tl.constexpr,
     per_act_token_quant: tl.constexpr,
     # Kernel config
+    USE_BF16_DOT: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
-    USE_BF16_DOT: tl.constexpr,
+    waves_per_eu: tl.constexpr = 0,
+    matrix_instr_nonkdim: tl.constexpr = 0,
+    kpack: tl.constexpr = 1,
 ):
     expert_id = tl.program_id(axis=0)
     e_num_tokens = tl.load(expert_num_tokens + expert_id)
@@ -378,6 +386,157 @@ def batched_triton_kernel(
     )
 
 
+def get_mi300x_configs():
+    BLOCK_Ms = [32, 64, 128, 256]
+    BLOCK_Ns = [128, 256]
+    BLOCK_Ks = [64, 128]
+    WAVES_PER_EU = [0, 2, 4]
+    MATRIX_INSTR_NONKDIM = [16, 32]
+    KPACKS = [1, 2]
+    NUM_WARPS = [4, 8]
+    NUM_STAGES = [2, 4]
+
+    configs = []
+
+    from itertools import product
+
+    for (
+        m,
+        n,
+        k,
+        waves_per_eu,
+        matrix_instr_nonkdim,
+        kpack,
+        num_warps,
+        num_stages,
+    ) in product(
+        BLOCK_Ms,
+        BLOCK_Ns,
+        BLOCK_Ks,
+        WAVES_PER_EU,
+        MATRIX_INSTR_NONKDIM,
+        KPACKS,
+        NUM_WARPS,
+        NUM_STAGES,
+    ):
+        configs.append(
+            triton.Config(
+                {
+                    "BLOCK_M": m,
+                    "BLOCK_N": n,
+                    "BLOCK_K": k,
+                    "waves_per_eu": waves_per_eu,
+                    "matrix_instr_nonkdim": matrix_instr_nonkdim,
+                    "kpack": kpack,
+                },
+                num_warps=num_warps,
+                num_stages=num_stages,
+            )
+        )
+    return configs
+
+
+@triton.autotune(
+    configs=get_mi300x_configs(),
+    key=["max_num_tokens", "K", "N"],
+)
+@triton.jit
+def batched_triton_kernel_tuner(
+    a_ptr,  # [E, max_num_tokens, K]
+    b_ptr,  # [E, K, N]
+    c_ptr,  # [E, max_num_tokens, N]
+    expert_num_tokens,  # [E]
+    compute_type: tl.constexpr,
+    # Dimensions
+    max_num_tokens,
+    K,
+    N,
+    # Quantization data
+    a_scale_ptr,
+    b_scale_ptr,
+    b_zp_ptr,
+    # The stride variables represent how much to increase the ptr by when
+    # moving by 1 element in a particular dimension. E.g. `stride_am` is
+    # how much to increase `a_ptr` by to get the element one row down
+    # (A has M rows).
+    stride_ae: tl.int64,
+    stride_am: tl.int64,
+    stride_ak: tl.int64,
+    stride_be: tl.int64,
+    stride_bk: tl.int64,
+    stride_bn: tl.int64,
+    stride_ce: tl.int64,
+    stride_cm: tl.int64,
+    stride_cn: tl.int64,
+    stride_ase: tl.int64,
+    stride_asm: tl.int64,
+    stride_ask: tl.int64,
+    stride_bse: tl.int64,
+    stride_bsk: tl.int64,
+    stride_bsn: tl.int64,
+    # Blockwise quantization data
+    group_n: tl.constexpr,
+    group_k: tl.constexpr,
+    # Quantization schemes
+    use_fp8_w8a8: tl.constexpr,
+    use_int8_w8a16: tl.constexpr,
+    per_act_token_quant: tl.constexpr,
+    # Kernel config
+    USE_BF16_DOT: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    waves_per_eu: tl.constexpr = 0,
+    matrix_instr_nonkdim: tl.constexpr = 0,
+    kpack: tl.constexpr = 1,
+):
+    return batched_triton_kernel(
+        a_ptr,
+        b_ptr,
+        c_ptr,
+        expert_num_tokens,
+        compute_type,
+        # Dimensions
+        max_num_tokens,
+        K,
+        N,
+        # Quantization data
+        a_scale_ptr,
+        b_scale_ptr,
+        b_zp_ptr,
+        stride_ae,
+        stride_am,
+        stride_ak,
+        stride_be,
+        stride_bk,
+        stride_bn,
+        stride_ce,
+        stride_cm,
+        stride_cn,
+        stride_ase,
+        stride_asm,
+        stride_ask,
+        stride_bse,
+        stride_bsk,
+        stride_bsn,
+        # Blockwise quantization data
+        group_n,
+        group_k,
+        # Quantization schemes
+        use_fp8_w8a8,
+        use_int8_w8a16,
+        per_act_token_quant,
+        # Kernel config
+        USE_BF16_DOT,
+        BLOCK_M,
+        BLOCK_N,
+        BLOCK_K,
+        waves_per_eu,
+        matrix_instr_nonkdim,
+        kpack,
+    )
+
+
 def invoke_moe_batched_triton_kernel(
     A: torch.Tensor,  # [E, max_tokens, K]
     B: torch.Tensor,  # [E, N, K]
@@ -400,15 +559,6 @@ def invoke_moe_batched_triton_kernel(
     max_num_tokens = A.size(1)
     K = A.size(2)
     N = C.size(2)
-
-    BLOCK_M = config["BLOCK_SIZE_M"]
-    BLOCK_N = config["BLOCK_SIZE_N"]
-    BLOCK_K = config["BLOCK_SIZE_K"]
-
-    grid = (
-        expert_num_tokens.size(0),
-        triton.cdiv(max_num_tokens, BLOCK_M) * triton.cdiv(B.size(1), BLOCK_N),
-    )
 
     A_scale = normalize_batched_scales_shape(A_scale, expert_num_tokens.shape[0])
 
@@ -453,7 +603,52 @@ def invoke_moe_batched_triton_kernel(
         current_platform.fp8_dtype() in [A.dtype, B.dtype]
     )
 
-    batched_triton_kernel[grid](
+    is_tuned = all(
+        [
+            config.get(kw) is not None
+            for kw in [
+                "BLOCK_M",
+                "BLOCK_N",
+                "BLOCK_K",
+                "WAVES_PER_EU",
+                "MATRIX_INSTR_NONKDIM",
+                "KPACK",
+            ]
+        ]
+    )
+
+    do_tuning = envs.VLLM_TUNE_BATCHED_MOE_ROCM and not is_tuned
+
+    if do_tuning:
+        grid = lambda META: (
+            expert_num_tokens.size(0),
+            triton.cdiv(max_num_tokens, META["BLOCK_M"])
+            * triton.cdiv(N, META["BLOCK_N"]),
+        )
+        config_kwargs = dict()
+        kernel_fn = batched_triton_kernel_tuner[grid]
+    else:
+        BLOCK_M = config.get("BLOCK_M", 128)
+        BLOCK_N = config.get("BLOCK_N", 128)
+        BLOCK_K = config.get("BLOCK_K", 128)
+        WAVES_PER_EU = config.get("WAVES_PER_EU", 0)
+        MATRIX_INSTR_NONKDIM = config.get("MATRIX_INSTR_NONKDIM", 0)
+        KPACK = config.get("KPACK", 1)
+        grid = (  # type: ignore[assignment]
+            expert_num_tokens.size(0),
+            triton.cdiv(max_num_tokens, BLOCK_M) * triton.cdiv(B.size(1), BLOCK_N),
+        )
+        config_kwargs = {
+            "BLOCK_M": BLOCK_M,
+            "BLOCK_N": BLOCK_N,
+            "BLOCK_K": BLOCK_K,
+            "waves_per_eu": WAVES_PER_EU,
+            "matrix_instr_nonkdim": MATRIX_INSTR_NONKDIM,
+            "kpack": KPACK,
+        }
+        kernel_fn = batched_triton_kernel[grid]
+
+    kernel_fn(
         A,
         B,
         C,
@@ -491,11 +686,62 @@ def invoke_moe_batched_triton_kernel(
         use_int8_w8a16,
         per_act_token_quant,
         # Kernel config
-        BLOCK_M=BLOCK_M,
-        BLOCK_N=BLOCK_N,
-        BLOCK_K=BLOCK_K,
         USE_BF16_DOT=USE_BF16_DOT,
+        **config_kwargs,
     )
+
+    if do_tuning:
+        # store the config !
+        assert isinstance(block_shape, list)
+
+        E, max_num_tokens, _ = A.size()
+        dtype = A.dtype
+        best_config = {
+            max_num_tokens: {
+                "BLOCK_M": kernel_fn.best_config.kwargs["BLOCK_M"],
+                "BLOCK_N": kernel_fn.best_config.kwargs["BLOCK_N"],
+                "BLOCK_K": kernel_fn.best_config.kwargs["BLOCK_K"],
+                "WAVES_PER_EU": kernel_fn.best_config.kwargs["WAVES_PER_EU"],
+                "MATRIX_INSTR_NONKDIM": kernel_fn.best_config.kwargs[
+                    "MATRIX_INSTR_NONKDIM"
+                ],
+                "KPACK": kernel_fn.best_config.kwargs["KPACK"],
+                "num_warps": kernel_fn.best_config.num_warps,
+                "num_stages": kernel_fn.best_config.num_stages,
+            }
+        }
+        add_to_config(
+            E, N, dtype, block_shape[0], block_shape[1], max_num_tokens, best_config
+        )
+
+
+def add_to_config(
+    E: int,
+    N: int,
+    dtype: torch.dtype,
+    block_n: int,
+    block_k: int,
+    max_num_tokens: int,
+    config: dict,
+):
+    config_folder = envs.VLLM_TUNED_CONFIG_FOLDER
+    assert config_folder is not None, "No where to store the tuned configs"
+
+    existing_config = get_moe_configs(E, N, dtype, block_n, block_k)
+    if existing_config is None:
+        # store for the first time
+        existing_config = config
+    else:
+        # check if an existing config is present already
+        existing_config.update(config)
+
+    json_file_name = get_config_file_name(E, N, dtype, [block_n, block_k])
+    json_file_path = f"{config_folder}/{json_file_name}"
+
+    import json
+
+    with open(json_file_path, "w+") as f:
+        json.dump(existing_config, f, indent=4)
 
 
 class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
