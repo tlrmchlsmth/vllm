@@ -13,7 +13,6 @@ from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.fused_moe import (
     get_config_file_name,
     get_moe_configs,
-    try_get_optimal_moe_config,
 )
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate,
@@ -387,6 +386,24 @@ def batched_triton_kernel(
 
 
 def get_mi300x_configs():
+    def log_config_hook(args):
+        # This runs before the kernel launches
+        # 'args' contains the kernel arguments and meta-parameters
+        m, n, k, w, m_, k_ = (
+            args["BLOCK_M"],
+            args["BLOCK_N"],
+            args["BLOCK_K"],
+            args["waves_per_eu"],
+            args["matrix_instr_nonkdim"],
+            args["kpack"],
+        )
+        print(
+            f"Testing config: block_m={m}, "
+            f"block_n={n}, block_k={k}, "
+            f"waves_per_eu={w}, matrix_instr_nonkdim={m_}, "
+            f"kpack={k_} ..."
+        )
+
     BLOCK_Ms = [32, 64, 128, 256]
     BLOCK_Ns = [128, 256]
     BLOCK_Ks = [64, 128]
@@ -431,6 +448,7 @@ def get_mi300x_configs():
                 },
                 num_warps=num_warps,
                 num_stages=num_stages,
+                pre_hook=log_config_hook,
             )
         )
     return configs
@@ -537,6 +555,19 @@ def batched_triton_kernel_tuner(
     )
 
 
+def get_optimal_batched_moe_config(max_num_tokens, E, N, dtype, block_n, block_k):
+    configs = get_moe_configs(E, N, dtype, block_n, block_k)
+
+    if configs:
+        # If an optimal configuration map has been found, look up the
+        # optimal config
+        config = configs[min(configs.keys(), key=lambda x: abs(x - max_num_tokens))]
+    else:
+        config = dict()
+
+    return config
+
+
 def invoke_moe_batched_triton_kernel(
     A: torch.Tensor,  # [E, max_tokens, K]
     B: torch.Tensor,  # [E, N, K]
@@ -557,6 +588,7 @@ def invoke_moe_batched_triton_kernel(
 ):
     assert not use_int4_w4a16
     max_num_tokens = A.size(1)
+    E = A.size(0)
     K = A.size(2)
     N = C.size(2)
 
@@ -603,6 +635,11 @@ def invoke_moe_batched_triton_kernel(
         current_platform.fp8_dtype() in [A.dtype, B.dtype]
     )
 
+    block_shape_ = block_shape or [0, 0]
+    config = get_optimal_batched_moe_config(
+        max_num_tokens, E, N, A.dtype, block_shape_[0], block_shape_[1]
+    )
+
     is_tuned = all(
         [
             config.get(kw) is not None
@@ -626,7 +663,7 @@ def invoke_moe_batched_triton_kernel(
             * triton.cdiv(N, META["BLOCK_N"]),
         )
         config_kwargs = dict()
-        kernel_fn = batched_triton_kernel_tuner[grid]
+        kernel_fn = batched_triton_kernel_tuner
     else:
         BLOCK_M = config.get("BLOCK_M", 128)
         BLOCK_N = config.get("BLOCK_N", 128)
@@ -646,9 +683,9 @@ def invoke_moe_batched_triton_kernel(
             "matrix_instr_nonkdim": MATRIX_INSTR_NONKDIM,
             "kpack": KPACK,
         }
-        kernel_fn = batched_triton_kernel[grid]
+        kernel_fn = batched_triton_kernel
 
-    kernel_fn(
+    kernel_fn[grid](
         A,
         B,
         C,
@@ -701,11 +738,11 @@ def invoke_moe_batched_triton_kernel(
                 "BLOCK_M": kernel_fn.best_config.kwargs["BLOCK_M"],
                 "BLOCK_N": kernel_fn.best_config.kwargs["BLOCK_N"],
                 "BLOCK_K": kernel_fn.best_config.kwargs["BLOCK_K"],
-                "WAVES_PER_EU": kernel_fn.best_config.kwargs["WAVES_PER_EU"],
+                "WAVES_PER_EU": kernel_fn.best_config.kwargs["waves_per_eu"],
                 "MATRIX_INSTR_NONKDIM": kernel_fn.best_config.kwargs[
-                    "MATRIX_INSTR_NONKDIM"
+                    "matrix_instr_nonkdim"
                 ],
-                "KPACK": kernel_fn.best_config.kwargs["KPACK"],
+                "KPACK": kernel_fn.best_config.kwargs["kpack"],
                 "num_warps": kernel_fn.best_config.num_warps,
                 "num_stages": kernel_fn.best_config.num_stages,
             }
@@ -736,7 +773,9 @@ def add_to_config(
         existing_config.update(config)
 
     json_file_name = get_config_file_name(E, N, dtype, [block_n, block_k])
-    json_file_path = f"{config_folder}/{json_file_name}"
+    import os
+
+    json_file_path = os.path.join(config_folder, json_file_name)
 
     import json
 
@@ -1237,16 +1276,16 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         assert w1.size(0) == E
         assert w2.size(0) == E
 
-        config_dtype = self.quant_config.config_name(hidden_states.dtype)
-
-        config = try_get_optimal_moe_config(
-            w1.size(),
-            w2.size(),
-            top_k_num,
-            config_dtype,
-            max_num_tokens,
-            block_shape=self.block_shape,
-        )
+        # config_dtype = self.quant_config.config_name(hidden_states.dtype)
+        # config = try_get_optimal_moe_config(
+        #    w1.size(),
+        #    w2.size(),
+        #    top_k_num,
+        #    config_dtype,
+        #    max_num_tokens,
+        #    block_shape=self.block_shape,
+        # )
+        config: dict[str, int] = dict()
 
         if hidden_states.dtype == torch.bfloat16:
             compute_type = tl.bfloat16

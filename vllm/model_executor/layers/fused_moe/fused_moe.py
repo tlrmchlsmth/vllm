@@ -1074,10 +1074,9 @@ def get_moe_configs(
     for config_file_path in config_file_paths:
         if os.path.exists(config_file_path):
             with open(config_file_path) as f:
-                logger.info_once(
+                logger.info(
                     "Using configuration from %s for MoE layer.",
                     config_file_path,
-                    scope="global",
                 )
                 # If a configuration has been found, return it
                 tuned_config = json.load(f)
@@ -1087,11 +1086,10 @@ def get_moe_configs(
 
     # If no optimized configuration is available, we will use the default
     # configuration
-    logger.warning_once(
+    logger.warning(
         "Using default MoE config. Performance might be sub-optimal! "
         "Config file not found at %s",
         ", ".join(config_file_paths),
-        scope="local",
     )
     return None
 
