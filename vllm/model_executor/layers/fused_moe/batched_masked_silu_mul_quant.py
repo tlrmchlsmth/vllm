@@ -182,7 +182,7 @@ def silu_mul_fp8_quant(
 
     tokens_per_expert = tokens_per_expert.to(device=y.device, dtype=torch.int32)
 
-    fp8_dtype = torch.float8_e4m3fn
+    fp8_dtype = current_platform.fp8_dtype()
     y_q = torch.empty((E, T, H), dtype=fp8_dtype, device=y.device)
 
     ys_shape, ys_strides, ys_dtype = scales_shape_stride_dtype(E, T, G, quant_scale_fmt)
