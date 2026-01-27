@@ -1305,9 +1305,15 @@ class rocm_aiter_ops:
         gating_output: torch.Tensor,
         renormalize: bool,
     ) -> tuple[torch.Tensor, ...]:
+        topk_indices_dtype = topk_indices.dtype
+        if topk_indices.dtype != torch.int32:
+            topk_indices = topk_indices.to(torch.int32)
+
         torch.ops.vllm.rocm_aiter_topk_softmax(
             topk_weights, topk_indices, token_expert_indices, gating_output, renormalize
         )
+
+        topk_indices = topk_indices.to(topk_indices_dtype)
         return topk_weights, topk_indices
 
     @staticmethod
