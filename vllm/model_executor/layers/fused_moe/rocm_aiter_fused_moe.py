@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from copy import deepcopy
 from enum import IntEnum
 from functools import lru_cache
 
@@ -12,7 +11,6 @@ from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
-    FusedMoEQuantDesc,
 )
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
@@ -379,7 +377,10 @@ class AiterExperts(mk.FusedMoEPermuteExpertsUnpermute):
         # with the interface once all quant integrations are complete.
         assert a2_scale == self.quant_config.a2_scale
 
-        if expert_tokens_meta is not None:
+        if (
+            expert_tokens_meta is not None
+            and expert_tokens_meta.expert_num_tokens.numel() == 1
+        ):
             num_local_tokens = expert_tokens_meta.expert_num_tokens
         else:
             num_local_tokens = None

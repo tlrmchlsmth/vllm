@@ -98,14 +98,11 @@ function build_rocshmem() {
 
 function build_deepep() {
 
-    export OMPI_DIR=$PWD/rocSHMEM/build/install/ompi
-    export PATH=$OMPI_DIR/bin:$PATH
-    export LD_LIBRARY_PATH=$OMPI_DIR/lib:$LD_LIBRARY_PATH
+    export OMPI_DIR=${WORKSPACE}/rocSHMEM/build/install/ompi
 
     #clone_repo https://github.com/ROCm/DeepEP DeepEP "" setup.py
     clone_repo  https://github.com/varun-sundar-rabindranath/ROCm-DeepEP.git  ROCm-DeepEP "varun/add-hidden-dim" setup.py
 
- 
     #pushd DeepEP
     pushd ROCm-DeepEP
     python3 setup.py --variant rocm build develop
