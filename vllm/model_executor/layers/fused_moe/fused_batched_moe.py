@@ -5,13 +5,13 @@
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.model_executor.layers.fused_moe.batched_masked_silu_mul_quant import (
+    silu_mul_fp8_quant,
+)
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
-)
-from vllm.model_executor.layers.fused_moe.batched_masked_silu_mul_quant import (
-    silu_mul_fp8_quant,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import try_get_optimal_moe_config
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
