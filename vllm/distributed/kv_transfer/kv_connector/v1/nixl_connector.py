@@ -220,7 +220,7 @@ def compute_nixl_compatibility_hash(
     }
 
     compat_hash = hash_factors(factors)
-    logger.debug(
+    logger.info(
         "NIXL compatibility hash: %s (model=%s, dtype=%s, num_kv_heads=%d, "
         "cache_dtype=%s, attn_backend=%s)",
         compat_hash,
@@ -570,7 +570,7 @@ class NixlConnectorScheduler:
                     "handshake metadata."
                 )
             encoded_data[tp_rank] = encoder.encode(rank_metadata)
-            logger.debug(
+            logger.info(
                 "Tp rank %d: encoded NixlHandshakePayload size: %s bytes",
                 tp_rank,
                 str(len(encoded_data[tp_rank])),
@@ -608,7 +608,7 @@ class NixlConnectorScheduler:
         # Listen for new requests for metadata.
         host = envs.VLLM_NIXL_SIDE_CHANNEL_HOST
         path = make_zmq_path("tcp", host, port)
-        logger.debug("Starting listening on path: %s", path)
+        logger.info("Starting listening on path: %s", path)
         with zmq_ctx(zmq.ROUTER, path) as sock:
             sock.setsockopt(zmq.RCVTIMEO, 1000)
             ready_event.set()
@@ -621,7 +621,7 @@ class NixlConnectorScheduler:
                     continue
                 # Decode the message which contains (GET_META_MSG, rank)
                 msg, target_tp_rank = msgspec.msgpack.decode(msg)
-                logger.debug(
+                logger.info(
                     "Received message for tp rank %s",
                     target_tp_rank,
                 )
@@ -648,7 +648,7 @@ class NixlConnectorScheduler:
         """
 
         params = request.kv_transfer_params
-        logger.debug(
+        logger.info(
             "NIXLConnector get_num_new_matched_tokens: "
             "num_computed_tokens=%s, kv_transfer_params=%s",
             num_computed_tokens,
@@ -669,7 +669,7 @@ class NixlConnectorScheduler:
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
     ):
         params = request.kv_transfer_params
-        logger.debug(
+        logger.info(
             "NIXLConnector update_state_after_alloc: "
             "num_external_tokens=%s, kv_transfer_params=%s",
             num_external_tokens,
@@ -787,7 +787,7 @@ class NixlConnectorScheduler:
         from vllm.v1.request import RequestStatus
 
         params = request.kv_transfer_params
-        logger.debug(
+        logger.info(
             "NIXLConnector request_finished(%s), request_status=%s, "
             "kv_transfer_params=%s",
             request.request_id,
@@ -824,7 +824,7 @@ class NixlConnectorScheduler:
 
         if delay_free_blocks:
             # Prefill request on remote. It will be read from D upon completion
-            logger.debug(
+            logger.info(
                 "NIXLConnector request_finished(%s) waiting for %d seconds "
                 "for remote decode to fetch blocks",
                 request.request_id,
@@ -1007,8 +1007,8 @@ class NixlConnectorWorker:
         self.backend_name = self.attn_backend.get_name()
         self.kv_cache_layout = get_kv_cache_layout()
         self.host_buffer_kv_cache_layout = self.kv_cache_layout
-        logger.debug("Detected attention backend %s", self.backend_name)
-        logger.debug("Detected kv cache layout %s", self.kv_cache_layout)
+        logger.info("Detected attention backend %s", self.backend_name)
+        logger.info("Detected kv cache layout %s", self.kv_cache_layout)
 
         # lazy initialized in register_kv_caches
         self.compat_hash: str | None = None
@@ -1047,7 +1047,7 @@ class NixlConnectorWorker:
 
         with zmq_ctx(zmq.REQ, path) as sock:
             for remote_rank in p_remote_ranks:
-                logger.debug(
+                logger.info(
                     "Querying metadata on path: %s at remote tp rank %s",
                     path,
                     remote_rank,
@@ -1072,7 +1072,7 @@ class NixlConnectorWorker:
                     ) from e
 
                 got_metadata_time = time.perf_counter()
-                logger.debug(
+                logger.info(
                     "NIXL handshake: get metadata took: %s",
                     got_metadata_time - start_time,
                 )
@@ -1126,7 +1126,7 @@ class NixlConnectorWorker:
                 remote_agent_name = self.add_remote_agent(
                     metadata, remote_rank, remote_tp_size
                 )
-                logger.debug(
+                logger.info(
                     "NIXL handshake: add agent took: %s",
                     setup_agent_time - got_metadata_time,
                 )
@@ -1198,7 +1198,7 @@ class NixlConnectorWorker:
         meta: ReqMeta | None = None,
         **extra_context,
     ):
-        """Log transfer failure with structured context for easier debugging."""
+        """Log transfer failure with structured context for easier infoging."""
         context: dict[str, Any] = {
             "failure_type": failure_type,
             "request_id": req_id,
@@ -1363,7 +1363,7 @@ class NixlConnectorWorker:
                     self.block_size = kernel_block_size
                     self._block_size[self.engine_id] = kernel_block_size
 
-                logger.debug(
+                logger.info(
                     f"{layer_name=} kv topo block size: {self.kv_topo.block_size_position=}, {self.block_size=}, {cache.shape=}\n\n"
                 )
 
@@ -1397,7 +1397,7 @@ class NixlConnectorWorker:
                     (base_addr, curr_tensor_size_bytes, self.device_id, "")
                 )
 
-        logger.debug(
+        logger.info(
             "Different block lengths collected: %s", set(self.block_len_per_layer)
         )
         assert len(self.block_len_per_layer) == len(seen_base_addresses)
@@ -1408,9 +1408,9 @@ class NixlConnectorWorker:
         self.num_layers = len(xfer_buffers.keys())
 
         descs = self.nixl_wrapper.get_reg_descs(caches_data, self.nixl_memory_type)
-        logger.debug("Registering descs: %s", caches_data)
+        logger.info("Registering descs: %s", caches_data)
         self.nixl_wrapper.register_memory(descs, backends=self.nixl_backends)
-        logger.debug("Done registering descs")
+        logger.info("Done registering descs")
         self._registered_descs.append(descs)
 
         self.device_kv_caches = kv_caches
@@ -1451,7 +1451,7 @@ class NixlConnectorWorker:
                 is_local_attention = no_rope_layers[layer_idx] != 0
                 block_window = chunk_block_size if is_local_attention else None
                 self.block_window_per_layer.append(block_window)
-            logger.debug(
+            logger.info(
                 "Llama 4 block window per layer mapping: %s",
                 self.block_window_per_layer,
             )
@@ -1521,7 +1521,7 @@ class NixlConnectorWorker:
                     # Register addresses for V cache (K registered first).
                     v_addr = addr + kv_block_len
                     blocks_data.append((v_addr, kv_block_len, self.device_id))
-        logger.debug(
+        logger.info(
             "Created %s blocks for src engine %s and rank %s on device id %s",
             len(blocks_data),
             self.engine_id,
@@ -1582,7 +1582,7 @@ class NixlConnectorWorker:
         engine_id = nixl_agent_meta.engine_id
         # TODO re-evaluate refreshing for scaling/recovery
         if remote_tp_rank in self._remote_agents.get(engine_id, {}):
-            logger.debug(
+            logger.info(
                 "Remote agent with engine_id %s and rank"
                 "%s already exchanged metadata, skip handshake.",
                 engine_id,
@@ -1628,7 +1628,7 @@ class NixlConnectorWorker:
             not self.kv_topo.replicates_kv_cache(engine_id) and tp_ratio > 0
         )
 
-        logger.debug(
+        logger.info(
             "Registering remote agent (%s, rank %s) memory regions with tp_ratio %s",
             engine_id,
             remote_tp_rank,
@@ -1703,7 +1703,7 @@ class NixlConnectorWorker:
                         (v_addr, local_block_len, nixl_agent_meta.device_id)
                     )
 
-        logger.debug(
+        logger.info(
             "Created %s blocks for dst engine %s with remote rank %s and local rank %s",
             len(blocks_data),
             engine_id,
@@ -1824,7 +1824,7 @@ class NixlConnectorWorker:
             "h2d",
         )
         if logger.isEnabledFor(logging.DEBUG):
-            logger.debug(
+            logger.info(
                 "synced recved kv of request[%s] to device kv buffer,"
                 "local_block_ids: %s. ",
                 req_id,
@@ -1841,7 +1841,7 @@ class NixlConnectorWorker:
                 meta.local_block_ids
             )
             if logger.isEnabledFor(logging.DEBUG):
-                logger.debug(
+                logger.info(
                     "save_load_kv for request[%s] to host xfer buffer."
                     "local_block_ids: %s. ",
                     req_id,
@@ -1877,19 +1877,19 @@ class NixlConnectorWorker:
         assert block_size_ratio >= 1, "Only nP < nD supported currently."
         assert self.kv_topo is not None
         if self.enable_permute_local_kv and block_size_ratio > 1:
-            logger.debug(
+            logger.info(
                 "Post-processing device kv cache on receive by converting "
                 "block_size with %sx bigger and permuting layout from HND"
                 " to NHD.",
                 block_size_ratio,
             )
         elif self.enable_permute_local_kv:
-            logger.debug(
+            logger.info(
                 "Post-processing device kv cache on receive by permuting layout"
                 "from HND to NHD."
             )
         else:
-            logger.debug(
+            logger.info(
                 "Post-processing device kv cache on receive by converting "
                 "block_size with %sx bigger.",
                 block_size_ratio,
@@ -1929,7 +1929,7 @@ class NixlConnectorWorker:
         self._failed_recv_reqs.clear()
 
         if len(done_sending) > 0 or len(done_recving) > 0:
-            logger.debug(
+            logger.info(
                 "Rank %s, get_finished: %s requests done sending "
                 "and %s requests done recving",
                 self.tp_rank,
@@ -2105,7 +2105,7 @@ class NixlConnectorWorker:
                 meta.remote.block_ids
             )
             remote_engine_id = meta.remote.engine_id
-            logger.debug(
+            logger.info(
                 "start_load_kv for request %s from remote engine %s. "
                 "Num local_block_ids: %s. Num remote_block_ids: %s. ",
                 req_id,
@@ -2163,7 +2163,7 @@ class NixlConnectorWorker:
                 break
 
             remote_block_size = self.kv_topo.remote_block_size[meta.remote.engine_id]
-            logger.debug(
+            logger.info(
                 "Remote agent %s available, calling _read_blocks"
                 " on remote rank %s with remote block size %s for req %s",
                 meta.remote.engine_id,
@@ -2275,7 +2275,7 @@ class NixlConnectorWorker:
 
         # Partial prefix cache hit: just read uncomputed blocks.
         num_remote_blocks = len(remote_block_ids)
-        assert num_local_blocks <= num_remote_blocks
+        assert num_local_blocks <= num_remote_blocks, f"req-id {request_id}, num_local_blocks {num_local_blocks}, num_remote_blocks {num_remote_blocks}"
         if num_local_blocks < num_remote_blocks:
             remote_block_ids = remote_block_ids[-num_local_blocks:]
 
