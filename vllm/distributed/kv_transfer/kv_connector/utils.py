@@ -321,9 +321,11 @@ class TpKVTopology:
     def __post_init__(self):
         # Figure out whether the first dimension of the cache is K/V
         # or num_blocks. This is used to register the memory regions correctly.
+        logger.debug(f"ATTN BACKEND: {self.attn_backend}")
         kv_cache_shape = self.attn_backend.get_kv_cache_shape(
             num_blocks=1, block_size=16, num_kv_heads=4, head_size=1
         )
+        logger.debug(f"TEST kv_cache_shape: {kv_cache_shape}")
         # Non-MLA backends caches have 5 dims [2, num_blocks, H,N,D],
         # we just mock num_blocks to 1 for the dimension check below.
         self._is_kv_layout_blocks_first = (

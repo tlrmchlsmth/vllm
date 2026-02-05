@@ -1363,6 +1363,10 @@ class NixlConnectorWorker:
                     self.block_size = kernel_block_size
                     self._block_size[self.engine_id] = kernel_block_size
 
+                logger.debug(
+                    f"{layer_name=} kv topo block size: {self.kv_topo.block_size_position=}, {self.block_size=}, {cache.shape=}\n\n"
+                )
+
                 seen_base_addresses.append(base_addr)
                 curr_tensor_size_bytes = cache.numel() * cache.element_size()
 
