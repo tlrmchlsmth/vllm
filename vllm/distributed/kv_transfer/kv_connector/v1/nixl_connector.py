@@ -669,8 +669,9 @@ class NixlConnectorScheduler:
     ):
         params = request.kv_transfer_params
         logger.info(
-            "NIXLConnector update_state_after_alloc: "
+            "NIXLConnector update_state_after_alloc: req_id=%s, "
             "num_external_tokens=%s, kv_transfer_params=%s",
+            request.request_id,
             num_external_tokens,
             params,
         )
@@ -708,6 +709,8 @@ class NixlConnectorScheduler:
                         request,
                         local_block_ids,
                     )
+
+                    logger.info(f"NIXLConnector update_state_after_alloc : request_id={request.request_id} local_block_ids {local_block_ids}")
 
                 else:
                     logger.warning(
@@ -1363,7 +1366,7 @@ class NixlConnectorWorker:
                     self._block_size[self.engine_id] = kernel_block_size
 
                 logger.info(
-                    f"{layer_name=} kv topo block size: {self.kv_topo.block_size_position=}, {self.block_size=}, {cache.shape=}\n\n"
+                    f"{layer_name=} kv topo block size: {self.kv_topo.block_size_position=}, {self.block_size=}, {cache.shape=}, {self._physical_blocks_per_logical_kv_block=}\n\n"
                 )
 
                 seen_base_addresses.append(base_addr)
