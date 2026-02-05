@@ -250,7 +250,6 @@ class ReqMeta:
     tp_size: int
     remote: RemoteMeta | None = None
 
-
 class NixlConnectorMetadata(KVConnectorMetadata):
     def __init__(self):
         self.reqs_to_recv: dict[ReqId, ReqMeta] = {}
@@ -2097,6 +2096,11 @@ class NixlConnectorWorker:
         We check for these trnxs to complete in each step().
         """
         for req_id, meta in metadata.reqs_to_recv.items():
+            from dataclasses import asdict
+            logger.info(f"start_kv_load req_id %s | meta %s",
+                        req_id,
+                        asdict(meta))
+
             meta.local_physical_block_ids = self._logical_to_kernel_block_ids(
                 meta.local_block_ids
             )
