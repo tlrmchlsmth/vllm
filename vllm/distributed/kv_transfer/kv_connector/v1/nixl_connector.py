@@ -710,7 +710,7 @@ class NixlConnectorScheduler:
                         local_block_ids,
                     )
 
-                    logger.info(f"NIXLConnector update_state_after_alloc : request_id={request.request_id} local_block_ids {local_block_ids}")
+                    logger.info(f"NIXLConnector update_state_after_alloc : request_id={request.request_id} total-kv-blocks {len(blocks.get_block_ids())} unhashed/local_block_ids {local_block_ids}")
 
                 else:
                     logger.warning(
@@ -791,10 +791,11 @@ class NixlConnectorScheduler:
         params = request.kv_transfer_params
         logger.info(
             "NIXLConnector request_finished(%s), request_status=%s, "
-            "kv_transfer_params=%s",
+            "kv_transfer_params=%s, block_ids=%s",
             request.request_id,
             request.status,
             params,
+            len(block_ids),
         )
         if not params:
             return False, None
