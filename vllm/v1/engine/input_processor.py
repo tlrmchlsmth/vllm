@@ -618,6 +618,8 @@ class InputProcessor:
                     )
                 )
 
+        if prompt_token_ids is not None:
+            logger.info("Request %s len=%s prompt_token_ids=%s prompt=%s", request_id, len(prompt_token_ids), prompt_token_ids, prompt) 
         return EngineCoreRequest(
             request_id=request_id,
             prompt_token_ids=prompt_token_ids,
