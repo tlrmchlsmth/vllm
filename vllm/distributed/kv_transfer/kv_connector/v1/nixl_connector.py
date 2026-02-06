@@ -648,8 +648,9 @@ class NixlConnectorScheduler:
 
         params = request.kv_transfer_params
         logger.info(
-            "NIXLConnector get_num_new_matched_tokens: "
+            "NIXLConnector req-id:%s get_num_new_matched_tokens: "
             "num_computed_tokens=%s, kv_transfer_params=%s",
+            request.request_id,
             num_computed_tokens,
             params,
         )
