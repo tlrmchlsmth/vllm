@@ -19,6 +19,8 @@ fi
 #fi
 
 export PYTORCH_ROCM_ARCH=gfx942
+export GFX_COMPILATION_ARCH="gfx942"
+
 
 ## Check for CX-7 Connectivity ??
 
@@ -70,6 +72,39 @@ clone_repo() {
 
 }
 
+function build_rocshmem_v2() {
+    ROCSHMEM_REPO=https://github.com/abouteiller/rocm-systems.git
+    ROCSHMEM_BRANCH="feature/filter-nics"
+    git clone --no-checkout --filter=blob:none ${ROCSHMEM_REPO} && \
+       cd rocm-systems && \
+       git sparse-checkout set --cone projects/rocshmem && \
+       git checkout develop && \
+       cd projects/rocshmem && \
+       git checkout ${ROCSHMEM_BRANCH} && \
+       mkdir -p rocshmem-build && \
+       cd rocshmem-build && \
+       ../scripts/build_configs/all_backends \
+           -DUSE_EXTERNAL_MPI=OFF \
+           -DGPU_TARGETS=$GFX_COMPILATION_ARCH
+}
+
+function build_deepep_v2() {
+    DEEPEP_BRANCH="main"
+    DEEPEP_REPO="https://github.com/ROCm/DeepEP"
+    #ARG ROCM_TORCH_IDX
+    #RUN --mount=type=cache,target=/root/.cache/uv \
+    #    uv pip install --python /opt/venv/bin/python3 torch torchvision torchaudio --index-url ${ROCM_TORCH_IDX}
+    
+    ARG NIC_COMPILATION_ARCH=cx7
+    git clone -b ${DEEPEP_BRANCH} ${DEEPEP_REPO} && \
+        cd DeepEP && \
+        PYTORCH_ROCM_ARCH=$GFX_COMPILATION_ARCH \
+        CFLAGS="-O3 -fPIC" \
+        CXXFLAGS="-O3 -fPIC --offload-arch=$GFX_COMPILATION_ARCH" \
+        HIP_CXX_FLAGS="-O3 -fPIC" \
+        python3 setup.py --variant rocm --disable-mpi --nic $NIC_COMPILATION_ARCH build develop
+}
+
 function build_rocshmem() {
     ## Install rocSHMEM from https://github.com/ROCm/DeepEP/blob/main/third-party/README.md
 
@@ -114,8 +149,8 @@ function build_deepep() {
 mkdir -p ${WORKSPACE}
 
 pushd ${WORKSPACE}
-build_rocshmem
-build_deepep
+build_rocshmem_v2
+build_deepep_v2
 popd 
 
 
