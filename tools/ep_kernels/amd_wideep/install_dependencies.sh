@@ -91,7 +91,7 @@ function build_rocshmem_v2() {
 function build_deepep_v2() {
     DEEPEP_BRANCH="main"
     DEEPEP_REPO="https://github.com/ROCm/DeepEP"
-    ARG NIC_COMPILATION_ARCH=cx7
+    NIC_COMPILATION_ARCH=cx7
     git clone -b ${DEEPEP_BRANCH} ${DEEPEP_REPO} && \
         cd DeepEP && \
         PYTORCH_ROCM_ARCH=$GFX_COMPILATION_ARCH \
