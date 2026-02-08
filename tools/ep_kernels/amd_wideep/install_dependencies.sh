@@ -91,10 +91,6 @@ function build_rocshmem_v2() {
 function build_deepep_v2() {
     DEEPEP_BRANCH="main"
     DEEPEP_REPO="https://github.com/ROCm/DeepEP"
-    #ARG ROCM_TORCH_IDX
-    #RUN --mount=type=cache,target=/root/.cache/uv \
-    #    uv pip install --python /opt/venv/bin/python3 torch torchvision torchaudio --index-url ${ROCM_TORCH_IDX}
-    
     ARG NIC_COMPILATION_ARCH=cx7
     git clone -b ${DEEPEP_BRANCH} ${DEEPEP_REPO} && \
         cd DeepEP && \
