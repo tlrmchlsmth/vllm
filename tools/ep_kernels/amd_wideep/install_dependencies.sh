@@ -98,7 +98,7 @@ function build_deepep_v2() {
         CFLAGS="-O3 -fPIC" \
         CXXFLAGS="-O3 -fPIC --offload-arch=$GFX_COMPILATION_ARCH" \
         HIP_CXX_FLAGS="-O3 -fPIC" \
-        python3 setup.py --variant rocm --disable-mpi --nic $NIC_COMPILATION_ARCH build develop
+        python3 setup.py --variant rocm --nic $NIC_COMPILATION_ARCH build develop
 }
 
 function build_rocshmem() {
