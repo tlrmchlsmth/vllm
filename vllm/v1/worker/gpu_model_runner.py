@@ -2641,6 +2641,7 @@ class GPUModelRunner(
         """
         Step for the EPLB (Expert Parallelism Load Balancing) state.
         """
+        print("doing eplb ...")
         if not self.parallel_config.enable_eplb:
             return
 
@@ -2657,6 +2658,7 @@ class GPUModelRunner(
             is_profile,
             log_stats=self.parallel_config.eplb_config.log_balancedness,
         )
+        print("eplb done ...")
 
     def _pool(
         self,
