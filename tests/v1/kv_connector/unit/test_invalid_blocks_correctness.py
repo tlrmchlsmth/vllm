@@ -179,6 +179,93 @@ def test_sync_recompute_blocks_not_freed_for_running_requests(
     ), "Request should be reschedulable for recomputation"
 
 
+def test_sync_recompute_shared_blocks_updates_external_computed_tokens(
+    recompute_scheduler: Scheduler,
+):
+    """
+    Test that num_external_computed_tokens is properly updated when all
+    invalid blocks are shared with previous requests.
+
+    Regression test: When two requests share invalid blocks and only the first
+    request marks them for recomputation, the second request takes the
+    `not marked_invalid_block` path in _update_requests_with_invalid_blocks.
+    Previously, this path did not update num_external_computed_tokens, causing
+    the invariant (num_cached_tokens >= num_external_computed_tokens) to break.
+    This led to negative values in PromptTokenStats.local_cache_hit, crashing
+    Prometheus counters with "Counters can only be incremented by non-negative
+    amounts."
+    """
+    block_size = recompute_scheduler.block_size
+
+    # Create two requests with a shared prefix so they share blocks
+    num_prompt_tokens = 100 * block_size
+    num_external_computed_tokens = 99 * block_size
+    common_prefix_len = 60 * block_size  # 60 blocks of shared prefix
+
+    request1 = create_request(
+        num_tokens=num_prompt_tokens,
+        common_prefix_len=common_prefix_len,
+    )
+    request2 = create_request(
+        num_tokens=num_prompt_tokens,
+        common_prefix_len=common_prefix_len,
+    )
+    recompute_scheduler.add_request(request=request1)
+    recompute_scheduler.add_request(request=request2)
+
+    req_num_new_matched_tokens = {
+        request1.request_id: num_external_computed_tokens,
+        request2.request_id: num_external_computed_tokens,
+    }
+
+    recompute_scheduler.connector = Mock()
+    recompute_scheduler.connector.get_num_new_matched_tokens.side_effect = (
+        _make_get_num_new_matched_tokens(req_num_new_matched_tokens, False)
+    )
+    recompute_scheduler.connector.request_finished.return_value = (False, None)
+    recompute_scheduler.connector.take_events.return_value = ()
+
+    scheduler_output = recompute_scheduler.schedule()
+
+    assert len(recompute_scheduler.running) == 2
+
+    # Pick a shared block in the common prefix as the invalid block
+    req1_block_ids = scheduler_output.scheduled_new_reqs[0].block_ids[0]
+    req2_block_ids = scheduler_output.scheduled_new_reqs[1].block_ids[0]
+    # Use a block in the shared prefix region
+    shared_invalid_idx = 30
+    assert req1_block_ids[shared_invalid_idx] == req2_block_ids[shared_invalid_idx], (
+        "Block should be shared between requests"
+    )
+    invalid_block_ids = {req1_block_ids[shared_invalid_idx]}
+
+    model_runner_output = create_model_runner_output(
+        [request1, request2],
+        invalid_block_ids=invalid_block_ids,
+        use_eos=False,
+    )
+
+    recompute_scheduler.update_from_output(
+        scheduler_output, model_runner_output
+    )
+
+    # The critical assertion: num_external_computed_tokens must not exceed
+    # num_cached_tokens for either request, otherwise PromptTokenStats
+    # will produce negative local_cache_hit values.
+    for req in [request1, request2]:
+        assert req.num_external_computed_tokens >= 0, (
+            f"Request {req.request_id}: "
+            f"num_external_computed_tokens={req.num_external_computed_tokens} "
+            f"should be non-negative"
+        )
+        assert req.num_cached_tokens >= req.num_external_computed_tokens, (
+            f"Request {req.request_id}: "
+            f"num_cached_tokens={req.num_cached_tokens} must be >= "
+            f"num_external_computed_tokens={req.num_external_computed_tokens}. "
+            f"Violation causes negative local_cache_hit in metrics."
+        )
+
+
 def test_sync_fail_invalid_blocks_evicted(fail_scheduler: Scheduler):
     """
     Test sync fail case - invalid blocks must be evicted from cache.

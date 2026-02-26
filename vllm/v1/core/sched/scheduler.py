@@ -2135,8 +2135,14 @@ class Scheduler(SchedulerInterface):
                     # Revert to considering only cached tokens as computed.
                     # Currently this only applies to sync loading; Async
                     # loading does not yet support block sharing
-                    total_affected_tokens += (
+                    num_affected_tokens = (
                         request.num_computed_tokens - request.num_cached_tokens
+                    )
+                    total_affected_tokens += num_affected_tokens
+                    request.num_external_computed_tokens = max(
+                        0,
+                        request.num_external_computed_tokens
+                        - num_affected_tokens,
                     )
                     request.num_computed_tokens = request.num_cached_tokens
 
