@@ -1385,14 +1385,14 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         replace_parameter(layer, "w2_weight_scale_2", w2_scale_2)
         replace_parameter(layer, "w2_input_scale", a2_scale)
 
-        # Pre-compute g1/g2 alphas as registered parameters so EPLB
-        # rearranges them alongside expert weights. Without this, the
-        # quant config caches g1_alphas = a_scale * w_scale_2 once at
-        # init, and EPLB's in-place rearrangement of w_scale_2 leaves
-        # the cached product stale, corrupting dequantization.
+        # Pre-compute derived scale products as registered parameters so
+        # EPLB rearranges them alongside expert weights. Without this, the
+        # quant config caches these once at init, and EPLB's in-place
+        # rearrangement leaves the cached values stale, corrupting
+        # dequantization.
         #
         # Use direct Parameter assignment (not replace_parameter) because
-        # g1_alphas/g2_alphas are not pre-registered in create_weights.
+        # these are not pre-registered in create_weights.
         if self.nvfp4_backend not in (
             NvFp4MoeBackend.FLASHINFER_TRTLLM,
             NvFp4MoeBackend.MARLIN,
@@ -1402,6 +1402,17 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             )
             layer.g2_alphas = torch.nn.Parameter(
                 (a2_scale * w2_scale_2).contiguous(), requires_grad=False
+            )
+            # a1/a2_gscale = 1/activation_scale. These are per-expert when
+            # global SF is not supported (e.g. VLLM_CUTLASS backend).
+            # Without registering them, EPLB rearranges experts but the
+            # quant config's stale gscale values apply the wrong activation
+            # scale inverse to each expert.
+            layer.a1_gscale = torch.nn.Parameter(
+                (1.0 / a13_scale).contiguous(), requires_grad=False
+            )
+            layer.a2_gscale = torch.nn.Parameter(
+                (1.0 / a2_scale).contiguous(), requires_grad=False
             )
 
         # Setup modular kernel for TP case and naive DP/EP case.
@@ -1429,6 +1440,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             a2_scale=layer.w2_input_scale,
             g1_alphas=getattr(layer, "g1_alphas", None),
             g2_alphas=getattr(layer, "g2_alphas", None),
+            a1_gscale=getattr(layer, "a1_gscale", None),
+            a2_gscale=getattr(layer, "a2_gscale", None),
         )
         assert result is not None
         return result
