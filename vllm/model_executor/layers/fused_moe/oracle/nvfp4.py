@@ -367,6 +367,8 @@ def make_nvfp4_moe_quant_config(
     a2_scale: torch.Tensor,
     g1_alphas: torch.Tensor | None = None,
     g2_alphas: torch.Tensor | None = None,
+    a1_gscale: torch.Tensor | None = None,
+    a2_gscale: torch.Tensor | None = None,
 ) -> FusedMoEQuantConfig:
     if backend == NvFp4MoeBackend.MARLIN:
         return nvfp4_w4a16_moe_quant_config(
@@ -380,11 +382,15 @@ def make_nvfp4_moe_quant_config(
         g1_alphas = a13_scale * w13_scale_2
     if g2_alphas is None:
         g2_alphas = a2_scale * w2_scale_2
+    if a1_gscale is None:
+        a1_gscale = 1.0 / a13_scale
+    if a2_gscale is None:
+        a2_gscale = 1.0 / a2_scale
     return nvfp4_moe_quant_config(
         g1_alphas=g1_alphas,
         g2_alphas=g2_alphas,
-        a1_gscale=(1.0 / a13_scale),
-        a2_gscale=(1.0 / a2_scale),
+        a1_gscale=a1_gscale,
+        a2_gscale=a2_gscale,
         w1_scale=w13_scale,
         w2_scale=w2_scale,
         # NOTE(rob): this is a hack until the MoE kernels
