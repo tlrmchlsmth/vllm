@@ -215,15 +215,27 @@ _NAN_DETECT = os.environ.get("VLLM_NAN_DETECT", "0") == "1"
 _NAN_LABELS = ["input_layernorm", "self_attn", "post_attn_layernorm", "mlp"]
 
 
+_nan_check_count = 0
+
+
 def _check_nan_detect_buf() -> None:
+    global _nan_check_count
     if not _NAN_DETECT:
         return
     from vllm.model_executor.models.deepseek_v2 import get_nan_detect_buf
     buf = get_nan_detect_buf()
+    _nan_check_count += 1
     if buf is None:
+        if _nan_check_count <= 3 or _nan_check_count % 1000 == 0:
+            logger.warning("NaN check #%d: buf is None", _nan_check_count)
         return
     flags = buf.cpu()
     nan_locs = flags.nonzero(as_tuple=False)
+    if _nan_check_count <= 3 or _nan_check_count % 1000 == 0:
+        logger.warning(
+            "NaN check #%d: buf shape=%s, sum=%d",
+            _nan_check_count, list(buf.shape), flags.sum().item(),
+        )
     if len(nan_locs) > 0:
         first = nan_locs[0]
         layer_idx, col = first[0].item(), first[1].item()
@@ -4654,6 +4666,19 @@ class GPUModelRunner(
             compilation_counter.stock_torch_compile_count += 1
             self.model.compile(fullgraph=True, backend=backend)
             return
+        # Initialize NaN detection buffer outside CUDA graph capture.
+        if _NAN_DETECT:
+            from vllm.model_executor.models.deepseek_v2 import (
+                _init_nan_detect_buf,
+            )
+            num_layers = getattr(
+                self.model_config.hf_config, "num_hidden_layers", 0
+            )
+            if num_layers > 0:
+                _init_nan_detect_buf(num_layers, self.device)
+                logger.info("NaN detection buffer initialized: %d layers",
+                            num_layers)
+
         # for other compilation modes, cudagraph behavior is controlled by
         # CudagraphWrapper and CudagraphDispatcher of vllm.
 
