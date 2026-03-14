@@ -4,6 +4,7 @@
 import functools
 import gc
 import itertools
+import os
 import threading
 import time
 from collections import defaultdict
@@ -209,6 +210,35 @@ if TYPE_CHECKING:
     from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 
 logger = init_logger(__name__)
+
+_NAN_DETECT = os.environ.get("VLLM_NAN_DETECT", "0") == "1"
+_NAN_LABELS = ["input_layernorm", "self_attn", "post_attn_layernorm", "mlp"]
+
+
+def _check_nan_detect_buf() -> None:
+    if not _NAN_DETECT:
+        return
+    from vllm.model_executor.models.deepseek_v2 import get_nan_detect_buf
+    buf = get_nan_detect_buf()
+    if buf is None:
+        return
+    flags = buf.cpu()
+    nan_locs = flags.nonzero(as_tuple=False)
+    if len(nan_locs) > 0:
+        first = nan_locs[0]
+        layer_idx, col = first[0].item(), first[1].item()
+        label = _NAN_LABELS[col]
+        total_nans = len(nan_locs)
+        logger.error(
+            "NaN DETECTED: first at layer %d after %s "
+            "(%d total NaN locations across all layers). "
+            "All NaN locations: %s",
+            layer_idx,
+            label,
+            total_nans,
+            [(r[0].item(), _NAN_LABELS[r[1].item()]) for r in nan_locs],
+        )
+
 
 AttnMetadataDict: TypeAlias = dict[str, AttentionMetadata]
 # list when ubatching is enabled
@@ -3791,6 +3821,8 @@ class GPUModelRunner(
                 inputs_embeds=inputs_embeds,
                 **model_kwargs,
             )
+
+        _check_nan_detect_buf()
 
         with record_function_or_nullcontext("gpu_model_runner: postprocess"):
             if self.use_aux_hidden_state_outputs:
