@@ -567,7 +567,7 @@ class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
             return
 
         self.cleanup()
-        gpus_per_node = torch.cuda.device_count()
+        gpus_per_node = torch.accelerator.device_count()
         logger.debug(
             "Making One-sided NVLink mapping: rank=%d, world size=%d",
             self.rank,
