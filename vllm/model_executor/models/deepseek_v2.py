@@ -103,6 +103,108 @@ from .utils import (
 
 logger = init_logger(__name__)
 
+# --- NaN detection v2 (real vs padding, Triton kernel) ---
+import os as _os
+import triton
+import triton.language as tl
+_NAN_DETECT = _os.environ.get("VLLM_NAN_DETECT", "0") == "1"
+_nan_detect_buf: torch.Tensor | None = None
+_nan_num_real_tokens: torch.Tensor | None = None
+
+
+@triton.jit
+def _nan_check_kernel(
+    t_ptr, out_ptr, nreal_ptr,
+    row_size,
+    total_elems,
+    BLOCK_SIZE: tl.constexpr,
+):
+    num_real_elems = tl.load(nreal_ptr).to(tl.int64) * row_size
+    pid = tl.program_id(0)
+    offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    valid = offs < total_elems
+    vals = tl.load(t_ptr + offs, mask=valid, other=0.0).to(tl.float32)
+    is_nan = vals != vals
+    is_inf = tl.abs(vals) == float('inf')
+    is_real = offs < num_real_elems
+    is_pad = valid & ~is_real
+    r_nan = tl.sum((is_nan & is_real).to(tl.int32))
+    r_inf = tl.sum((is_inf & is_real).to(tl.int32))
+    p_nan = tl.sum((is_nan & is_pad).to(tl.int32))
+    p_inf = tl.sum((is_inf & is_pad).to(tl.int32))
+    real_flag = tl.where(r_nan > 0, 1, 0) + tl.where(r_inf > 0, 2, 0)
+    pad_flag = tl.where(p_nan > 0, 1, 0) + tl.where(p_inf > 0, 2, 0)
+    if real_flag > 0:
+        tl.atomic_or(out_ptr, real_flag)
+    if pad_flag > 0:
+        tl.atomic_or(out_ptr + 1, pad_flag)
+
+
+def _nan_check_impl(
+    t: torch.Tensor, out: torch.Tensor,
+    nreal: torch.Tensor, row_size: int,
+) -> None:
+    t_flat = t.contiguous().view(-1)
+    total_elems = t_flat.numel()
+    out.zero_()
+    BLOCK_SIZE = 1024
+    grid = (triton.cdiv(total_elems, BLOCK_SIZE),)
+    _nan_check_kernel[grid](
+        t_flat, out, nreal, row_size, total_elems,
+        BLOCK_SIZE=BLOCK_SIZE,
+    )
+
+
+def _nan_check_fake(
+    t: torch.Tensor, out: torch.Tensor,
+    nreal: torch.Tensor, row_size: int,
+) -> None:
+    pass
+
+
+if _NAN_DETECT:
+    direct_register_custom_op(
+        op_name="nan_check",
+        op_func=_nan_check_impl,
+        mutates_args=["out"],
+        fake_impl=_nan_check_fake,
+    )
+
+
+def _init_nan_detect_buf(
+    num_layers: int, max_num_tokens: int, device: torch.device,
+) -> None:
+    global _nan_detect_buf, _nan_num_real_tokens
+    if _NAN_DETECT and _nan_detect_buf is None:
+        _nan_detect_buf = torch.zeros(
+            num_layers, 8, dtype=torch.int32, device=device,
+        )
+        _nan_num_real_tokens = torch.zeros(1, dtype=torch.int64, device=device)
+        logger.warning("NaN detect v2 initialized: buf=[%d,8]", num_layers)
+
+
+def set_nan_num_real_tokens(num_real: int) -> None:
+    if _nan_num_real_tokens is not None:
+        _nan_num_real_tokens[0] = num_real
+
+
+def _mark_nan(t: torch.Tensor, layer_idx: int, col: int) -> None:
+    if _nan_detect_buf is not None and _nan_num_real_tokens is not None:
+        out = _nan_detect_buf[layer_idx, col * 2 : col * 2 + 2]
+        row_size = 1
+        for i in range(1, t.ndim):
+            row_size *= t.shape[i]
+        torch.ops.vllm.nan_check(t, out, _nan_num_real_tokens, row_size)
+
+
+def get_nan_detect_buf() -> torch.Tensor | None:
+    return _nan_detect_buf
+
+
+def get_nan_num_real_tokens() -> torch.Tensor | None:
+    return _nan_num_real_tokens
+# --- end NaN detection v2 ---
+
 
 class DeepseekAttention(nn.Module):
     """Normal MHA implementation used by Deepseek v1."""
@@ -1088,6 +1190,11 @@ class DeepseekV2DecoderLayer(nn.Module):
             config.hidden_size, eps=config.rms_norm_eps
         )
         self.routed_scaling_factor = getattr(config, "routed_scaling_factor", 1.0)
+        # NaN detection v2: propagate layer_idx to MLA wrapper
+        if _NAN_DETECT:
+            for child in self.self_attn.modules():
+                if child.__class__.__name__ == 'MultiHeadLatentAttentionWrapper':
+                    child._cached_nan_layer_idx = self.layer_idx
 
     def forward(
         self,
@@ -1100,8 +1207,11 @@ class DeepseekV2DecoderLayer(nn.Module):
         if residual is None:
             residual = hidden_states.clone()
             hidden_states = self.input_layernorm(hidden_states)
+            _mark_nan(hidden_states, self.layer_idx, 0)
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
+
+            _mark_nan(hidden_states, self.layer_idx, 0)
 
         attn_kwargs = {
             "positions": positions,
@@ -1110,6 +1220,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         if not self.use_mha:
             attn_kwargs["llama_4_scaling"] = llama_4_scaling
         hidden_states = self.self_attn(**attn_kwargs)
+        _mark_nan(hidden_states, self.layer_idx, 1)
 
         if (
             not isinstance(self.self_attn, DeepseekAttention)
@@ -1126,7 +1237,9 @@ class DeepseekV2DecoderLayer(nn.Module):
 
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
+        _mark_nan(hidden_states, self.layer_idx, 2)
         hidden_states = self.mlp(hidden_states)
+        _mark_nan(hidden_states, self.layer_idx, 3)
 
         if isinstance(self.mlp, DeepseekV2MLP) and hidden_states.dtype == torch.float16:
             # Fix FP16 overflow

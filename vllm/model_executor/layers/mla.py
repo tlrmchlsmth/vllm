@@ -30,6 +30,39 @@ class MLAModules:
 
 
 # --8<-- [start:multi_head_latent_attention]
+
+# --- NaN detection v2 (real vs padding) for MLA ---
+import os as _os
+_NAN_DETECT = _os.environ.get("VLLM_NAN_DETECT", "0") == "1"
+_mla_nan_buf: torch.Tensor | None = None
+
+
+def _mla_mark(t: torch.Tensor, layer_idx: int, col: int) -> None:
+    global _mla_nan_buf
+    if _mla_nan_buf is not None and layer_idx >= 0:
+        from vllm.model_executor.models.deepseek_v2 import get_nan_num_real_tokens
+        nreal = get_nan_num_real_tokens()
+        if nreal is None:
+            return
+        out = _mla_nan_buf[layer_idx, col * 2 : col * 2 + 2]
+        row_size = 1
+        for i in range(1, t.ndim):
+            row_size *= t.shape[i]
+        torch.ops.vllm.nan_check(t, out, nreal, row_size)
+
+
+def init_mla_nan_buf(num_layers: int, device) -> None:
+    global _mla_nan_buf
+    if _NAN_DETECT and _mla_nan_buf is None:
+        _mla_nan_buf = torch.zeros(
+            num_layers, 20, dtype=torch.int32, device=device
+        )
+
+
+def get_mla_nan_buf() -> torch.Tensor | None:
+    return _mla_nan_buf
+# --- end NaN detection v2 ---
+
 @PluggableLayer.register("multi_head_latent_attention")
 class MultiHeadLatentAttentionWrapper(PluggableLayer):
     """Pluggable MLA layer which allows OOT backends to add
@@ -110,6 +143,10 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
 
         self.prefix = prefix
 
+    @property
+    def _nan_layer_idx(self):
+        return getattr(self, "_cached_nan_layer_idx", -1)
+
     def forward(
         self,
         positions: torch.Tensor,
@@ -131,12 +168,15 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             )
 
             qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
+            _mla_mark(qkv_lora, self._nan_layer_idx, 0)
             q_c, kv_lora = qkv_lora.split(
                 [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
                 dim=-1,
             )
             q_c = self.q_a_layernorm(q_c)
+            _mla_mark(q_c, self._nan_layer_idx, 1)
             q = self.q_b_proj(q_c)[0]
+            _mla_mark(q, self._nan_layer_idx, 2)
         else:
             assert self.kv_a_proj_with_mqa is not None, (
                 "kv_a_proj_with_mqa is required when q_lora_rank is None"
@@ -148,7 +188,10 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             q = self.q_proj(hidden_states)[0]
 
         kv_c, k_pe = kv_lora.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+        _mla_mark(kv_c, self._nan_layer_idx, 3)
+        _mla_mark(k_pe, self._nan_layer_idx, 4)
         kv_c_normed = self.kv_a_layernorm(kv_c)
+        _mla_mark(kv_c_normed, self._nan_layer_idx, 5)
 
         q = q.view(-1, self.num_heads, self.qk_head_dim)
         # Add head dim of 1 to k_pe
@@ -158,6 +201,8 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             q[..., self.qk_nope_head_dim :], k_pe = self.rotary_emb(
                 positions, q[..., self.qk_nope_head_dim :], k_pe
             )
+            _mla_mark(q, self._nan_layer_idx, 6)
+            _mla_mark(k_pe, self._nan_layer_idx, 7)
 
         if self.indexer and self.is_sparse:
             _topk_indices = self.indexer(
@@ -173,5 +218,8 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             k_pe,
             output_shape=(hidden_states.shape[0], self.num_heads * self.v_head_dim),
         )
+        _mla_mark(attn_out, self._nan_layer_idx, 8)
 
-        return self.o_proj(attn_out)[0]
+        _o_out = self.o_proj(attn_out)[0]
+        _mla_mark(_o_out, self._nan_layer_idx, 9)
+        return _o_out

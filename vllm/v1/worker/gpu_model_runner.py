@@ -210,6 +210,121 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+# --- NaN detection v2 ---
+import os as _nan_os
+_NAN_DETECT = _nan_os.environ.get("VLLM_NAN_DETECT", "0") == "1"
+_NAN_LABELS = ["input_layernorm", "self_attn", "post_attn_layernorm", "mlp"]
+_nan_check_count = 0
+
+
+def _check_nan_detect_buf() -> None:
+    global _nan_check_count
+    if not _NAN_DETECT:
+        return
+    from vllm.model_executor.models.deepseek_v2 import get_nan_detect_buf
+    buf = get_nan_detect_buf()
+    _nan_check_count += 1
+    if buf is None:
+        if _nan_check_count <= 3 or _nan_check_count % 1000 == 0:
+            logger.warning("NaN check #%d: buf is None", _nan_check_count)
+        return
+    flags = buf.cpu()
+    _KIND = {0: "clean", 1: "NaN", 2: "Inf", 3: "NaN+Inf"}
+
+    def _decode(layer, checkpoint):
+        real_v = flags[layer, checkpoint * 2].item()
+        pad_v = flags[layer, checkpoint * 2 + 1].item()
+        lbl = _NAN_LABELS[checkpoint] if checkpoint < len(_NAN_LABELS) else f"ckpt{checkpoint}"
+        return (layer, lbl, f"real={_KIND.get(real_v, '?')}", f"pad={_KIND.get(pad_v, '?')}")
+
+    real_cols = flags[:, 0::2]
+    pad_cols = flags[:, 1::2]
+    real_locs = real_cols.nonzero(as_tuple=False)
+    pad_locs = pad_cols.nonzero(as_tuple=False)
+    periodic = _nan_check_count <= 3 or _nan_check_count % 1000 == 0
+
+    if periodic:
+        logger.warning(
+            "NaN check #%d: buf shape=%s, real_sum=%d, pad_sum=%d",
+            _nan_check_count, list(buf.shape),
+            real_cols.sum().item(), pad_cols.sum().item(),
+        )
+
+    if len(real_locs) > 0:
+        first = real_locs[0]
+        layer_idx, col = first[0].item(), first[1].item()
+        label = _NAN_LABELS[col] if col < len(_NAN_LABELS) else f"ckpt{col}"
+        logger.error(
+            "*** REAL TOKEN NaN/Inf DETECTED *** first at layer %d after %s "
+            "(%d checkpoint locations). Details: %s",
+            layer_idx, label, len(real_locs),
+            [_decode(r[0].item(), r[1].item()) for r in real_locs],
+        )
+
+    if len(pad_locs) > 0:
+        first = pad_locs[0]
+        layer_idx, col = first[0].item(), first[1].item()
+        label = _NAN_LABELS[col] if col < len(_NAN_LABELS) else f"ckpt{col}"
+        if len(real_locs) > 0:
+            logger.warning(
+                "PADDING NaN/Inf at layer %d after %s (%d locations)",
+                layer_idx, label, len(pad_locs),
+            )
+        elif periodic:
+            logger.warning(
+                "PADDING-ONLY NaN/Inf at layer %d after %s "
+                "(%d locations, no real token NaN). Details: %s",
+                layer_idx, label, len(pad_locs),
+                [_decode(r[0].item(), r[1].item()) for r in pad_locs[:10]],
+            )
+
+    # MLA sub-op buffer
+    from vllm.model_executor.layers.mla import get_mla_nan_buf
+    mla_buf = get_mla_nan_buf()
+    if mla_buf is None:
+        return
+    mla_flags = mla_buf.cpu()
+    _MLA_LABELS = [
+        "fused_qkv_a", "q_a_ln", "q_b_proj", "kv_c", "k_pe",
+        "kv_a_ln", "rope_q", "rope_kpe", "attn_kernel", "o_proj",
+    ]
+    mla_real = mla_flags[:, 0::2]
+    mla_pad = mla_flags[:, 1::2]
+    mla_real_locs = mla_real.nonzero(as_tuple=False)
+    mla_pad_locs = mla_pad.nonzero(as_tuple=False)
+
+    def _mla_decode(layer, sub_op):
+        real_v = mla_flags[layer, sub_op * 2].item()
+        pad_v = mla_flags[layer, sub_op * 2 + 1].item()
+        lbl = _MLA_LABELS[sub_op] if sub_op < len(_MLA_LABELS) else f"op{sub_op}"
+        return (layer, lbl, f"real={_KIND.get(real_v, '?')}", f"pad={_KIND.get(pad_v, '?')}")
+
+    if len(mla_real_locs) > 0:
+        ml, mc = mla_real_locs[0][0].item(), mla_real_locs[0][1].item()
+        mlabel = _MLA_LABELS[mc] if mc < len(_MLA_LABELS) else f"op{mc}"
+        logger.error(
+            "*** MLA REAL TOKEN NaN/Inf *** first at layer %d after %s "
+            "(%d sub-op locations). First 10: %s",
+            ml, mlabel, len(mla_real_locs),
+            [_mla_decode(r[0].item(), r[1].item()) for r in mla_real_locs[:10]],
+        )
+
+    if len(mla_pad_locs) > 0:
+        ml, mc = mla_pad_locs[0][0].item(), mla_pad_locs[0][1].item()
+        mlabel = _MLA_LABELS[mc] if mc < len(_MLA_LABELS) else f"op{mc}"
+        logger.warning(
+            "MLA PADDING NaN/Inf at layer %d after %s (%d locations)%s",
+            ml, mlabel, len(mla_pad_locs),
+            "" if len(mla_real_locs) > 0 else " [no real token NaN]",
+        )
+
+    if periodic and len(mla_real_locs) == 0 and len(mla_pad_locs) == 0:
+        logger.warning(
+            "MLA NaN check #%d: real_sum=%d, pad_sum=%d",
+            _nan_check_count, mla_real.sum().item(), mla_pad.sum().item(),
+        )
+# --- end NaN detection v2 ---
+
 AttnMetadataDict: TypeAlias = dict[str, AttentionMetadata]
 # list when ubatching is enabled
 PerLayerAttnMetadata: TypeAlias = list[AttnMetadataDict] | AttnMetadataDict
@@ -3809,6 +3924,11 @@ class GPUModelRunner(
                 defer_finalize=defer_kv_connector_finalize,
             ) as kv_connector_output,
         ):
+            # NaN detection v2: update real/padding mask
+            if _NAN_DETECT:
+                from vllm.model_executor.models.deepseek_v2 import set_nan_num_real_tokens
+                set_nan_num_real_tokens(num_tokens_unpadded)
+
             model_output = self._model_forward(
                 input_ids=input_ids,
                 positions=positions,
@@ -3816,6 +3936,8 @@ class GPUModelRunner(
                 inputs_embeds=inputs_embeds,
                 **model_kwargs,
             )
+
+        _check_nan_detect_buf()
 
         with record_function_or_nullcontext("gpu_model_runner: postprocess"):
             if self.use_aux_hidden_state_outputs:
@@ -4594,6 +4716,14 @@ class GPUModelRunner(
             time_after_load - time_before_load,
             scope="local",
         )
+        # NaN detection v2: init buffers
+        if _NAN_DETECT:
+            from vllm.model_executor.models.deepseek_v2 import _init_nan_detect_buf
+            from vllm.model_executor.layers.mla import init_mla_nan_buf
+            _num_layers = self.model_config.hf_config.num_hidden_layers
+            _init_nan_detect_buf(_num_layers, self.max_num_tokens, self.device)
+            init_mla_nan_buf(_num_layers, self.device)
+            logger.warning("NaN detect v2: buffers initialized")
         if not load_dummy_weights:
             prepare_communication_buffer_for_model(self.model)
             if (drafter := getattr(self, "drafter", None)) and (
