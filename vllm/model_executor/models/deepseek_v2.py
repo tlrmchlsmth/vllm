@@ -147,9 +147,7 @@ def _nan_check_impl(
 ) -> None:
     t_flat = t.reshape(-1)
     total_elems = t_flat.numel()
-    # Zero just the two flag slots
-    buf[buf_offset] = 0
-    buf[buf_offset + 1] = 0
+    # NOTE: buf must be zeroed BEFORE cuda graph capture, not here.
     BLOCK_SIZE = 1024
     grid = (triton.cdiv(total_elems, BLOCK_SIZE),)
     _nan_check_kernel[grid](

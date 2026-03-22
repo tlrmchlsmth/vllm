@@ -3924,10 +3924,20 @@ class GPUModelRunner(
                 defer_finalize=defer_kv_connector_finalize,
             ) as kv_connector_output,
         ):
-            # NaN detection v2: update real/padding mask
+            # NaN detection v2: update num_real and zero flag buffers
+            # Must happen BEFORE _model_forward / CUDA graph replay
             if _NAN_DETECT:
-                from vllm.model_executor.models.deepseek_v2 import set_nan_num_real_tokens
+                from vllm.model_executor.models.deepseek_v2 import (
+                    get_nan_detect_buf, set_nan_num_real_tokens,
+                )
+                from vllm.model_executor.layers.mla import get_mla_nan_buf
                 set_nan_num_real_tokens(num_tokens_unpadded)
+                _buf = get_nan_detect_buf()
+                if _buf is not None:
+                    _buf.zero_()
+                _mbuf = get_mla_nan_buf()
+                if _mbuf is not None:
+                    _mbuf.zero_()
 
             model_output = self._model_forward(
                 input_ids=input_ids,
