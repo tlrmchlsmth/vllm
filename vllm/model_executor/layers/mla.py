@@ -44,11 +44,12 @@ def _mla_mark(t: torch.Tensor, layer_idx: int, col: int) -> None:
         nreal = get_nan_num_real_tokens()
         if nreal is None:
             return
-        out = _mla_nan_buf[layer_idx, col * 2 : col * 2 + 2]
+        buf_flat = _mla_nan_buf.view(-1)
+        buf_offset = layer_idx * _mla_nan_buf.shape[1] + col * 2
         row_size = 1
         for i in range(1, t.ndim):
             row_size *= t.shape[i]
-        torch.ops.vllm.nan_check(t, out, nreal, row_size)
+        torch.ops.vllm.nan_check(t, buf_flat, nreal, buf_offset, row_size)
 
 
 def init_mla_nan_buf(num_layers: int, device) -> None:

@@ -114,7 +114,8 @@ _nan_num_real_tokens: torch.Tensor | None = None
 
 @triton.jit
 def _nan_check_kernel(
-    t_ptr, out_ptr, nreal_ptr,
+    t_ptr, buf_ptr, nreal_ptr,
+    buf_offset,
     row_size,
     total_elems,
     BLOCK_SIZE: tl.constexpr,
@@ -135,29 +136,31 @@ def _nan_check_kernel(
     real_flag = tl.where(r_nan > 0, 1, 0) + tl.where(r_inf > 0, 2, 0)
     pad_flag = tl.where(p_nan > 0, 1, 0) + tl.where(p_inf > 0, 2, 0)
     if real_flag > 0:
-        tl.atomic_or(out_ptr, real_flag)
+        tl.atomic_or(buf_ptr + buf_offset, real_flag)
     if pad_flag > 0:
-        tl.atomic_or(out_ptr + 1, pad_flag)
+        tl.atomic_or(buf_ptr + buf_offset + 1, pad_flag)
 
 
 def _nan_check_impl(
-    t: torch.Tensor, out: torch.Tensor,
-    nreal: torch.Tensor, row_size: int,
+    t: torch.Tensor, buf: torch.Tensor,
+    nreal: torch.Tensor, buf_offset: int, row_size: int,
 ) -> None:
-    t_flat = t.contiguous().view(-1)
+    t_flat = t.reshape(-1)
     total_elems = t_flat.numel()
-    out.zero_()
+    # Zero just the two flag slots
+    buf[buf_offset] = 0
+    buf[buf_offset + 1] = 0
     BLOCK_SIZE = 1024
     grid = (triton.cdiv(total_elems, BLOCK_SIZE),)
     _nan_check_kernel[grid](
-        t_flat, out, nreal, row_size, total_elems,
+        t_flat, buf, nreal, buf_offset, row_size, total_elems,
         BLOCK_SIZE=BLOCK_SIZE,
     )
 
 
 def _nan_check_fake(
-    t: torch.Tensor, out: torch.Tensor,
-    nreal: torch.Tensor, row_size: int,
+    t: torch.Tensor, buf: torch.Tensor,
+    nreal: torch.Tensor, buf_offset: int, row_size: int,
 ) -> None:
     pass
 
@@ -166,7 +169,7 @@ if _NAN_DETECT:
     direct_register_custom_op(
         op_name="nan_check",
         op_func=_nan_check_impl,
-        mutates_args=["out"],
+        mutates_args=["buf"],
         fake_impl=_nan_check_fake,
     )
 
@@ -190,11 +193,12 @@ def set_nan_num_real_tokens(num_real: int) -> None:
 
 def _mark_nan(t: torch.Tensor, layer_idx: int, col: int) -> None:
     if _nan_detect_buf is not None and _nan_num_real_tokens is not None:
-        out = _nan_detect_buf[layer_idx, col * 2 : col * 2 + 2]
+        buf_flat = _nan_detect_buf.view(-1)
+        buf_offset = layer_idx * _nan_detect_buf.shape[1] + col * 2
         row_size = 1
         for i in range(1, t.ndim):
             row_size *= t.shape[i]
-        torch.ops.vllm.nan_check(t, out, _nan_num_real_tokens, row_size)
+        torch.ops.vllm.nan_check(t, buf_flat, _nan_num_real_tokens, buf_offset, row_size)
 
 
 def get_nan_detect_buf() -> torch.Tensor | None:
