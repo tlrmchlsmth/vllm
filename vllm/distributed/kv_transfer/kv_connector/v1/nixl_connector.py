@@ -2280,6 +2280,19 @@ class NixlConnectorWorker:
         done_recving.update(self._failed_recv_reqs)
         self._failed_recv_reqs.clear()
 
+        if envs.VLLM_NIXL_NAN_DETECT and (
+            len(done_sending) > 0
+            or len(done_recving) > 0
+            or len(self._recving_transfers) > 0
+        ):
+            logger.warning(
+                "NaN detect: done_sending=%d, done_recving=%d, "
+                "in_progress_recving=%d",
+                len(done_sending),
+                len(done_recving),
+                len(self._recving_transfers),
+            )
+
         if len(done_sending) > 0 or len(done_recving) > 0:
             logger.debug(
                 "Rank %s, get_finished: %s requests done sending "
