@@ -133,6 +133,118 @@ def test_no_detection_when_disabled(default_vllm_config, device):
     ops.rms_norm(out, x, weight, 1e-6)
 
 
+@pytest.mark.parametrize("hidden_size", [64, 256, 5120])
+@pytest.mark.parametrize("add_residual", [False, True])
+@torch.inference_mode()
+def test_padding_nan_does_not_leak_rms_norm(
+    default_vllm_config, device, hidden_size, add_residual
+):
+    """NaN in padding positions must not leak into real tokens via RMSNorm."""
+    from vllm import _custom_ops as ops
+
+    num_real = 4
+    num_padded = 8
+    dtype = torch.float16
+
+    weight = torch.ones(hidden_size, dtype=dtype, device=device)
+    weight.normal_(mean=1.0, std=0.1)
+
+    x = torch.randn(num_padded, hidden_size, dtype=dtype, device=device)
+    x[num_real:] = float("nan")
+
+    if add_residual:
+        residual = torch.randn(
+            num_padded, hidden_size, dtype=dtype, device=device
+        )
+        residual[num_real:] = float("nan")
+        ops.fused_add_rms_norm(x, residual, weight, 1e-6)
+        assert torch.isfinite(x[:num_real]).all(), (
+            "NaN leaked from padding into real tokens via fused_add_rms_norm"
+        )
+        assert torch.isfinite(residual[:num_real]).all(), (
+            "NaN leaked from padding into real residual via fused_add_rms_norm"
+        )
+    else:
+        out = torch.empty_like(x)
+        ops.rms_norm(out, x, weight, 1e-6)
+        assert torch.isfinite(out[:num_real]).all(), (
+            "NaN leaked from padding into real tokens via rms_norm"
+        )
+
+
+@pytest.mark.parametrize("hidden_size", [64, 256, 5120])
+@pytest.mark.parametrize("add_residual", [False, True])
+@torch.inference_mode()
+def test_padding_nan_does_not_leak_rms_norm_static_fp8_quant(
+    default_vllm_config, device, hidden_size, add_residual
+):
+    """NaN in padding must not leak into real tokens via fused norm+FP8 quant."""
+    from tests.kernels.quant_utils import FP8_DTYPE
+    from vllm import _custom_ops as ops
+
+    num_real = 4
+    num_padded = 8
+    dtype = torch.float16
+
+    weight = torch.ones(hidden_size, dtype=dtype, device=device)
+    weight.normal_(mean=1.0, std=0.1)
+    scale = torch.tensor([1.0], dtype=torch.float32, device=device)
+
+    x = torch.randn(num_padded, hidden_size, dtype=dtype, device=device)
+    x[num_real:] = float("nan")
+    out = torch.empty(num_padded, hidden_size, dtype=FP8_DTYPE, device=device)
+
+    if add_residual:
+        residual = torch.randn(
+            num_padded, hidden_size, dtype=dtype, device=device
+        )
+        residual[num_real:] = float("nan")
+        ops.fused_add_rms_norm_static_fp8_quant(
+            out, x, residual, weight, scale, 1e-6
+        )
+        real_out = out[:num_real].to(torch.float32)
+        assert torch.isfinite(real_out).all(), (
+            "NaN leaked via fused_add_rms_norm_static_fp8_quant"
+        )
+        assert torch.isfinite(residual[:num_real]).all(), (
+            "NaN leaked into residual via fused_add_rms_norm_static_fp8_quant"
+        )
+    else:
+        ops.rms_norm_static_fp8_quant(out, x, weight, scale, 1e-6)
+        real_out = out[:num_real].to(torch.float32)
+        assert torch.isfinite(real_out).all(), (
+            "NaN leaked via rms_norm_static_fp8_quant"
+        )
+
+
+@pytest.mark.parametrize("hidden_size", [64, 256, 5120])
+@torch.inference_mode()
+def test_padding_nan_does_not_leak_rms_norm_dynamic_quant(
+    default_vllm_config, device, hidden_size
+):
+    """NaN in padding must not leak via dynamic per-token quant norm."""
+    from tests.kernels.quant_utils import FP8_DTYPE
+    from vllm import _custom_ops as ops
+
+    num_real = 4
+    num_padded = 8
+    dtype = torch.float16
+
+    weight = torch.ones(hidden_size, dtype=dtype, device=device)
+    weight.normal_(mean=1.0, std=0.1)
+
+    x = torch.randn(num_padded, hidden_size, dtype=dtype, device=device)
+    x[num_real:] = float("nan")
+
+    out, scales = ops.rms_norm_dynamic_per_token_quant(
+        x, weight, 1e-6, FP8_DTYPE
+    )
+    real_out = out[:num_real].to(torch.float32)
+    assert torch.isfinite(real_out).all(), (
+        "NaN leaked via rms_norm_dynamic_per_token_quant"
+    )
+
+
 @torch.inference_mode()
 def test_nan_detector_class(default_vllm_config, device):
     """Test the NaNDetector singleton lifecycle."""
