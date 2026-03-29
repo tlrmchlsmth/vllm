@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+import gc
 import os
 import time
 
@@ -21,6 +22,9 @@ logger = init_logger(__name__)
 _DP_SYNC_STALL_THRESHOLD_S = float(
     os.environ.get("VLLM_DP_SYNC_STALL_THRESHOLD_S", "0.5")
 )
+
+# Track time between allreduce calls to identify stragglers
+_last_ar_end: float = 0.0
 
 
 def _get_device(parallel_config: ParallelConfig) -> str:
@@ -63,13 +67,24 @@ def _run_ar(
 
     backend = get_dp_allreduce()
     if _DP_SYNC_STALL_THRESHOLD_S > 0:
+        global _last_ar_end
         t0 = time.monotonic()
+        work_time = t0 - _last_ar_end if _last_ar_end > 0 else 0.0
+        gc_counts_before = gc.get_count()
     backend.all_reduce(tensor)
     if _DP_SYNC_STALL_THRESHOLD_S > 0:
-        elapsed = time.monotonic() - t0
+        now = time.monotonic()
+        elapsed = now - t0
+        _last_ar_end = now
         if elapsed > _DP_SYNC_STALL_THRESHOLD_S:
+            gc_counts_after = gc.get_count()
             logger.warning(
-                "DP all_reduce stall: %.3fs (rank %d)", elapsed, dp_rank)
+                "DP all_reduce stall: %.3fs (rank %d) "
+                "work_since_last=%.3fs gc_before=%s gc_after=%s "
+                "tokens=%d",
+                elapsed, dp_rank, work_time,
+                gc_counts_before, gc_counts_after,
+                orig_num_tokens_per_ubatch)
     return tensor
 
 
