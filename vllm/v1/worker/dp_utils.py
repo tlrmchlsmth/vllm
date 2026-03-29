@@ -7,10 +7,9 @@ import time
 
 import numpy as np
 import torch
-import torch.distributed as dist
 
 from vllm.config import ParallelConfig
-from vllm.distributed.parallel_state import get_dp_group
+from vllm.distributed.parallel_state import get_dp_allreduce, get_dp_group
 from vllm.logger import init_logger
 from vllm.v1.worker.ubatch_utils import (
     check_ubatch_thresholds,
@@ -24,23 +23,25 @@ _DP_SYNC_STALL_THRESHOLD_S = float(
 )
 
 
-def _get_device_and_group(parallel_config: ParallelConfig):
-    # Use the actual device assigned to the DP group, not just the device type
-    device = get_dp_group().device
-    group = get_dp_group().device_group
+def _get_device(parallel_config: ParallelConfig) -> str:
+    """Determine tensor device for the DP all_reduce.
 
-    # Transferring this tensor from GPU to CPU will introduce a GPU sync
-    # point that could adversely affect performance of vllm with asynch
-    # scheduling. This environment variable exists to quickly disable
-    # this optimization if we run into this case.
+    Non-gloo backends always use CPU tensors (they handle GPU interaction
+    internally if needed, e.g. nccl-side-stream). The gloo backend uses
+    GPU (NCCL) by default, or CPU when disable_nccl_for_dp_synchronization
+    is set.
+    """
+    if parallel_config.dp_cpu_backend != "gloo":
+        return "cpu"
+
     if parallel_config.disable_nccl_for_dp_synchronization:
         logger.info_once(
             "Using CPU all reduce to synchronize DP padding between ranks.",
             scope="local",
         )
-        device = "cpu"
-        group = get_dp_group().cpu_group
-    return device, group
+        return "cpu"
+
+    return str(get_dp_group().device)
 
 
 def _run_ar(
@@ -52,15 +53,18 @@ def _run_ar(
 ) -> torch.Tensor:
     dp_size = parallel_config.data_parallel_size
     dp_rank = parallel_config.data_parallel_rank
-    device, group = _get_device_and_group(parallel_config)
+    device = _get_device(parallel_config)
+
     tensor = torch.zeros(4, dp_size, device=device, dtype=torch.int32)
     tensor[0][dp_rank] = orig_num_tokens_per_ubatch
     tensor[1][dp_rank] = padded_num_tokens_per_ubatch
     tensor[2][dp_rank] = 1 if should_ubatch else 0
     tensor[3][dp_rank] = cudagraph_mode
+
+    backend = get_dp_allreduce()
     if _DP_SYNC_STALL_THRESHOLD_S > 0:
         t0 = time.monotonic()
-    dist.all_reduce(tensor, group=group)
+    backend.all_reduce(tensor)
     if _DP_SYNC_STALL_THRESHOLD_S > 0:
         elapsed = time.monotonic() - t0
         if elapsed > _DP_SYNC_STALL_THRESHOLD_S:
