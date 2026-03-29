@@ -216,6 +216,7 @@ class UCXDPAllReduce(DPAllReduceBackend):
 
     def all_reduce(self, tensor: torch.Tensor) -> None:
         """Ring allgather using UCX tag send/recv."""
+        from ucp._libs.arr import Array
         from ucp._libs.ucx_api import tag_recv_nb, tag_send_nb
 
         N = self.world_size
@@ -229,17 +230,17 @@ class UCXDPAllReduce(DPAllReduceBackend):
             send_col = (self.rank - step) % N
             recv_col = (self.rank - step - 1) % N
 
-            send_data = data[:, send_col].tobytes()
+            send_buf = data[:, send_col].copy()
             recv_buf = bytearray(self._chunk_bytes)
 
             tag = step & 0xFFFFFFFF
 
-            # Post send and recv
+            # Post send and recv (buffers must be wrapped in Array)
             send_req = tag_send_nb(
-                self._right_ep, send_data, len(send_data), tag, _cb,
+                self._right_ep, Array(send_buf), send_buf.nbytes, tag, _cb,
             )
             recv_req = tag_recv_nb(
-                self._worker, recv_buf, len(recv_buf), tag, _cb,
+                self._worker, Array(recv_buf), len(recv_buf), tag, _cb,
             )
 
             # Progress until both complete
