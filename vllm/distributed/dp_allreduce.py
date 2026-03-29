@@ -184,6 +184,9 @@ class UCXDPAllReduce(DPAllReduceBackend):
             info_tensor[self.rank, i] = v
         dist.all_reduce(info_tensor, group=cpu_group)
 
+        # Barrier: ensure all listeners are up before anyone connects
+        dist.barrier(group=cpu_group)
+
         # Decode right neighbor's address
         right_info = struct.pack(
             "16i", *[int(info_tensor[right_rank, i]) for i in range(16)]
@@ -191,11 +194,20 @@ class UCXDPAllReduce(DPAllReduceBackend):
         right_host = right_info[:60].rstrip(b"\0").decode()
         right_port = struct.unpack(">I", right_info[60:64])[0]
 
-        # Connect to right neighbor
+        # Connect to right neighbor (retry — peer listener may not be
+        # ready yet even though addresses were exchanged via gloo barrier)
         async def _connect():
-            return await ucp.create_endpoint(right_host, right_port)
+            import asyncio as _asyncio
 
-        self._right_ep = self._run_coro(_connect())
+            for attempt in range(10):
+                try:
+                    return await ucp.create_endpoint(right_host, right_port)
+                except Exception:
+                    if attempt == 9:
+                        raise
+                    await _asyncio.sleep(0.5 * (attempt + 1))
+
+        self._right_ep = self._run_coro(_connect(), timeout=60)
 
         # Wait for left neighbor to connect to us
         if not accepted_event.wait(timeout=30):
