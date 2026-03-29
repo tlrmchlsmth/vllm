@@ -221,6 +221,10 @@ class UCXDPAllReduce(DPAllReduceBackend):
         N = self.world_size
         data = tensor.numpy()
 
+        def _cb(req, exc):
+            if exc is not None:
+                logger.error("UCX transfer error: %s", exc)
+
         for step in range(N - 1):
             send_col = (self.rank - step) % N
             recv_col = (self.rank - step - 1) % N
@@ -232,15 +236,19 @@ class UCXDPAllReduce(DPAllReduceBackend):
 
             # Post send and recv
             send_req = tag_send_nb(
-                self._right_ep, send_data, len(send_data), tag,
+                self._right_ep, send_data, len(send_data), tag, _cb,
             )
             recv_req = tag_recv_nb(
-                self._worker, recv_buf, len(recv_buf), tag,
+                self._worker, recv_buf, len(recv_buf), tag, _cb,
             )
 
             # Progress until both complete
-            while not (send_req.is_completed and recv_req.is_completed):
-                self._worker.progress()
+            if send_req is not None:
+                while not send_req.is_completed:
+                    self._worker.progress()
+            if recv_req is not None:
+                while not recv_req.is_completed:
+                    self._worker.progress()
 
             # Unpack received column
             import struct
