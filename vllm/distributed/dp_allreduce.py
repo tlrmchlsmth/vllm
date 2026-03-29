@@ -185,7 +185,7 @@ class UCXDPAllReduce(DPAllReduceBackend):
         # Create endpoint to right neighbor directly from address
         right_addr = UCXAddress.from_buffer(right_addr_bytes)
         self._right_ep = UCXEndpoint.create_from_worker_address(
-            self._worker, right_addr
+            self._worker, right_addr, True
         )
 
         logger.info(
@@ -206,7 +206,7 @@ class UCXDPAllReduce(DPAllReduceBackend):
         left_addr_bytes = left_info[4 : 4 + left_addr_len]
         left_addr = UCXAddress.from_buffer(left_addr_bytes)
         self._left_ep = UCXEndpoint.create_from_worker_address(
-            self._worker, left_addr
+            self._worker, left_addr, True
         )
 
         logger.info(
