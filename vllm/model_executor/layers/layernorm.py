@@ -328,7 +328,7 @@ class RMSNorm(CustomOp):
             if nan_flags is not None:
                 add_residual = residual is not None
                 if add_residual:
-                    x, residual = fused_add_rms_norm(
+                    return fused_add_rms_norm(
                         x,
                         residual,
                         self.weight.data,
@@ -337,11 +337,8 @@ class RMSNorm(CustomOp):
                         layer_idx=nan_layer_idx,
                         max_num_tokens=nan_max_tokens,
                     )
-                    x = torch.nan_to_num(x)
-                    residual = torch.nan_to_num(residual)
-                    return x, residual
                 else:
-                    x = rms_norm(
+                    return rms_norm(
                         x,
                         self.weight.data,
                         self.variance_epsilon,
@@ -349,7 +346,6 @@ class RMSNorm(CustomOp):
                         layer_idx=nan_layer_idx,
                         max_num_tokens=nan_max_tokens,
                     )
-                    return torch.nan_to_num(x)
 
         # Optional Oink SM100 fast path (no residual). This path is
         # torch.compile-friendly via torch.ops.oink.rmsnorm and preserves

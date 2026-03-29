@@ -1145,6 +1145,9 @@ class DeepseekV2DecoderLayer(nn.Module):
 
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
+        if envs.VLLM_NAN_DETECT:
+            hidden_states = torch.nan_to_num(hidden_states)
+            residual = torch.nan_to_num(residual)
         hidden_states = self.mlp(hidden_states)
 
         if isinstance(self.mlp, DeepseekV2MLP) and hidden_states.dtype == torch.float16:
