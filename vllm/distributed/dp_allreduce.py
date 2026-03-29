@@ -90,11 +90,14 @@ class NCCLSideStreamDPAllReduce(DPAllReduceBackend):
 class UCXDPAllReduce(DPAllReduceBackend):
     """UCX RDMA all_reduce for true CPU-side RDMA.
 
-    Uses UCX endpoints in a ring topology. Since each rank only populates
-    its own column, the sum all_reduce is an allgather. Ring allgather
-    in N-1 steps of 16 bytes each completes in microseconds over RDMA.
+    Uses the low-level UCX API (ucp._libs.ucx_api) to create endpoints
+    directly from exchanged worker addresses, bypassing ucx-py's
+    built-in TCP handshake which can fail in Kubernetes environments.
 
-    Requires ucx-py: pip install ucx-py-cu12 (or ucx-py-cu11)
+    Worker addresses are exchanged via gloo (one-time at init).
+    Per-iteration allgather uses UCX tag send/recv over RDMA.
+
+    Requires ucx-py: pip install ucx-py (or build from source)
     """
 
     def __init__(
@@ -104,160 +107,148 @@ class UCXDPAllReduce(DPAllReduceBackend):
         cpu_group: dist.ProcessGroup,
     ):
         try:
-            import ucp  # noqa: F401
+            from ucp._libs import ucx_api  # noqa: F401
         except ImportError:
             raise ImportError(
                 "UCX DP backend requires ucx-py. "
                 "Install with: pip install ucx-py-cu12"
             ) from None
 
-        import asyncio
-        import threading
-
         self.rank = rank
         self.world_size = world_size
-
-        # Dedicated event loop for UCX async operations
-        self._loop = asyncio.new_event_loop()
-        self._thread = threading.Thread(
-            target=self._loop.run_forever, daemon=True, name="ucx-dp-loop"
-        )
-        self._thread.start()
-
-        # Initialize ring topology
-        self._right_ep = None
-        self._left_ep = None
         self._chunk_bytes = 4 * 4  # 4 int32s per column = 16 bytes
-        self._init_ring(cpu_group)
+        self._init_endpoints(cpu_group)
 
         logger.info("UCX DP all_reduce initialized: rank %d/%d", rank, world_size)
 
-    def _run_coro(self, coro, timeout=30):
-        """Run async coroutine on the background loop, block until done."""
-        import asyncio
+    def _init_endpoints(self, cpu_group: dist.ProcessGroup):
+        """Create UCX endpoints using low-level API.
 
-        fut = asyncio.run_coroutine_threadsafe(coro, self._loop)
-        return fut.result(timeout=timeout)
-
-    def _init_ring(self, cpu_group: dist.ProcessGroup):
-        """Set up UCX ring: connect to right neighbor, accept from left.
-        Uses gloo for one-time address exchange (fine over TCP)."""
-        import socket as socket_mod
-        import threading
-
-        import ucp
+        1. Create UCX context + worker
+        2. Get worker address (serializable bytes)
+        3. Exchange addresses via gloo all_reduce (one-time)
+        4. Create endpoints directly from addresses (no TCP handshake)
+        """
+        from ucp._libs.ucx_api import (
+            UCXAddress,
+            UCXContext,
+            UCXEndpoint,
+            UCXWorker,
+        )
 
         right_rank = (self.rank + 1) % self.world_size
-        left_rank = (self.rank - 1) % self.world_size
 
-        # Create listener on the background loop
-        accepted_event = threading.Event()
-        accepted_ep_holder = [None]
+        # Create UCX context and worker
+        self._ctx = UCXContext()
+        self._worker = UCXWorker(self._ctx)
 
-        async def _start_listener():
-            def _on_accept(ep):
-                accepted_ep_holder[0] = ep
-                accepted_event.set()
+        # Get our worker address as bytes
+        my_addr = self._worker.get_address()
+        my_addr_bytes = bytes(my_addr)
+        addr_len = len(my_addr_bytes)
 
-            lsnr = ucp.create_listener(_on_accept)
-            return lsnr
-
-        listener = self._run_coro(_start_listener())
-
-        # Exchange (IP, port) via gloo all_reduce (one-time)
-        # Use IP address instead of hostname — in Kubernetes, pod hostnames
-        # may not be resolvable from other pods.
-        hostname = socket_mod.gethostbyname(socket_mod.gethostname())
-        hostname_bytes = hostname.encode()[:60].ljust(60, b"\0")
-        # Pack: 60 bytes hostname + 4 bytes port (big endian)
-        import struct
-
-        my_info = hostname_bytes + struct.pack(">I", listener.port)
-        assert len(my_info) == 64
-
-        # Use a 2D tensor: (world_size, 16) of int32 = 64 bytes per rank
-        info_tensor = torch.zeros(
-            self.world_size, 16, dtype=torch.int32, device="cpu"
+        # Exchange worker addresses via gloo all_reduce
+        # Pad to fixed size (512 bytes should be enough for any UCX address)
+        MAX_ADDR_LEN = 512
+        assert addr_len <= MAX_ADDR_LEN, (
+            f"UCX address too long: {addr_len} > {MAX_ADDR_LEN}"
         )
-        my_ints = struct.unpack(f"16i", my_info)
+
+        # Pack: 4 bytes length + address bytes, padded to MAX_ADDR_LEN + 4
+        import struct
+        my_info = struct.pack(">I", addr_len) + my_addr_bytes.ljust(
+            MAX_ADDR_LEN, b"\0"
+        )
+        total_bytes = MAX_ADDR_LEN + 4  # 516 bytes
+        n_ints = total_bytes // 4  # 129 int32s per rank
+
+        info_tensor = torch.zeros(
+            self.world_size, n_ints, dtype=torch.int32, device="cpu"
+        )
+        my_ints = struct.unpack(f"{n_ints}i", my_info)
         for i, v in enumerate(my_ints):
             info_tensor[self.rank, i] = v
         dist.all_reduce(info_tensor, group=cpu_group)
 
-        # Barrier: ensure all listeners are up before anyone connects
+        # Barrier: ensure all ranks have exchanged addresses
         dist.barrier(group=cpu_group)
 
-        # Decode right neighbor's address
+        # Decode right neighbor's worker address
         right_info = struct.pack(
-            "16i", *[int(info_tensor[right_rank, i]) for i in range(16)]
+            f"{n_ints}i",
+            *[int(info_tensor[right_rank, i]) for i in range(n_ints)],
         )
-        right_host = right_info[:60].rstrip(b"\0").decode()
-        right_port = struct.unpack(">I", right_info[60:64])[0]
+        right_addr_len = struct.unpack(">I", right_info[:4])[0]
+        right_addr_bytes = right_info[4 : 4 + right_addr_len]
 
-        # Connect to right neighbor (retry — peer listener may not be
-        # ready yet even though addresses were exchanged via gloo barrier)
-        async def _connect():
-            import asyncio as _asyncio
-
-            for attempt in range(10):
-                try:
-                    return await ucp.create_endpoint(right_host, right_port)
-                except Exception:
-                    if attempt == 9:
-                        raise
-                    await _asyncio.sleep(0.5 * (attempt + 1))
-
-        self._right_ep = self._run_coro(_connect(), timeout=60)
-
-        # Wait for left neighbor to connect to us
-        if not accepted_event.wait(timeout=30):
-            raise TimeoutError(
-                f"UCX ring init: rank {self.rank} timed out waiting "
-                f"for connection from rank {left_rank}"
-            )
-        self._left_ep = accepted_ep_holder[0]
+        # Create endpoint to right neighbor directly from address
+        right_addr = UCXAddress.from_buffer(right_addr_bytes)
+        self._right_ep = UCXEndpoint.create_from_worker_address(
+            self._worker, right_addr
+        )
 
         logger.info(
-            "UCX ring ready: rank %d → right=%d (%s:%d), left=%d → us",
-            self.rank, right_rank, right_host, right_port, left_rank,
+            "UCX endpoint: rank %d → right=%d (addr %d bytes)",
+            self.rank, right_rank, right_addr_len,
+        )
+
+        # For the ring, we also need the left neighbor to connect to us.
+        # With create_from_worker_address, connections are one-sided —
+        # we just need left neighbor's endpoint to us, which they create
+        # on their side. We create our endpoint to the left neighbor too.
+        left_rank = (self.rank - 1) % self.world_size
+        left_info = struct.pack(
+            f"{n_ints}i",
+            *[int(info_tensor[left_rank, i]) for i in range(n_ints)],
+        )
+        left_addr_len = struct.unpack(">I", left_info[:4])[0]
+        left_addr_bytes = left_info[4 : 4 + left_addr_len]
+        left_addr = UCXAddress.from_buffer(left_addr_bytes)
+        self._left_ep = UCXEndpoint.create_from_worker_address(
+            self._worker, left_addr
+        )
+
+        logger.info(
+            "UCX ring ready: rank %d, left=%d, right=%d",
+            self.rank, left_rank, right_rank,
         )
 
     def all_reduce(self, tensor: torch.Tensor) -> None:
-        self._run_coro(self._ring_allgather(tensor))
-
-    async def _ring_allgather(self, tensor: torch.Tensor):
-        """Ring allgather: N-1 steps, each step passes one column around."""
-        import asyncio
+        """Ring allgather using UCX tag send/recv."""
+        from ucp._libs.ucx_api import tag_recv_nb, tag_send_nb
 
         N = self.world_size
-        nbytes = self._chunk_bytes
-        # Work with raw bytes for UCX
         data = tensor.numpy()
 
         for step in range(N - 1):
             send_col = (self.rank - step) % N
             recv_col = (self.rank - step - 1) % N
 
-            send_bytes = data[:, send_col].tobytes()
-            recv_buf = bytearray(nbytes)
+            send_data = data[:, send_col].tobytes()
+            recv_buf = bytearray(self._chunk_bytes)
 
-            await asyncio.gather(
-                self._right_ep.send(send_bytes),
-                self._left_ep.recv(recv_buf),
+            tag = step & 0xFFFFFFFF
+
+            # Post send and recv
+            send_req = tag_send_nb(
+                self._right_ep, send_data, len(send_data), tag,
+            )
+            recv_req = tag_recv_nb(
+                self._worker, recv_buf, len(recv_buf), tag,
             )
 
-            # Unpack received column into the tensor
-            import struct
+            # Progress until both complete
+            while not (send_req.is_completed and recv_req.is_completed):
+                self._worker.progress()
 
+            # Unpack received column
+            import struct
             vals = struct.unpack("4i", recv_buf)
             for row in range(4):
                 data[row, recv_col] = vals[row]
 
     def close(self):
-        if hasattr(self, "_loop") and self._loop.is_running():
-            self._loop.call_soon_threadsafe(self._loop.stop)
-        if hasattr(self, "_thread") and self._thread.is_alive():
-            self._thread.join(timeout=5)
+        pass
 
 
 def create_dp_allreduce_backend(
