@@ -13,7 +13,7 @@ import torch
 
 def has_flashinfer_mla():
     try:
-        from flashinfer import (  # noqa: F401
+        from flashinfer.decode import (  # noqa: F401
             trtllm_batch_decode_with_kv_cache_mla,
         )
         return True
@@ -38,6 +38,9 @@ BLOCK_SIZE = 16
 DTYPE = torch.bfloat16
 
 
+WORKSPACE_SIZE = 128 * 1024 * 1024  # 128 MB
+
+
 def make_mla_decode_inputs(
     batch_size: int,
     seq_lens: list[int],
@@ -45,8 +48,6 @@ def make_mla_decode_inputs(
     device: str = "cuda",
 ):
     """Create inputs for trtllm_batch_decode_with_kv_cache_mla."""
-    from flashinfer import get_workspace_buffer
-
     max_seq_len = max(seq_lens)
     max_blocks_per_seq = (max_seq_len + BLOCK_SIZE - 1) // BLOCK_SIZE
 
@@ -73,7 +74,9 @@ def make_mla_decode_inputs(
             block_idx += 1
 
     seq_lens_t = torch.tensor(seq_lens, dtype=torch.int32, device=device)
-    workspace = get_workspace_buffer(device)
+    workspace = torch.zeros(
+        WORKSPACE_SIZE, dtype=torch.uint8, device=device
+    )
 
     return q, kv_cache, block_tables, seq_lens_t, max_seq_len, workspace
 
@@ -83,7 +86,7 @@ def make_mla_decode_inputs(
 @torch.inference_mode()
 def test_mla_decode_clean_inputs(seq_len):
     """MLA decode with normal random inputs should never produce NaN."""
-    from flashinfer import trtllm_batch_decode_with_kv_cache_mla
+    from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
 
     batch_size = 4
     seq_lens = [seq_len] * batch_size
@@ -116,7 +119,7 @@ def test_mla_decode_clean_inputs(seq_len):
 @torch.inference_mode()
 def test_mla_decode_large_qk_values():
     """Large Q/K values that could cause QK dot product overflow."""
-    from flashinfer import trtllm_batch_decode_with_kv_cache_mla
+    from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
 
     batch_size = 2
     seq_len = 64
@@ -154,7 +157,7 @@ def test_mla_decode_large_qk_values():
 @torch.inference_mode()
 def test_mla_decode_nan_in_kv_cache():
     """NaN in KV cache entries should not produce NaN at unrelated tokens."""
-    from flashinfer import trtllm_batch_decode_with_kv_cache_mla
+    from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
 
     batch_size = 2
     seq_len = 64
@@ -193,7 +196,7 @@ def test_mla_decode_nan_in_kv_cache():
 @torch.inference_mode()
 def test_mla_decode_seq_len_1():
     """seq_len=1 means only one KV entry — softmax denominator could be tricky."""
-    from flashinfer import trtllm_batch_decode_with_kv_cache_mla
+    from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
 
     batch_size = 4
     seq_lens = [1] * batch_size
@@ -226,7 +229,7 @@ def test_mla_decode_seq_len_1():
 @torch.inference_mode()
 def test_mla_decode_mixed_seq_lens():
     """Mixed sequence lengths with padding in the batch."""
-    from flashinfer import trtllm_batch_decode_with_kv_cache_mla
+    from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
 
     seq_lens = [1, 128, 3, 1024]
     batch_size = len(seq_lens)
@@ -261,7 +264,7 @@ def test_mla_decode_mixed_seq_lens():
 @torch.inference_mode()
 def test_mla_decode_zero_kv_cache():
     """All-zero KV cache — softmax gets uniform weights, output should be zero."""
-    from flashinfer import trtllm_batch_decode_with_kv_cache_mla
+    from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
 
     batch_size = 2
     seq_len = 32
