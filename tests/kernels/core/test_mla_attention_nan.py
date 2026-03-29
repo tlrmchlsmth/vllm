@@ -31,7 +31,9 @@ requires_flashinfer_mla = pytest.mark.skipif(
 KV_LORA_RANK = 512
 QK_NOPE_HEAD_DIM = 128
 QK_ROPE_HEAD_DIM = 64
-QK_HEAD_DIM = QK_NOPE_HEAD_DIM + QK_ROPE_HEAD_DIM  # 192
+# For the FlashInfer MLA kernel, query head_dim must equal
+# kv_lora_rank + qk_rope_head_dim (the compressed KV entry size).
+QK_HEAD_DIM = KV_LORA_RANK + QK_ROPE_HEAD_DIM  # 576
 V_HEAD_DIM = KV_LORA_RANK  # 512
 NUM_HEADS = 16  # per-rank heads (128 total / 8 TP)
 BLOCK_SIZE = 64
@@ -50,16 +52,25 @@ def make_mla_decode_inputs(
     """Create inputs for trtllm_batch_decode_with_kv_cache_mla."""
     max_seq_len = max(seq_lens)
     max_blocks_per_seq = (max_seq_len + BLOCK_SIZE - 1) // BLOCK_SIZE
+    # FlashInfer requires block_num % (128 / block_size) == 0
+    block_table_pad = int(128 // BLOCK_SIZE)
+    max_blocks_per_seq = (
+        (max_blocks_per_seq + block_table_pad - 1)
+        // block_table_pad
+        * block_table_pad
+    )
 
     # Query: [batch, 1, num_heads, qk_head_dim]
     q = torch.randn(
         batch_size, 1, NUM_HEADS, QK_HEAD_DIM, dtype=DTYPE, device=device
     )
 
-    # KV cache: [num_blocks, block_size, kv_lora_rank + qk_rope_head_dim]
+    # KV cache: [num_blocks, 1, block_size, kv_lora_rank + qk_rope_head_dim]
     kv_entry_size = KV_LORA_RANK + QK_ROPE_HEAD_DIM
+    # Allocate enough blocks for padded block tables
+    total_blocks = max(num_blocks, batch_size * max_blocks_per_seq)
     kv_cache = torch.randn(
-        num_blocks, 1, BLOCK_SIZE, kv_entry_size, dtype=DTYPE, device=device
+        total_blocks, 1, BLOCK_SIZE, kv_entry_size, dtype=DTYPE, device=device
     )
 
     # Block tables: [batch, max_blocks_per_seq]
