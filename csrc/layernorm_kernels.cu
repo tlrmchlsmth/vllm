@@ -74,19 +74,28 @@ __global__ void rms_norm_kernel(
   __syncthreads();
 
   scalar_t* out_row = out + blockIdx.x * hidden_size;
-  auto* v_in = reinterpret_cast<const vec_n_t<scalar_t, VEC_SIZE>*>(input_row);
-  auto* v_w = reinterpret_cast<const vec_n_t<scalar_t, VEC_SIZE>*>(weight);
   auto* v_out = reinterpret_cast<vec_n_t<scalar_t, VEC_SIZE>*>(out_row);
-  for (int i = threadIdx.x; i < hidden_size / VEC_SIZE; i += blockDim.x) {
-    vec_n_t<scalar_t, VEC_SIZE> dst;
-    vec_n_t<scalar_t, VEC_SIZE> src1 = v_in[i];
-    vec_n_t<scalar_t, VEC_SIZE> src2 = v_w[i];
-#pragma unroll
-    for (int j = 0; j < VEC_SIZE; j++) {
-      float x = static_cast<float>(src1.val[j]);
-      dst.val[j] = ((scalar_t)(x * s_variance)) * src2.val[j];
+  if (s_variance == 0.0f) {
+    // NaN detected: zero the output.
+    for (int i = threadIdx.x; i < hidden_size / VEC_SIZE; i += blockDim.x) {
+      vec_n_t<scalar_t, VEC_SIZE> dst;
+      memset(&dst, 0, sizeof(dst));
+      v_out[i] = dst;
     }
-    v_out[i] = dst;
+  } else {
+    auto* v_in = reinterpret_cast<const vec_n_t<scalar_t, VEC_SIZE>*>(input_row);
+    auto* v_w = reinterpret_cast<const vec_n_t<scalar_t, VEC_SIZE>*>(weight);
+    for (int i = threadIdx.x; i < hidden_size / VEC_SIZE; i += blockDim.x) {
+      vec_n_t<scalar_t, VEC_SIZE> dst;
+      vec_n_t<scalar_t, VEC_SIZE> src1 = v_in[i];
+      vec_n_t<scalar_t, VEC_SIZE> src2 = v_w[i];
+#pragma unroll
+      for (int j = 0; j < VEC_SIZE; j++) {
+        float x = static_cast<float>(src1.val[j]);
+        dst.val[j] = ((scalar_t)(x * s_variance)) * src2.val[j];
+      }
+      v_out[i] = dst;
+    }
   }
 }
 
