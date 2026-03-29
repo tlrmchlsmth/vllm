@@ -219,20 +219,26 @@ class UCXDPAllReduce(DPAllReduceBackend):
                 _e[0] = exc
             _p[0] -= 1
 
+        # Wrap buffers in Array and keep references alive until
+        # all operations complete (prevents GC of underlying memory
+        # while UCX holds pointers)
+        send_arr = Array(my_col)
+        recv_arrs = {peer: Array(buf) for peer, buf in recv_bufs.items()}
+
         # Post ALL sends and recvs at once
         for peer in range(N):
             if peer == self.rank:
                 continue
             # Send our column to this peer (tag = sender rank)
             req = tag_send_nb(
-                self._endpoints[peer], Array(my_col),
+                self._endpoints[peer], send_arr,
                 my_col.nbytes, self.rank, _cb,
             )
             if req is None:
                 pending[0] -= 1
             # Recv this peer's column (tag = peer's rank)
             req = tag_recv_nb(
-                self._worker, Array(recv_bufs[peer]),
+                self._worker, recv_arrs[peer],
                 self._chunk_bytes, peer, _cb,
             )
             if req is None:
