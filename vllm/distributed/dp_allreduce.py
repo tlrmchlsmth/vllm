@@ -148,8 +148,9 @@ class UCXDPAllReduce(DPAllReduceBackend):
         addr_len = len(my_addr_bytes)
 
         # Exchange worker addresses via gloo all_reduce
-        # Pad to fixed size (512 bytes should be enough for any UCX address)
-        MAX_ADDR_LEN = 512
+        # Pad to fixed size. GB200 NVL72 with many IB devices has ~728 byte
+        # addresses, so use 1024 to be safe.
+        MAX_ADDR_LEN = 1024
         assert addr_len <= MAX_ADDR_LEN, (
             f"UCX address too long: {addr_len} > {MAX_ADDR_LEN}"
         )
