@@ -1079,7 +1079,26 @@ class GPUModelRunner(
 
         # Zero GPU memory for freshly allocated cache blocks to prevent
         # stale NaN/data from corrupting attention or SSM computation.
+        #
+        # NOTE: Block zeroing only happens for Mamba/SSM models
+        # (needs_kv_cache_zeroing=True). For standard attention models,
+        # _zero_block_ids is a no-op — recycled blocks keep whatever
+        # the previous request wrote. This means stale NaN from a
+        # previous request can persist in recycled KV cache blocks and
+        # corrupt subsequent requests via attention.
+        #
+        # When VLLM_NAN_DETECT=1, the scheduler also collects new
+        # block IDs (even for attention models) so we can check them
+        # for stale NaN before they are reused.
         if scheduler_output.new_block_ids_to_zero:
+            if envs.VLLM_NAN_DETECT:
+                from vllm.model_executor.layers.nan_detector import (
+                    NaNDetector,
+                )
+
+                NaNDetector.get().check_kv_blocks(
+                    scheduler_output.new_block_ids_to_zero
+                )
             self._zero_block_ids(scheduler_output.new_block_ids_to_zero)
 
         # Free the cached encoder outputs.
@@ -3998,6 +4017,13 @@ class GPUModelRunner(
         # When spec decode is enabled, defer connector finalization
         # (wait_for_save + clear metadata) until after draft model runs.
         defer_kv_connector_finalize = self.speculative_config is not None
+
+        # Clear NaN/Inf detection flags before the forward pass.
+        if envs.VLLM_NAN_DETECT:
+            from vllm.model_executor.layers.nan_detector import NaNDetector
+
+            NaNDetector.get().clear()
+
         with (
             set_forward_context(
                 attn_metadata,
@@ -4023,6 +4049,12 @@ class GPUModelRunner(
                 inputs_embeds=inputs_embeds,
                 **model_kwargs,
             )
+
+        # Check NaN/Inf detection flags after the forward pass.
+        if envs.VLLM_NAN_DETECT:
+            from vllm.model_executor.layers.nan_detector import NaNDetector
+
+            NaNDetector.get().check(num_scheduled_tokens)
 
         with record_function_or_nullcontext("gpu_model_runner: postprocess"):
             if self.use_aux_hidden_state_outputs:
@@ -4840,6 +4872,18 @@ class GPUModelRunner(
             )
             if self.eplb_state.is_async:
                 self.eplb_state.start_async_loop()
+
+        # Initialize NaN/Inf detector if enabled.  Must happen after model
+        # loading (so all RMSNorm layers have registered) but before CUDA graph
+        # capture (so the flag tensor address is stable).
+        if envs.VLLM_NAN_DETECT:
+            from vllm.model_executor.layers.nan_detector import NaNDetector
+
+            detector = NaNDetector.get()
+            detector.update_layer_names(self.model)
+            detector.finalize(
+                self.device, self.max_num_tokens, self.kv_caches
+            )
 
         if (
             self.vllm_config.compilation_config.mode

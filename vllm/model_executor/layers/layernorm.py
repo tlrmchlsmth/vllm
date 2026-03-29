@@ -12,6 +12,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.batch_invariant import (
     rms_norm_batch_invariant,
+    vllm_is_batch_invariant,
 )
 from vllm.platforms import current_platform
 
@@ -52,11 +53,16 @@ def _is_oink_stride_compatible_2d(x_2d: torch.Tensor) -> bool:
 
 
 def rms_norm(
-    x: torch.Tensor, weight: torch.Tensor, variance_epsilon: float
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    variance_epsilon: float,
+    nan_flags: torch.Tensor | None = None,
+    layer_idx: int = 0,
+    max_num_tokens: int = 0,
 ) -> torch.Tensor:
     from vllm import _custom_ops as ops
 
-    if envs.VLLM_BATCH_INVARIANT:
+    if nan_flags is None and envs.VLLM_BATCH_INVARIANT:
         return rms_norm_batch_invariant(x, weight, variance_epsilon)
     out = torch.empty_like(x)
     ops.rms_norm(
@@ -64,6 +70,9 @@ def rms_norm(
         x,
         weight,
         variance_epsilon,
+        nan_flags,
+        layer_idx,
+        max_num_tokens,
     )
     return out
 
@@ -73,10 +82,13 @@ def fused_add_rms_norm(
     residual: torch.Tensor,
     weight: torch.Tensor,
     variance_epsilon: float,
+    nan_flags: torch.Tensor | None = None,
+    layer_idx: int = 0,
+    max_num_tokens: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     from vllm import _custom_ops as ops
 
-    if envs.VLLM_BATCH_INVARIANT:
+    if nan_flags is None and envs.VLLM_BATCH_INVARIANT:
         return rms_norm_batch_invariant(
             x + residual, weight, variance_epsilon
         ), x + residual
@@ -85,6 +97,9 @@ def fused_add_rms_norm(
         residual,
         weight,
         variance_epsilon,
+        nan_flags,
+        layer_idx,
+        max_num_tokens,
     )
     return x, residual
 
@@ -218,6 +233,15 @@ class RMSNorm(CustomOp):
                     self._use_oink_rmsnorm = False
                     self._use_oink_fused_add_rmsnorm = False
 
+        # NaN/Inf detection: register this layer with the NaNDetector.
+        self._nan_detect_layer_idx: int = -1
+        if envs.VLLM_NAN_DETECT:
+            from vllm.model_executor.layers.nan_detector import NaNDetector
+
+            self._nan_detect_layer_idx = NaNDetector.get().register(
+                f"RMSNorm_{id(self)}"
+            )
+
     @staticmethod
     def forward_static(
         x: torch.Tensor,
@@ -289,6 +313,40 @@ class RMSNorm(CustomOp):
         if self.variance_size_override is not None:
             return self.forward_native(x, residual)
 
+        # When NaN detection is enabled, bypass Oink/batch-invariant paths
+        # and use the instrumented vLLM CUDA kernels.
+        nan_flags = None
+        nan_layer_idx = 0
+        nan_max_tokens = 0
+        if getattr(self, "_nan_detect_layer_idx", -1) >= 0:
+            from vllm.model_executor.layers.nan_detector import NaNDetector
+
+            detector = NaNDetector.get()
+            nan_flags = detector.nan_flags
+            nan_layer_idx = self._nan_detect_layer_idx
+            nan_max_tokens = detector.max_num_tokens
+            if nan_flags is not None:
+                add_residual = residual is not None
+                if add_residual:
+                    return fused_add_rms_norm(
+                        x,
+                        residual,
+                        self.weight.data,
+                        self.variance_epsilon,
+                        nan_flags=nan_flags,
+                        layer_idx=nan_layer_idx,
+                        max_num_tokens=nan_max_tokens,
+                    )
+                else:
+                    return rms_norm(
+                        x,
+                        self.weight.data,
+                        self.variance_epsilon,
+                        nan_flags=nan_flags,
+                        layer_idx=nan_layer_idx,
+                        max_num_tokens=nan_max_tokens,
+                    )
+
         # Optional Oink SM100 fast path (no residual). This path is
         # torch.compile-friendly via torch.ops.oink.rmsnorm and preserves
         # 2D layouts (including padded rows) when using the Oink
@@ -299,7 +357,7 @@ class RMSNorm(CustomOp):
             and x.is_cuda
             and x.dim() >= 2
             and self.has_weight
-            and not envs.VLLM_BATCH_INVARIANT
+            and not vllm_is_batch_invariant()
             and self.weight.data.dtype == x.dtype
             and self.weight.data.is_contiguous()
         ):
@@ -327,7 +385,7 @@ class RMSNorm(CustomOp):
             and x.dtype == residual.dtype
             and x.dim() >= 2
             and self.has_weight
-            and not envs.VLLM_BATCH_INVARIANT
+            and not vllm_is_batch_invariant()
             and self.weight.data.dtype == x.dtype
             and self.weight.data.is_contiguous()
         ):

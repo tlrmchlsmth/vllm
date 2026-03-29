@@ -2,7 +2,7 @@
 #include "dispatch_utils.h"
 #include "cub_helpers.h"
 #include "core/batch_invariant.hpp"
-#include "libtorch_stable/quantization/vectorization_utils.cuh"
+#include "quantization/vectorization_utils.cuh"
 
 #include <torch/cuda.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -20,7 +20,8 @@ __global__ void rms_norm_kernel(
     const int64_t input_shape_d2,         // input.size(-2)
     const int64_t input_shape_d3,         // input.size(-3)
     const scalar_t* __restrict__ weight,  // [hidden_size]
-    const float epsilon, const int num_tokens, const int hidden_size) {
+    const float epsilon, const int num_tokens, const int hidden_size,
+    int8_t* __restrict__ nan_flag_ptr) {
   __shared__ float s_variance;
   float variance = 0.0f;
   const scalar_t* input_row;
@@ -62,24 +63,39 @@ __global__ void rms_norm_kernel(
   variance = BlockReduce(reduceStore).Reduce(variance, CubAddOp{}, blockDim.x);
 
   if (threadIdx.x == 0) {
-    s_variance = rsqrtf(variance / hidden_size + epsilon);
+    if (nan_flag_ptr && (isnan(variance) || isinf(variance))) {
+      nan_flag_ptr[blockIdx.x] = 1;
+      // Zero the output instead of propagating NaN.
+      s_variance = 0.0f;
+    } else {
+      s_variance = rsqrtf(variance / hidden_size + epsilon);
+    }
   }
   __syncthreads();
 
   scalar_t* out_row = out + blockIdx.x * hidden_size;
-  auto* v_in = reinterpret_cast<const vec_n_t<scalar_t, VEC_SIZE>*>(input_row);
-  auto* v_w = reinterpret_cast<const vec_n_t<scalar_t, VEC_SIZE>*>(weight);
   auto* v_out = reinterpret_cast<vec_n_t<scalar_t, VEC_SIZE>*>(out_row);
-  for (int i = threadIdx.x; i < hidden_size / VEC_SIZE; i += blockDim.x) {
-    vec_n_t<scalar_t, VEC_SIZE> dst;
-    vec_n_t<scalar_t, VEC_SIZE> src1 = v_in[i];
-    vec_n_t<scalar_t, VEC_SIZE> src2 = v_w[i];
-#pragma unroll
-    for (int j = 0; j < VEC_SIZE; j++) {
-      float x = static_cast<float>(src1.val[j]);
-      dst.val[j] = ((scalar_t)(x * s_variance)) * src2.val[j];
+  if (s_variance == 0.0f) {
+    // NaN detected: zero the output.
+    for (int i = threadIdx.x; i < hidden_size / VEC_SIZE; i += blockDim.x) {
+      vec_n_t<scalar_t, VEC_SIZE> dst;
+      memset(&dst, 0, sizeof(dst));
+      v_out[i] = dst;
     }
-    v_out[i] = dst;
+  } else {
+    auto* v_in = reinterpret_cast<const vec_n_t<scalar_t, VEC_SIZE>*>(input_row);
+    auto* v_w = reinterpret_cast<const vec_n_t<scalar_t, VEC_SIZE>*>(weight);
+    for (int i = threadIdx.x; i < hidden_size / VEC_SIZE; i += blockDim.x) {
+      vec_n_t<scalar_t, VEC_SIZE> dst;
+      vec_n_t<scalar_t, VEC_SIZE> src1 = v_in[i];
+      vec_n_t<scalar_t, VEC_SIZE> src2 = v_w[i];
+#pragma unroll
+      for (int j = 0; j < VEC_SIZE; j++) {
+        float x = static_cast<float>(src1.val[j]);
+        dst.val[j] = ((scalar_t)(x * s_variance)) * src2.val[j];
+      }
+      v_out[i] = dst;
+    }
   }
 }
 
@@ -94,7 +110,8 @@ fused_add_rms_norm_kernel(
     const int64_t input_stride,
     scalar_t* __restrict__ residual,      // [..., hidden_size]
     const scalar_t* __restrict__ weight,  // [hidden_size]
-    const float epsilon, const int num_tokens, const int hidden_size) {
+    const float epsilon, const int num_tokens, const int hidden_size,
+    int8_t* __restrict__ nan_flag_ptr) {
   // Sanity checks on our vector struct and type-punned pointer arithmetic
   static_assert(std::is_pod_v<_f16Vec<scalar_t, width>>);
   static_assert(sizeof(_f16Vec<scalar_t, width>) == sizeof(scalar_t) * width);
@@ -127,7 +144,12 @@ fused_add_rms_norm_kernel(
   variance = BlockReduce(reduceStore).Reduce(variance, CubAddOp{}, blockDim.x);
 
   if (threadIdx.x == 0) {
-    s_variance = rsqrtf(variance / hidden_size + epsilon);
+    if (nan_flag_ptr && (isnan(variance) || isinf(variance))) {
+      nan_flag_ptr[blockIdx.x] = 1;
+      s_variance = 0.0f;
+    } else {
+      s_variance = rsqrtf(variance / hidden_size + epsilon);
+    }
   }
   __syncthreads();
 
@@ -135,9 +157,17 @@ fused_add_rms_norm_kernel(
     int id = blockIdx.x * vec_hidden_size + idx;
     int64_t strided_id = blockIdx.x * vec_input_stride + idx;
     _f16Vec<scalar_t, width> temp = residual_v[id];
-    temp *= s_variance;
-    temp *= weight_v[idx];
-    input_v[strided_id] = temp;
+    if (s_variance == 0.0f) {
+      // NaN detected: zero both output and residual.
+      _f16Vec<scalar_t, width> zero;
+      memset(&zero, 0, sizeof(zero));
+      residual_v[id] = zero;
+      input_v[strided_id] = zero;
+    } else {
+      temp *= s_variance;
+      temp *= weight_v[idx];
+      input_v[strided_id] = temp;
+    }
   }
 }
 
@@ -151,7 +181,8 @@ fused_add_rms_norm_kernel(
     const int64_t input_stride,
     scalar_t* __restrict__ residual,      // [..., hidden_size]
     const scalar_t* __restrict__ weight,  // [hidden_size]
-    const float epsilon, const int num_tokens, const int hidden_size) {
+    const float epsilon, const int num_tokens, const int hidden_size,
+    int8_t* __restrict__ nan_flag_ptr) {
   __shared__ float s_variance;
   float variance = 0.0f;
 
@@ -168,14 +199,25 @@ fused_add_rms_norm_kernel(
   variance = BlockReduce(reduceStore).Reduce(variance, CubAddOp{}, blockDim.x);
 
   if (threadIdx.x == 0) {
-    s_variance = rsqrtf(variance / hidden_size + epsilon);
+    if (nan_flag_ptr && (isnan(variance) || isinf(variance))) {
+      nan_flag_ptr[blockIdx.x] = 1;
+      s_variance = 0.0f;
+    } else {
+      s_variance = rsqrtf(variance / hidden_size + epsilon);
+    }
   }
   __syncthreads();
 
   for (int idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
-    float x = (float)residual[blockIdx.x * hidden_size + idx];
-    input[blockIdx.x * input_stride + idx] =
-        ((scalar_t)(x * s_variance)) * weight[idx];
+    if (s_variance == 0.0f) {
+      // NaN detected: zero both output and residual.
+      residual[blockIdx.x * hidden_size + idx] = (scalar_t)0;
+      input[blockIdx.x * input_stride + idx] = (scalar_t)0;
+    } else {
+      float x = (float)residual[blockIdx.x * hidden_size + idx];
+      input[blockIdx.x * input_stride + idx] =
+          ((scalar_t)(x * s_variance)) * weight[idx];
+    }
   }
 }
 
@@ -184,7 +226,10 @@ fused_add_rms_norm_kernel(
 void rms_norm(torch::Tensor& out,     // [..., hidden_size]
               torch::Tensor& input,   // [..., hidden_size]
               torch::Tensor& weight,  // [hidden_size]
-              double epsilon) {
+              double epsilon,
+              std::optional<torch::Tensor> nan_flags,
+              int64_t layer_idx,
+              int64_t max_num_tokens) {
   TORCH_CHECK(out.is_contiguous());
   if (input.stride(-1) != 1) {
     input = input.contiguous();
@@ -201,6 +246,11 @@ void rms_norm(torch::Tensor& out,     // [..., hidden_size]
   int64_t input_stride_d4 = (num_dims >= 4) ? input.stride(-4) : 0;
   int64_t input_shape_d2 = (num_dims >= 3) ? input.size(-2) : 0;
   int64_t input_shape_d3 = (num_dims >= 4) ? input.size(-3) : 0;
+
+  int8_t* nan_flag_ptr = nullptr;
+  if (nan_flags.has_value()) {
+    nan_flag_ptr = nan_flags->data_ptr<int8_t>() + layer_idx * max_num_tokens;
+  }
 
   // For large num_tokens, use smaller blocks to increase SM concurrency.
   const int max_block_size = (num_tokens < 256) ? 1024 : 256;
@@ -220,7 +270,7 @@ void rms_norm(torch::Tensor& out,     // [..., hidden_size]
                 out.data_ptr<scalar_t>(), input.data_ptr<scalar_t>(),
                 input_stride_d2, input_stride_d3, input_stride_d4,
                 input_shape_d2, input_shape_d3, weight.data_ptr<scalar_t>(),
-                epsilon, num_tokens, hidden_size);
+                epsilon, num_tokens, hidden_size, nan_flag_ptr);
       });
     });
   });
@@ -233,13 +283,16 @@ void rms_norm(torch::Tensor& out,     // [..., hidden_size]
             <<<grid, block, 0, stream>>>(                                   \
                 input.data_ptr<scalar_t>(), input_stride,                   \
                 residual.data_ptr<scalar_t>(), weight.data_ptr<scalar_t>(), \
-                epsilon, num_tokens, hidden_size);                          \
+                epsilon, num_tokens, hidden_size, nan_flag_ptr);            \
       });
 
 void fused_add_rms_norm(torch::Tensor& input,     // [..., hidden_size]
                         torch::Tensor& residual,  // [..., hidden_size]
                         torch::Tensor& weight,    // [hidden_size]
-                        double epsilon) {
+                        double epsilon,
+                        std::optional<torch::Tensor> nan_flags,
+                        int64_t layer_idx,
+                        int64_t max_num_tokens) {
   TORCH_CHECK(weight.scalar_type() == input.scalar_type());
   TORCH_CHECK(input.scalar_type() == residual.scalar_type());
   TORCH_CHECK(residual.is_contiguous());
@@ -247,6 +300,11 @@ void fused_add_rms_norm(torch::Tensor& input,     // [..., hidden_size]
   int hidden_size = input.size(-1);
   int64_t input_stride = input.stride(-2);
   int num_tokens = input.numel() / hidden_size;
+
+  int8_t* nan_flag_ptr = nullptr;
+  if (nan_flags.has_value()) {
+    nan_flag_ptr = nan_flags->data_ptr<int8_t>() + layer_idx * max_num_tokens;
+  }
 
   dim3 grid(num_tokens);
   /* This kernel is memory-latency bound in many scenarios.
