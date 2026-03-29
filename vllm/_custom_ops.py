@@ -56,11 +56,11 @@ def create_fp4_scale_tensor(
         rounded_m = round_up(m, 128)
         scale_n = n // block_size
         rounded_n = round_up(scale_n, 4)
-        return torch.empty(
+        return torch.zeros(
             (rounded_m, rounded_n // 4), device=device, dtype=torch.int32
         )
     else:
-        return torch.empty((m, n // block_size), device=device, dtype=torch.uint8)
+        return torch.zeros((m, n // block_size), device=device, dtype=torch.uint8)
 
 
 def create_fp4_output_tensors(
@@ -403,15 +403,31 @@ def rotary_embedding(
 
 # layer norm ops
 def rms_norm(
-    out: torch.Tensor, input: torch.Tensor, weight: torch.Tensor, epsilon: float
+    out: torch.Tensor,
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    epsilon: float,
+    nan_flags: torch.Tensor | None = None,
+    layer_idx: int = 0,
+    max_num_tokens: int = 0,
 ) -> None:
-    torch.ops._C.rms_norm(out, input, weight, epsilon)
+    torch.ops._C.rms_norm(
+        out, input, weight, epsilon, nan_flags, layer_idx, max_num_tokens
+    )
 
 
 def fused_add_rms_norm(
-    input: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor, epsilon: float
+    input: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    epsilon: float,
+    nan_flags: torch.Tensor | None = None,
+    layer_idx: int = 0,
+    max_num_tokens: int = 0,
 ) -> None:
-    torch.ops._C.fused_add_rms_norm(input, residual, weight, epsilon)
+    torch.ops._C.fused_add_rms_norm(
+        input, residual, weight, epsilon, nan_flags, layer_idx, max_num_tokens
+    )
 
 
 def fused_qk_norm_rope(

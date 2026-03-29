@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 import torch
 from torch.nn.parameter import Parameter
 
+import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import init_fp8_linear_kernel
