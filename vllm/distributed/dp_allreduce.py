@@ -164,8 +164,10 @@ class UCXDPAllReduce(DPAllReduceBackend):
 
         listener = self._run_coro(_start_listener())
 
-        # Exchange (hostname, port) via gloo all_reduce (one-time)
-        hostname = socket_mod.gethostname()
+        # Exchange (IP, port) via gloo all_reduce (one-time)
+        # Use IP address instead of hostname — in Kubernetes, pod hostnames
+        # may not be resolvable from other pods.
+        hostname = socket_mod.gethostbyname(socket_mod.gethostname())
         hostname_bytes = hostname.encode()[:60].ljust(60, b"\0")
         # Pack: 60 bytes hostname + 4 bytes port (big endian)
         import struct
