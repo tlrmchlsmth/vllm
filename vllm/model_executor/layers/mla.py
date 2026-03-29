@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 import torch
 
+import vllm.envs as envs
 from vllm.config import CacheConfig
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.attention import MLAAttention
@@ -110,6 +111,15 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
 
         self.prefix = prefix
 
+        if envs.VLLM_NAN_DETECT:
+            from vllm.model_executor.layers.nan_detector import NaNDetector
+
+            self._nan_detect_indices = {
+                "attn_output": NaNDetector.get().register(
+                    f"{prefix}.attn_output"
+                ),
+            }
+
     def forward(
         self,
         positions: torch.Tensor,
@@ -173,5 +183,12 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             k_pe,
             output_shape=(hidden_states.shape[0], self.num_heads * self.v_head_dim),
         )
+
+        if envs.VLLM_NAN_DETECT and hasattr(self, "_nan_detect_indices"):
+            from vllm.model_executor.layers.nan_detector import NaNDetector
+
+            NaNDetector.get().check_tensor(
+                attn_out, self._nan_detect_indices["attn_output"]
+            )
 
         return self.o_proj(attn_out)[0]
