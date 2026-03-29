@@ -2,6 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+import os
+import time
+
 import numpy as np
 import torch
 import torch.distributed as dist
@@ -15,6 +18,10 @@ from vllm.v1.worker.ubatch_utils import (
 )
 
 logger = init_logger(__name__)
+
+_DP_SYNC_STALL_THRESHOLD_S = float(
+    os.environ.get("VLLM_DP_SYNC_STALL_THRESHOLD_S", "0.5")
+)
 
 
 def _get_device_and_group(parallel_config: ParallelConfig):
@@ -51,7 +58,14 @@ def _run_ar(
     tensor[1][dp_rank] = padded_num_tokens_per_ubatch
     tensor[2][dp_rank] = 1 if should_ubatch else 0
     tensor[3][dp_rank] = cudagraph_mode
+    if _DP_SYNC_STALL_THRESHOLD_S > 0:
+        t0 = time.monotonic()
     dist.all_reduce(tensor, group=group)
+    if _DP_SYNC_STALL_THRESHOLD_S > 0:
+        elapsed = time.monotonic() - t0
+        if elapsed > _DP_SYNC_STALL_THRESHOLD_S:
+            logger.warning(
+                "DP all_reduce stall: %.3fs (rank %d)", elapsed, dp_rank)
     return tensor
 
 
