@@ -136,8 +136,6 @@ class UCXDPAllReduce(DPAllReduceBackend):
             UCXWorker,
         )
 
-        right_rank = (self.rank + 1) % self.world_size
-
         # Create UCX context and worker
         self._ctx = UCXContext()
         self._worker = UCXWorker(self._ctx)
@@ -160,8 +158,8 @@ class UCXDPAllReduce(DPAllReduceBackend):
         my_info = struct.pack(">I", addr_len) + my_addr_bytes.ljust(
             MAX_ADDR_LEN, b"\0"
         )
-        total_bytes = MAX_ADDR_LEN + 4  # 516 bytes
-        n_ints = total_bytes // 4  # 129 int32s per rank
+        total_bytes = MAX_ADDR_LEN + 4
+        n_ints = total_bytes // 4
 
         info_tensor = torch.zeros(
             self.world_size, n_ints, dtype=torch.int32, device="cpu"
@@ -174,100 +172,84 @@ class UCXDPAllReduce(DPAllReduceBackend):
         # Barrier: ensure all ranks have exchanged addresses
         dist.barrier(group=cpu_group)
 
-        # Decode right neighbor's worker address
-        right_info = struct.pack(
-            f"{n_ints}i",
-            *[int(info_tensor[right_rank, i]) for i in range(n_ints)],
-        )
-        right_addr_len = struct.unpack(">I", right_info[:4])[0]
-        right_addr_bytes = right_info[4 : 4 + right_addr_len]
-
-        # Create endpoint to right neighbor directly from address
-        right_addr = UCXAddress.from_buffer(right_addr_bytes)
-        self._right_ep = UCXEndpoint.create_from_worker_address(
-            self._worker, right_addr, True
-        )
-
-        logger.info(
-            "UCX endpoint: rank %d → right=%d (addr %d bytes)",
-            self.rank, right_rank, right_addr_len,
-        )
-
-        # For the ring, we also need the left neighbor to connect to us.
-        # With create_from_worker_address, connections are one-sided —
-        # we just need left neighbor's endpoint to us, which they create
-        # on their side. We create our endpoint to the left neighbor too.
-        left_rank = (self.rank - 1) % self.world_size
-        left_info = struct.pack(
-            f"{n_ints}i",
-            *[int(info_tensor[left_rank, i]) for i in range(n_ints)],
-        )
-        left_addr_len = struct.unpack(">I", left_info[:4])[0]
-        left_addr_bytes = left_info[4 : 4 + left_addr_len]
-        left_addr = UCXAddress.from_buffer(left_addr_bytes)
-        self._left_ep = UCXEndpoint.create_from_worker_address(
-            self._worker, left_addr, True
-        )
+        # Create endpoints to ALL other ranks (full mesh)
+        self._endpoints = {}
+        for peer in range(self.world_size):
+            if peer == self.rank:
+                continue
+            peer_info = struct.pack(
+                f"{n_ints}i",
+                *[int(info_tensor[peer, i]) for i in range(n_ints)],
+            )
+            peer_addr_len = struct.unpack(">I", peer_info[:4])[0]
+            peer_addr_bytes = peer_info[4 : 4 + peer_addr_len]
+            peer_addr = UCXAddress.from_buffer(peer_addr_bytes)
+            self._endpoints[peer] = UCXEndpoint.create_from_worker_address(
+                self._worker, peer_addr, True
+            )
 
         logger.info(
-            "UCX ring ready: rank %d, left=%d, right=%d",
-            self.rank, left_rank, right_rank,
+            "UCX mesh ready: rank %d, %d endpoints",
+            self.rank, len(self._endpoints),
         )
 
     def all_reduce(self, tensor: torch.Tensor) -> None:
-        """Ring allgather using UCX tag send/recv."""
-        import threading
+        """One-shot allgather: every rank sends its column to all peers
+        and receives all other columns, all posted at once."""
+        import struct
 
         from ucp._libs.arr import Array
         from ucp._libs.ucx_api import tag_recv_nb, tag_send_nb
 
         N = self.world_size
         data = tensor.numpy()
+        my_col = data[:, self.rank].copy()
 
-        for step in range(N - 1):
-            send_col = (self.rank - step) % N
-            recv_col = (self.rank - step - 1) % N
+        # Pre-allocate recv buffers
+        recv_bufs = {}
+        for peer in range(N):
+            if peer != self.rank:
+                recv_bufs[peer] = bytearray(self._chunk_bytes)
 
-            send_buf = data[:, send_col].copy()
-            recv_buf = bytearray(self._chunk_bytes)
+        pending = [2 * (N - 1)]  # N-1 sends + N-1 recvs
+        error = [None]
 
-            tag = step & 0xFFFFFFFF
+        def _cb(req, exc, _p=pending, _e=error):
+            if exc is not None and _e[0] is None:
+                _e[0] = exc
+            _p[0] -= 1
 
-            # Track completion via callbacks
-            pending = [2]  # send + recv
-            error = [None]
-
-            def _cb(req, exc, _p=pending, _e=error):
-                if exc is not None:
-                    _e[0] = exc
-                _p[0] -= 1
-
-            # Post send and recv (buffers must be wrapped in Array)
-            send_req = tag_send_nb(
-                self._right_ep, Array(send_buf), send_buf.nbytes, tag, _cb,
+        # Post ALL sends and recvs at once
+        for peer in range(N):
+            if peer == self.rank:
+                continue
+            # Send our column to this peer (tag = sender rank)
+            req = tag_send_nb(
+                self._endpoints[peer], Array(my_col),
+                my_col.nbytes, self.rank, _cb,
             )
-            recv_req = tag_recv_nb(
-                self._worker, Array(recv_buf), len(recv_buf), tag, _cb,
+            if req is None:
+                pending[0] -= 1
+            # Recv this peer's column (tag = peer's rank)
+            req = tag_recv_nb(
+                self._worker, Array(recv_bufs[peer]),
+                self._chunk_bytes, peer, _cb,
             )
-
-            # Immediate completion counts
-            if send_req is None:
-                pending[0] -= 1
-            if recv_req is None:
+            if req is None:
                 pending[0] -= 1
 
-            # Progress until both complete
-            while pending[0] > 0:
-                self._worker.progress()
+        # Single progress loop for all operations
+        while pending[0] > 0:
+            self._worker.progress()
 
-            if error[0] is not None:
-                raise error[0]
+        if error[0] is not None:
+            raise error[0]
 
-            # Unpack received column
-            import struct
-            vals = struct.unpack("4i", recv_buf)
+        # Unpack received columns
+        for peer, buf in recv_bufs.items():
+            vals = struct.unpack("4i", buf)
             for row in range(4):
-                data[row, recv_col] = vals[row]
+                data[row, peer] = vals[row]
 
     def close(self):
         pass
