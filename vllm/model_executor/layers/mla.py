@@ -190,5 +190,6 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             NaNDetector.get().check_tensor(
                 attn_out, self._nan_detect_indices["attn_output"]
             )
+            attn_out = torch.nan_to_num(attn_out)
 
         return self.o_proj(attn_out)[0]
