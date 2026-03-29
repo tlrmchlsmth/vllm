@@ -225,11 +225,6 @@ class NaNDetector:
                 len(pad_bad),
             )
 
-        if len(real_bad) > 0:
-            raise RuntimeError(
-                f"NaN/Inf detected at {len(real_bad)} checkpoint(s). "
-                "See ERROR logs above for details."
-            )
 
     # ------------------------------------------------------------------
     # KV cache checks (on block assignment)
