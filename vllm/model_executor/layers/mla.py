@@ -184,12 +184,4 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             output_shape=(hidden_states.shape[0], self.num_heads * self.v_head_dim),
         )
 
-        if envs.VLLM_NAN_DETECT and hasattr(self, "_nan_detect_indices"):
-            from vllm.model_executor.layers.nan_detector import NaNDetector
-
-            NaNDetector.get().check_tensor(
-                attn_out, self._nan_detect_indices["attn_output"]
-            )
-            attn_out = torch.nan_to_num(attn_out)
-
         return self.o_proj(attn_out)[0]
