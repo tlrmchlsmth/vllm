@@ -180,7 +180,6 @@ def test_padding_nan_does_not_leak_rms_norm_static_fp8_quant(
 ):
     """NaN in padding must not leak into real tokens via fused norm+FP8 quant."""
     from tests.kernels.quant_utils import FP8_DTYPE
-    from vllm import _custom_ops as ops
 
     num_real = 4
     num_padded = 8
@@ -242,6 +241,171 @@ def test_padding_nan_does_not_leak_rms_norm_dynamic_quant(
     real_out = out[:num_real].to(torch.float32)
     assert torch.isfinite(real_out).all(), (
         "NaN leaked via rms_norm_dynamic_per_token_quant"
+    )
+
+
+@pytest.mark.parametrize("num_real", [1, 4])
+@pytest.mark.parametrize("num_padded", [8, 16])
+@torch.inference_mode()
+def test_reshape_and_cache_skips_neg1_slots(
+    default_vllm_config, device, num_real, num_padded
+):
+    """reshape_and_cache must not write to cache for slot_mapping=-1 (padding)."""
+    from vllm import _custom_ops as ops
+
+    num_heads = 4
+    head_size = 64
+    block_size = 16
+    num_blocks = 4
+    dtype = torch.float16
+    x_val = head_size  # for reshape_and_cache, x = vector width
+
+    key = torch.randn(
+        num_padded, num_heads, head_size, dtype=dtype, device=device
+    )
+    value = torch.randn(
+        num_padded, num_heads, head_size, dtype=dtype, device=device
+    )
+    # Padding tokens have NaN
+    key[num_real:] = float("nan")
+    value[num_real:] = float("nan")
+
+    key_cache = torch.zeros(
+        num_blocks, num_heads, head_size // x_val, block_size, x_val,
+        dtype=dtype, device=device,
+    )
+    value_cache = torch.zeros(
+        num_blocks, num_heads, head_size, block_size,
+        dtype=dtype, device=device,
+    )
+
+    # Real tokens get valid slots, padding gets -1
+    slot_mapping = torch.full(
+        (num_padded,), -1, dtype=torch.int64, device=device
+    )
+    for i in range(num_real):
+        slot_mapping[i] = i  # block 0, offsets 0..num_real-1
+
+    k_scale = torch.tensor(1.0, dtype=torch.float32, device=device)
+    v_scale = torch.tensor(1.0, dtype=torch.float32, device=device)
+
+    ops.reshape_and_cache(
+        key, value, key_cache, value_cache, slot_mapping, "auto",
+        k_scale, v_scale,
+    )
+
+    # Cache should have no NaN — padding tokens were skipped
+    assert torch.isfinite(key_cache).all(), (
+        "NaN written to key_cache from padding token via reshape_and_cache"
+    )
+    assert torch.isfinite(value_cache).all(), (
+        "NaN written to value_cache from padding token via reshape_and_cache"
+    )
+
+
+@pytest.mark.parametrize("num_real", [1, 4])
+@pytest.mark.parametrize("num_padded", [8, 16])
+@torch.inference_mode()
+def test_concat_and_cache_mla_skips_padding(
+    default_vllm_config, device, num_real, num_padded
+):
+    """concat_and_cache_mla only processes slot_mapping.size(0) tokens.
+
+    When slot_mapping is shorter than kv_c/k_pe (V1 padding), the kernel
+    must not touch padding tokens at all.
+    """
+    from vllm import _custom_ops as ops
+
+    kv_lora_rank = 512
+    pe_dim = 64
+    block_size = 16
+    num_blocks = 4
+    dtype = torch.float16
+    entry_size = kv_lora_rank + pe_dim
+
+    kv_c = torch.randn(
+        num_padded, kv_lora_rank, dtype=dtype, device=device
+    )
+    k_pe = torch.randn(num_padded, pe_dim, dtype=dtype, device=device)
+    # Padding tokens have NaN
+    kv_c[num_real:] = float("nan")
+    k_pe[num_real:] = float("nan")
+
+    kv_cache = torch.zeros(
+        num_blocks, block_size, entry_size, dtype=dtype, device=device
+    )
+
+    # Only provide slot_mapping for real tokens (V1 behavior)
+    slot_mapping = torch.arange(
+        num_real, dtype=torch.int64, device=device
+    )
+
+    scale = torch.tensor(1.0, dtype=torch.float32, device=device)
+
+    ops.concat_and_cache_mla(
+        kv_c, k_pe, kv_cache, slot_mapping, "auto", scale
+    )
+
+    # Only the first num_real slots should have data, and no NaN anywhere
+    assert torch.isfinite(kv_cache).all(), (
+        "NaN written to KV cache from padding via concat_and_cache_mla"
+    )
+
+
+@pytest.mark.parametrize("num_real", [1, 4])
+@torch.inference_mode()
+def test_reshape_and_cache_flash_skips_neg1_slots(
+    default_vllm_config, device, num_real
+):
+    """reshape_and_cache_flash must skip slot_mapping=-1 entries."""
+    from vllm import _custom_ops as ops
+
+    num_padded = 8
+    num_heads = 4
+    head_size = 64
+    block_size = 16
+    num_blocks = 4
+    dtype = torch.float16
+
+    key = torch.randn(
+        num_padded, num_heads, head_size, dtype=dtype, device=device
+    )
+    value = torch.randn(
+        num_padded, num_heads, head_size, dtype=dtype, device=device
+    )
+    key[num_real:] = float("nan")
+    value[num_real:] = float("nan")
+
+    # Flash cache layout: [num_blocks, 2, block_size, num_heads, head_size]
+    # (NHD layout)
+    key_cache = torch.zeros(
+        num_blocks, block_size, num_heads, head_size,
+        dtype=dtype, device=device,
+    )
+    value_cache = torch.zeros(
+        num_blocks, block_size, num_heads, head_size,
+        dtype=dtype, device=device,
+    )
+
+    slot_mapping = torch.full(
+        (num_padded,), -1, dtype=torch.int64, device=device
+    )
+    for i in range(num_real):
+        slot_mapping[i] = i
+
+    k_scale = torch.tensor(1.0, dtype=torch.float32, device=device)
+    v_scale = torch.tensor(1.0, dtype=torch.float32, device=device)
+
+    ops.reshape_and_cache_flash(
+        key, value, key_cache, value_cache, slot_mapping, "auto",
+        k_scale, v_scale,
+    )
+
+    assert torch.isfinite(key_cache).all(), (
+        "NaN written to key_cache from padding via reshape_and_cache_flash"
+    )
+    assert torch.isfinite(value_cache).all(), (
+        "NaN written to value_cache from padding via reshape_and_cache_flash"
     )
 
 
