@@ -115,12 +115,6 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             from vllm.model_executor.layers.nan_detector import NaNDetector
 
             self._nan_detect_indices = {
-                "kv_c_normed": NaNDetector.get().register(
-                    f"{prefix}.kv_c_normed"
-                ),
-                "k_pe": NaNDetector.get().register(
-                    f"{prefix}.k_pe"
-                ),
                 "attn_output": NaNDetector.get().register(
                     f"{prefix}.attn_output"
                 ),
@@ -182,13 +176,6 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
 
         if llama_4_scaling is not None:
             q *= llama_4_scaling
-
-        if envs.VLLM_NAN_DETECT and hasattr(self, "_nan_detect_indices"):
-            from vllm.model_executor.layers.nan_detector import NaNDetector
-
-            det = NaNDetector.get()
-            det.check_tensor(kv_c_normed, self._nan_detect_indices["kv_c_normed"])
-            det.check_tensor(k_pe, self._nan_detect_indices["k_pe"])
 
         attn_out = self.mla_attn(
             q,
