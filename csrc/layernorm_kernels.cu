@@ -63,9 +63,12 @@ __global__ void rms_norm_kernel(
   variance = BlockReduce(reduceStore).Reduce(variance, CubAddOp{}, blockDim.x);
 
   if (threadIdx.x == 0) {
-    s_variance = rsqrtf(variance / hidden_size + epsilon);
     if (nan_flag_ptr && (isnan(variance) || isinf(variance))) {
       nan_flag_ptr[blockIdx.x] = 1;
+      // Zero the output instead of propagating NaN.
+      s_variance = 0.0f;
+    } else {
+      s_variance = rsqrtf(variance / hidden_size + epsilon);
     }
   }
   __syncthreads();
@@ -132,9 +135,11 @@ fused_add_rms_norm_kernel(
   variance = BlockReduce(reduceStore).Reduce(variance, CubAddOp{}, blockDim.x);
 
   if (threadIdx.x == 0) {
-    s_variance = rsqrtf(variance / hidden_size + epsilon);
     if (nan_flag_ptr && (isnan(variance) || isinf(variance))) {
       nan_flag_ptr[blockIdx.x] = 1;
+      s_variance = 0.0f;
+    } else {
+      s_variance = rsqrtf(variance / hidden_size + epsilon);
     }
   }
   __syncthreads();
@@ -177,9 +182,11 @@ fused_add_rms_norm_kernel(
   variance = BlockReduce(reduceStore).Reduce(variance, CubAddOp{}, blockDim.x);
 
   if (threadIdx.x == 0) {
-    s_variance = rsqrtf(variance / hidden_size + epsilon);
     if (nan_flag_ptr && (isnan(variance) || isinf(variance))) {
       nan_flag_ptr[blockIdx.x] = 1;
+      s_variance = 0.0f;
+    } else {
+      s_variance = rsqrtf(variance / hidden_size + epsilon);
     }
   }
   __syncthreads();
