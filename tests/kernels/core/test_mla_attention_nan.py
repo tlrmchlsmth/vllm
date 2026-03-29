@@ -483,3 +483,262 @@ def test_mla_decode_cuda_graph_replay():
             f"NaN leaked during simulated graph replay "
             f"(num_real={num_real})"
         )
+
+
+# ---- FP8 KV cache tests ----
+
+
+def make_mla_decode_inputs_fp8(
+    batch_size: int,
+    seq_lens: list[int],
+    num_blocks: int,
+    kv_scale: float = 1.0,
+    device: str = "cuda",
+):
+    """Create inputs with FP8 KV cache for trtllm_batch_decode_with_kv_cache_mla."""
+    max_seq_len = max(seq_lens)
+    max_blocks_per_seq = (max_seq_len + BLOCK_SIZE - 1) // BLOCK_SIZE
+    block_table_pad = int(128 // BLOCK_SIZE)
+    max_blocks_per_seq = (
+        (max_blocks_per_seq + block_table_pad - 1)
+        // block_table_pad
+        * block_table_pad
+    )
+
+    q = torch.randn(
+        batch_size, 1, NUM_HEADS, QK_HEAD_DIM, dtype=DTYPE, device=device
+    )
+
+    kv_entry_size = KV_LORA_RANK + QK_ROPE_HEAD_DIM
+    total_blocks = max(num_blocks, batch_size * max_blocks_per_seq)
+
+    # Create bf16 KV data, scale it, then quantize to FP8
+    kv_bf16 = torch.randn(
+        total_blocks, 1, BLOCK_SIZE, kv_entry_size, dtype=DTYPE, device=device
+    )
+    kv_cache = kv_bf16.to(torch.float8_e4m3fn)
+
+    block_tables = torch.zeros(
+        batch_size, max_blocks_per_seq, dtype=torch.int32, device=device
+    )
+    block_idx = 0
+    for i, sl in enumerate(seq_lens):
+        n_blocks = (sl + BLOCK_SIZE - 1) // BLOCK_SIZE
+        for j in range(n_blocks):
+            block_tables[i, j] = block_idx
+            block_idx += 1
+
+    seq_lens_t = torch.tensor(seq_lens, dtype=torch.int32, device=device)
+    workspace = torch.zeros(
+        WORKSPACE_SIZE, dtype=torch.uint8, device=device
+    )
+
+    # bmm scales for FP8: scale = 1/qk_head_dim^0.5 * q_scale * k_scale
+    # Use kv_scale as the combined q/k scale factor
+    bmm1_scale = (1.0 / (QK_HEAD_DIM ** 0.5)) * kv_scale
+    bmm2_scale = kv_scale
+
+    return (
+        q, kv_cache, block_tables, seq_lens_t, max_seq_len, workspace,
+        bmm1_scale, bmm2_scale,
+    )
+
+
+@requires_flashinfer_mla
+@pytest.mark.parametrize("seq_len", [1, 128, 1024])
+@torch.inference_mode()
+def test_mla_decode_fp8_clean(seq_len):
+    """FP8 KV cache with clean inputs should not produce NaN."""
+    from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
+
+    batch_size = 4
+    seq_lens = [seq_len] * batch_size
+    num_blocks = batch_size * ((seq_len + BLOCK_SIZE - 1) // BLOCK_SIZE)
+
+    q, kv_cache, block_tables, seq_lens_t, max_seq_len, ws, s1, s2 = (
+        make_mla_decode_inputs_fp8(batch_size, seq_lens, num_blocks)
+    )
+
+    o = trtllm_batch_decode_with_kv_cache_mla(
+        query=q,
+        kv_cache=kv_cache,
+        workspace_buffer=ws,
+        qk_nope_head_dim=QK_NOPE_HEAD_DIM,
+        kv_lora_rank=KV_LORA_RANK,
+        qk_rope_head_dim=QK_ROPE_HEAD_DIM,
+        block_tables=block_tables,
+        seq_lens=seq_lens_t,
+        max_seq_len=max_seq_len,
+        bmm1_scale=s1,
+        bmm2_scale=s2,
+    )
+
+    assert torch.isfinite(o).all(), (
+        f"NaN/Inf with FP8 KV cache, seq_len={seq_len}"
+    )
+
+
+@requires_flashinfer_mla
+@pytest.mark.parametrize("kv_scale", [0.001, 0.01, 0.1, 1.0, 10.0, 100.0])
+@torch.inference_mode()
+def test_mla_decode_fp8_extreme_scales(kv_scale):
+    """FP8 KV cache with extreme dequant scales — can overflow during BMM."""
+    from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
+
+    batch_size = 4
+    seq_len = 128
+    seq_lens = [seq_len] * batch_size
+    num_blocks = batch_size * ((seq_len + BLOCK_SIZE - 1) // BLOCK_SIZE)
+
+    q, kv_cache, block_tables, seq_lens_t, max_seq_len, ws, s1, s2 = (
+        make_mla_decode_inputs_fp8(
+            batch_size, seq_lens, num_blocks, kv_scale=kv_scale
+        )
+    )
+
+    o = trtllm_batch_decode_with_kv_cache_mla(
+        query=q,
+        kv_cache=kv_cache,
+        workspace_buffer=ws,
+        qk_nope_head_dim=QK_NOPE_HEAD_DIM,
+        kv_lora_rank=KV_LORA_RANK,
+        qk_rope_head_dim=QK_ROPE_HEAD_DIM,
+        block_tables=block_tables,
+        seq_lens=seq_lens_t,
+        max_seq_len=max_seq_len,
+        bmm1_scale=s1,
+        bmm2_scale=s2,
+    )
+
+    assert torch.isfinite(o).all(), (
+        f"NaN/Inf with FP8 KV cache, kv_scale={kv_scale}"
+    )
+
+
+@requires_flashinfer_mla
+@torch.inference_mode()
+def test_mla_decode_fp8_nan_in_cache():
+    """NaN in FP8 KV cache block for one request must not leak to others."""
+    from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
+
+    batch_size = 4
+    seq_len = 128
+    seq_lens = [seq_len] * batch_size
+    num_blocks = batch_size * ((seq_len + BLOCK_SIZE - 1) // BLOCK_SIZE)
+
+    q, kv_cache, block_tables, seq_lens_t, max_seq_len, ws, s1, s2 = (
+        make_mla_decode_inputs_fp8(batch_size, seq_lens, num_blocks)
+    )
+
+    # Poison request 2's first block with FP8 NaN (0x7F)
+    req2_block = block_tables[2, 0].item()
+    kv_cache[req2_block] = torch.tensor(
+        float("nan"), dtype=torch.bfloat16
+    ).to(torch.float8_e4m3fn)
+
+    o = trtllm_batch_decode_with_kv_cache_mla(
+        query=q,
+        kv_cache=kv_cache,
+        workspace_buffer=ws,
+        qk_nope_head_dim=QK_NOPE_HEAD_DIM,
+        kv_lora_rank=KV_LORA_RANK,
+        qk_rope_head_dim=QK_ROPE_HEAD_DIM,
+        block_tables=block_tables,
+        seq_lens=seq_lens_t,
+        max_seq_len=max_seq_len,
+        bmm1_scale=s1,
+        bmm2_scale=s2,
+    )
+
+    # Other requests should be clean
+    for i in [0, 1, 3]:
+        assert torch.isfinite(o[i]).all(), (
+            f"FP8 NaN leaked from request 2 to request {i}"
+        )
+
+
+@requires_flashinfer_mla
+@pytest.mark.parametrize("num_real", [1, 4, 8])
+@torch.inference_mode()
+def test_mla_decode_fp8_cuda_graph_nan_padding(num_real):
+    """FP8 KV cache + CUDA graph padding with NaN Q values."""
+    from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
+
+    max_batch = 16
+    seq_len = 128
+    seq_lens = [seq_len] * max_batch
+    num_blocks = max_batch * ((seq_len + BLOCK_SIZE - 1) // BLOCK_SIZE)
+
+    q, kv_cache, block_tables, seq_lens_t, max_seq_len, ws, s1, s2 = (
+        make_mla_decode_inputs_fp8(max_batch, seq_lens, num_blocks)
+    )
+
+    # NaN padding Q + zero seq_lens for padding
+    q[num_real:] = float("nan")
+    seq_lens_t[num_real:] = 0
+
+    o = trtllm_batch_decode_with_kv_cache_mla(
+        query=q,
+        kv_cache=kv_cache,
+        workspace_buffer=ws,
+        qk_nope_head_dim=QK_NOPE_HEAD_DIM,
+        kv_lora_rank=KV_LORA_RANK,
+        qk_rope_head_dim=QK_ROPE_HEAD_DIM,
+        block_tables=block_tables,
+        seq_lens=seq_lens_t,
+        max_seq_len=max_seq_len,
+        bmm1_scale=s1,
+        bmm2_scale=s2,
+    )
+
+    real_output = o[:num_real]
+    assert torch.isfinite(real_output).all(), (
+        f"FP8: NaN leaked from padding Q to real tokens "
+        f"(num_real={num_real})"
+    )
+
+
+@requires_flashinfer_mla
+@torch.inference_mode()
+def test_mla_decode_fp8_max_fp8_values():
+    """FP8 KV cache filled with max representable FP8 value (448.0).
+
+    When dequantized with a scale, QK dot products could overflow.
+    """
+    from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
+
+    batch_size = 4
+    seq_len = 128
+    seq_lens = [seq_len] * batch_size
+    num_blocks = batch_size * ((seq_len + BLOCK_SIZE - 1) // BLOCK_SIZE)
+
+    q, kv_cache, block_tables, seq_lens_t, max_seq_len, ws, s1, s2 = (
+        make_mla_decode_inputs_fp8(batch_size, seq_lens, num_blocks)
+    )
+
+    # Fill KV cache with max FP8 e4m3fn value
+    max_fp8 = torch.tensor(448.0, dtype=torch.bfloat16).to(
+        torch.float8_e4m3fn
+    )
+    kv_cache.fill_(max_fp8)
+
+    # Also use large Q values
+    q *= 10.0
+
+    o = trtllm_batch_decode_with_kv_cache_mla(
+        query=q,
+        kv_cache=kv_cache,
+        workspace_buffer=ws,
+        qk_nope_head_dim=QK_NOPE_HEAD_DIM,
+        kv_lora_rank=KV_LORA_RANK,
+        qk_rope_head_dim=QK_ROPE_HEAD_DIM,
+        block_tables=block_tables,
+        seq_lens=seq_lens_t,
+        max_seq_len=max_seq_len,
+        bmm1_scale=s1,
+        bmm2_scale=s2,
+    )
+
+    assert torch.isfinite(o).all(), (
+        "NaN/Inf with max FP8 KV values + large Q"
+    )
