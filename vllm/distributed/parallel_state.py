@@ -1248,6 +1248,44 @@ def get_dp_group() -> GroupCoordinator:
     return _DP
 
 
+_DP_ALLREDUCE: "DPAllReduceBackend | None" = None
+
+
+def get_dp_allreduce() -> "DPAllReduceBackend":
+    assert _DP_ALLREDUCE is not None, (
+        "DP all_reduce backend is not initialized"
+    )
+    return _DP_ALLREDUCE
+
+
+def init_dp_allreduce(parallel_config) -> None:
+    """Initialize the DP scheduler all_reduce backend.
+    Called after the DP group is created."""
+    from vllm.distributed.dp_allreduce import create_dp_allreduce_backend
+
+    global _DP_ALLREDUCE
+    dp_group = get_dp_group()
+
+    # When using default gloo and NCCL is not disabled, the original code
+    # path uses NCCL device_group directly. Wrap that as a GlooDPAllReduce
+    # on the device group for consistency.
+    backend_name = parallel_config.dp_cpu_backend
+    if backend_name == "gloo" and \
+            not parallel_config.disable_nccl_for_dp_synchronization:
+        from vllm.distributed.dp_allreduce import GlooDPAllReduce
+        _DP_ALLREDUCE = GlooDPAllReduce(dp_group.device_group)
+        return
+
+    _DP_ALLREDUCE = create_dp_allreduce_backend(
+        backend_name=backend_name,
+        dp_rank=parallel_config.data_parallel_rank,
+        dp_size=parallel_config.data_parallel_size,
+        cpu_group=dp_group.cpu_group,
+        device_group=dp_group.device_group,
+        cuda_device=dp_group.device,
+    )
+
+
 _EP: GroupCoordinator | None = None
 
 
@@ -1656,6 +1694,10 @@ def initialize_model_parallel(
             group_ranks, get_world_group().local_rank, backend, group_name="dp"
         )
 
+    # Initialize the DP scheduler all_reduce backend
+    if data_parallel_size > 1:
+        init_dp_allreduce(parallel_config)
+
     global _EP
     assert _EP is None, "expert parallel group is already initialized"
     # Don't create EP group for dense models.
@@ -1880,6 +1922,11 @@ def destroy_model_parallel():
     if _DP:
         _DP.destroy()
     _DP = None
+
+    global _DP_ALLREDUCE
+    if _DP_ALLREDUCE:
+        _DP_ALLREDUCE.close()
+    _DP_ALLREDUCE = None
 
     global _EP
     if _EP:

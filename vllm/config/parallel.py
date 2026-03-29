@@ -196,10 +196,23 @@ class ParallelConfig:
     processed in a single batch."""
 
     disable_nccl_for_dp_synchronization: bool | None = None
-    """Forces the dp synchronization logic in vllm/v1/worker/dp_utils.py 
+    """Forces the dp synchronization logic in vllm/v1/worker/dp_utils.py
     to use Gloo instead of NCCL for its all reduce.
 
     Defaults to True when async scheduling is enabled, False otherwise.
+    """
+
+    dp_cpu_backend: str = "gloo"
+    """Backend for the CPU-side DP scheduler all_reduce.
+
+    Options:
+    - "gloo": Default. Uses gloo TCP via torch.distributed. Susceptible to
+      TCP jitter causing multi-second stalls on per-iteration collectives.
+    - "nccl-side-stream": Uses NCCL on a dedicated CUDA stream. Avoids TCP
+      entirely. The side stream does not block the main compute stream.
+      No additional dependencies required.
+    - "ucx": Uses UCX RDMA for true CPU-side RDMA all_reduce. Requires
+      ucx-py (pip install ucx-py-cu12).
     """
 
     ray_workers_use_nsight: bool = False
