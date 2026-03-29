@@ -305,3 +305,181 @@ def test_mla_decode_zero_kv_cache():
     assert torch.isfinite(o).all(), (
         "NaN/Inf in MLA decode with all-zero KV cache"
     )
+
+
+# ---- CUDA graph simulation tests ----
+
+
+@requires_flashinfer_mla
+@pytest.mark.parametrize("num_real", [1, 4, 8])
+@torch.inference_mode()
+def test_mla_decode_cuda_graph_nan_padding_q(num_real):
+    """Simulate CUDA graph: padding tokens have NaN Q values.
+
+    In CUDA graph mode, the query buffer is sized for max_batch but only
+    num_real tokens are real. Padding Q values may contain NaN from
+    previous iterations. The kernel must not let padding NaN leak into
+    real token outputs.
+    """
+    from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
+
+    max_batch = 16
+    seq_len = 128
+    seq_lens = [seq_len] * max_batch
+    num_blocks = max_batch * ((seq_len + BLOCK_SIZE - 1) // BLOCK_SIZE)
+
+    q, kv_cache, block_tables, seq_lens_t, max_seq_len, ws = (
+        make_mla_decode_inputs(max_batch, seq_lens, num_blocks)
+    )
+
+    # Poison padding Q values with NaN
+    q[num_real:] = float("nan")
+    # Set padding seq_lens to 0
+    seq_lens_t[num_real:] = 0
+
+    o = trtllm_batch_decode_with_kv_cache_mla(
+        query=q,
+        kv_cache=kv_cache,
+        workspace_buffer=ws,
+        qk_nope_head_dim=QK_NOPE_HEAD_DIM,
+        kv_lora_rank=KV_LORA_RANK,
+        qk_rope_head_dim=QK_ROPE_HEAD_DIM,
+        block_tables=block_tables,
+        seq_lens=seq_lens_t,
+        max_seq_len=max_seq_len,
+        bmm1_scale=1.0 / (QK_HEAD_DIM ** 0.5),
+        bmm2_scale=1.0,
+    )
+
+    real_output = o[:num_real]
+    assert torch.isfinite(real_output).all(), (
+        f"NaN leaked from padding Q into real token outputs "
+        f"(num_real={num_real}, max_batch={max_batch})"
+    )
+
+
+@requires_flashinfer_mla
+@torch.inference_mode()
+def test_mla_decode_cuda_graph_inf_padding_q():
+    """Padding Q with Inf — extreme QK dot products from padding."""
+    from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
+
+    max_batch = 16
+    num_real = 4
+    seq_len = 128
+    seq_lens = [seq_len] * max_batch
+    num_blocks = max_batch * ((seq_len + BLOCK_SIZE - 1) // BLOCK_SIZE)
+
+    q, kv_cache, block_tables, seq_lens_t, max_seq_len, ws = (
+        make_mla_decode_inputs(max_batch, seq_lens, num_blocks)
+    )
+
+    q[num_real:] = float("inf")
+    seq_lens_t[num_real:] = 0
+
+    o = trtllm_batch_decode_with_kv_cache_mla(
+        query=q,
+        kv_cache=kv_cache,
+        workspace_buffer=ws,
+        qk_nope_head_dim=QK_NOPE_HEAD_DIM,
+        kv_lora_rank=KV_LORA_RANK,
+        qk_rope_head_dim=QK_ROPE_HEAD_DIM,
+        block_tables=block_tables,
+        seq_lens=seq_lens_t,
+        max_seq_len=max_seq_len,
+        bmm1_scale=1.0 / (QK_HEAD_DIM ** 0.5),
+        bmm2_scale=1.0,
+    )
+
+    real_output = o[:num_real]
+    assert torch.isfinite(real_output).all(), (
+        "NaN/Inf leaked from Inf padding Q into real token outputs"
+    )
+
+
+@requires_flashinfer_mla
+@torch.inference_mode()
+def test_mla_decode_cuda_graph_garbage_padding_q():
+    """Padding Q with random large values (stale buffer content)."""
+    from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
+
+    max_batch = 16
+    num_real = 4
+    seq_len = 128
+    seq_lens = [seq_len] * max_batch
+    num_blocks = max_batch * ((seq_len + BLOCK_SIZE - 1) // BLOCK_SIZE)
+
+    q, kv_cache, block_tables, seq_lens_t, max_seq_len, ws = (
+        make_mla_decode_inputs(max_batch, seq_lens, num_blocks)
+    )
+
+    # Simulate stale buffer: padding has large random values
+    q[num_real:] = torch.randn_like(q[num_real:]) * 1000.0
+    seq_lens_t[num_real:] = 0
+
+    o = trtllm_batch_decode_with_kv_cache_mla(
+        query=q,
+        kv_cache=kv_cache,
+        workspace_buffer=ws,
+        qk_nope_head_dim=QK_NOPE_HEAD_DIM,
+        kv_lora_rank=KV_LORA_RANK,
+        qk_rope_head_dim=QK_ROPE_HEAD_DIM,
+        block_tables=block_tables,
+        seq_lens=seq_lens_t,
+        max_seq_len=max_seq_len,
+        bmm1_scale=1.0 / (QK_HEAD_DIM ** 0.5),
+        bmm2_scale=1.0,
+    )
+
+    real_output = o[:num_real]
+    assert torch.isfinite(real_output).all(), (
+        "NaN/Inf leaked from stale padding Q into real token outputs"
+    )
+
+
+@requires_flashinfer_mla
+@torch.inference_mode()
+def test_mla_decode_cuda_graph_replay():
+    """Simulate CUDA graph capture + replay with changing batch sizes."""
+    from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
+
+    max_batch = 16
+    seq_len = 128
+    num_blocks = max_batch * ((seq_len + BLOCK_SIZE - 1) // BLOCK_SIZE)
+
+    # Allocate fixed buffers (as CUDA graph would)
+    seq_lens_all = [seq_len] * max_batch
+    q, kv_cache, block_tables, seq_lens_t, max_seq_len, ws = (
+        make_mla_decode_inputs(max_batch, seq_lens_all, num_blocks)
+    )
+
+    def run_with_real_tokens(num_real):
+        # Fresh Q for real tokens, NaN for padding
+        q[:num_real].normal_()
+        q[num_real:] = float("nan")
+        seq_lens_t[:num_real] = seq_len
+        seq_lens_t[num_real:] = 0
+
+        o = trtllm_batch_decode_with_kv_cache_mla(
+            query=q,
+            kv_cache=kv_cache,
+            workspace_buffer=ws,
+            qk_nope_head_dim=QK_NOPE_HEAD_DIM,
+            kv_lora_rank=KV_LORA_RANK,
+            qk_rope_head_dim=QK_ROPE_HEAD_DIM,
+            block_tables=block_tables,
+            seq_lens=seq_lens_t,
+            max_seq_len=max_seq_len,
+            bmm1_scale=1.0 / (QK_HEAD_DIM ** 0.5),
+            bmm2_scale=1.0,
+        )
+        return o
+
+    # Simulate multiple "replays" with different real token counts
+    for num_real in [16, 8, 4, 1, 12]:
+        o = run_with_real_tokens(num_real)
+        real_output = o[:num_real]
+        assert torch.isfinite(real_output).all(), (
+            f"NaN leaked during simulated graph replay "
+            f"(num_real={num_real})"
+        )
