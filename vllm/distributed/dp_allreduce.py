@@ -216,15 +216,13 @@ class UCXDPAllReduce(DPAllReduceBackend):
 
     def all_reduce(self, tensor: torch.Tensor) -> None:
         """Ring allgather using UCX tag send/recv."""
+        import threading
+
         from ucp._libs.arr import Array
         from ucp._libs.ucx_api import tag_recv_nb, tag_send_nb
 
         N = self.world_size
         data = tensor.numpy()
-
-        def _cb(req, exc):
-            if exc is not None:
-                raise exc
 
         for step in range(N - 1):
             send_col = (self.rank - step) % N
@@ -235,6 +233,15 @@ class UCXDPAllReduce(DPAllReduceBackend):
 
             tag = step & 0xFFFFFFFF
 
+            # Track completion via callbacks
+            pending = [2]  # send + recv
+            error = [None]
+
+            def _cb(req, exc, _p=pending, _e=error):
+                if exc is not None:
+                    _e[0] = exc
+                _p[0] -= 1
+
             # Post send and recv (buffers must be wrapped in Array)
             send_req = tag_send_nb(
                 self._right_ep, Array(send_buf), send_buf.nbytes, tag, _cb,
@@ -243,13 +250,18 @@ class UCXDPAllReduce(DPAllReduceBackend):
                 self._worker, Array(recv_buf), len(recv_buf), tag, _cb,
             )
 
+            # Immediate completion counts
+            if send_req is None:
+                pending[0] -= 1
+            if recv_req is None:
+                pending[0] -= 1
+
             # Progress until both complete
-            if send_req is not None:
-                while not send_req.is_completed:
-                    self._worker.progress()
-            if recv_req is not None:
-                while not recv_req.is_completed:
-                    self._worker.progress()
+            while pending[0] > 0:
+                self._worker.progress()
+
+            if error[0] is not None:
+                raise error[0]
 
             # Unpack received column
             import struct
