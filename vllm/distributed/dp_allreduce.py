@@ -223,7 +223,7 @@ class UCXDPAllReduce(DPAllReduceBackend):
 
         def _cb(req, exc):
             if exc is not None:
-                logger.error("UCX transfer error: %s", exc)
+                raise exc
 
         for step in range(N - 1):
             send_col = (self.rank - step) % N
