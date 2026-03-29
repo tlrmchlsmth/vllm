@@ -199,7 +199,7 @@ def test_padding_nan_does_not_leak_rms_norm_static_fp8_quant(
             num_padded, hidden_size, dtype=dtype, device=device
         )
         residual[num_real:] = float("nan")
-        ops.fused_add_rms_norm_static_fp8_quant(
+        torch.ops._C.fused_add_rms_norm_static_fp8_quant(
             out, x, residual, weight, scale, 1e-6
         )
         real_out = out[:num_real].to(torch.float32)
@@ -210,7 +210,7 @@ def test_padding_nan_does_not_leak_rms_norm_static_fp8_quant(
             "NaN leaked into residual via fused_add_rms_norm_static_fp8_quant"
         )
     else:
-        ops.rms_norm_static_fp8_quant(out, x, weight, scale, 1e-6)
+        torch.ops._C.rms_norm_static_fp8_quant(out, x, weight, scale, 1e-6)
         real_out = out[:num_real].to(torch.float32)
         assert torch.isfinite(real_out).all(), (
             "NaN leaked via rms_norm_static_fp8_quant"
