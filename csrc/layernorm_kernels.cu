@@ -148,9 +148,17 @@ fused_add_rms_norm_kernel(
     int id = blockIdx.x * vec_hidden_size + idx;
     int64_t strided_id = blockIdx.x * vec_input_stride + idx;
     _f16Vec<scalar_t, width> temp = residual_v[id];
-    temp *= s_variance;
-    temp *= weight_v[idx];
-    input_v[strided_id] = temp;
+    if (s_variance == 0.0f) {
+      // NaN detected: zero both output and residual.
+      _f16Vec<scalar_t, width> zero;
+      memset(&zero, 0, sizeof(zero));
+      residual_v[id] = zero;
+      input_v[strided_id] = zero;
+    } else {
+      temp *= s_variance;
+      temp *= weight_v[idx];
+      input_v[strided_id] = temp;
+    }
   }
 }
 
@@ -192,9 +200,15 @@ fused_add_rms_norm_kernel(
   __syncthreads();
 
   for (int idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
-    float x = (float)residual[blockIdx.x * hidden_size + idx];
-    input[blockIdx.x * input_stride + idx] =
-        ((scalar_t)(x * s_variance)) * weight[idx];
+    if (s_variance == 0.0f) {
+      // NaN detected: zero both output and residual.
+      residual[blockIdx.x * hidden_size + idx] = (scalar_t)0;
+      input[blockIdx.x * input_stride + idx] = (scalar_t)0;
+    } else {
+      float x = (float)residual[blockIdx.x * hidden_size + idx];
+      input[blockIdx.x * input_stride + idx] =
+          ((scalar_t)(x * s_variance)) * weight[idx];
+    }
   }
 }
 
