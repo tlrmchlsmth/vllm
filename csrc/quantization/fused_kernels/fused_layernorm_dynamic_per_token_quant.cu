@@ -200,8 +200,15 @@ void rms_norm_dynamic_per_token_quant(
     TORCH_CHECK(residual->is_contiguous());
   }
 
+  int32_t hidden_size = input.size(-1);
+  auto num_tokens = input.numel() / hidden_size;
+
   int8_t* nan_flag_ptr = nullptr;
   if (nan_flags.has_value()) {
+    TORCH_CHECK(num_tokens <= max_num_tokens,
+                "num_tokens (", num_tokens, ") > max_num_tokens (",
+                max_num_tokens,
+                ") in rms_norm_dynamic_per_token_quant NaN detection");
     nan_flag_ptr =
         nan_flags->data_ptr<int8_t>() + layer_idx * max_num_tokens;
   }
@@ -317,6 +324,10 @@ void rms_norm_per_block_quant(torch::Tensor& out, torch::Tensor const& input,
 
   int8_t* nan_flag_ptr = nullptr;
   if (nan_flags.has_value()) {
+    TORCH_CHECK(num_tokens <= max_num_tokens,
+                "num_tokens (", num_tokens, ") > max_num_tokens (",
+                max_num_tokens,
+                ") in rms_norm_per_block_quant NaN detection");
     nan_flag_ptr =
         nan_flags->data_ptr<int8_t>() + layer_idx * max_num_tokens;
   }

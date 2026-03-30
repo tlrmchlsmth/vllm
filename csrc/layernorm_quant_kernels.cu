@@ -239,6 +239,9 @@ void rms_norm_static_fp8_quant(torch::Tensor& out,     // [..., hidden_size]
 
   int8_t* nan_flag_ptr = nullptr;
   if (nan_flags.has_value()) {
+    TORCH_CHECK(num_tokens <= max_num_tokens,
+                "num_tokens (", num_tokens, ") > max_num_tokens (",
+                max_num_tokens, ") in rms_norm_static_fp8_quant NaN detection");
     nan_flag_ptr = nan_flags->data_ptr<int8_t>() + layer_idx * max_num_tokens;
   }
 
@@ -303,6 +306,10 @@ void fused_add_rms_norm_static_fp8_quant(
 
   int8_t* nan_flag_ptr = nullptr;
   if (nan_flags.has_value()) {
+    TORCH_CHECK(num_tokens <= max_num_tokens,
+                "num_tokens (", num_tokens, ") > max_num_tokens (",
+                max_num_tokens,
+                ") in fused_add_rms_norm_static_fp8_quant NaN detection");
     nan_flag_ptr = nan_flags->data_ptr<int8_t>() + layer_idx * max_num_tokens;
   }
 

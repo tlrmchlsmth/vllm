@@ -205,31 +205,39 @@ __device__ void norm_and_quant(
   int64_t const token_offset = blockIdx.x * static_cast<int64_t>(hidden_size);
 
   for (auto i = threadIdx.x; i < hidden_size; i += blockDim.x) {
-    float x = static_cast<float>(input[input_token_offset + i]);
-    if constexpr (has_residual) {
-      x += static_cast<float>(residual[token_offset + i]);
-      residual[token_offset + i] = static_cast<scalar_t>(x);
-    }
-    // Norm
-    x = static_cast<float>(static_cast<scalar_t>(x * rms) * weight[i]);
-    // Quant
-    // If groupwise is_scale_inverted is true, so we invert the scale here.
-    int64_t scale_idx = 0;
-    if (group_size > 0) {
-      if constexpr (is_scale_transposed) {
-        int64_t const scale_rows = (gridDim.x + outer_scale_stride - 1) /
-                                   outer_scale_stride * outer_scale_stride;
-        scale_idx = (i / group_size) * scale_rows + blockIdx.x;
-      } else {
-        scale_idx = blockIdx.x * (hidden_size / group_size) + i / group_size;
+    if (rms == 0.0f) {
+      // NaN detected: zero output and residual.
+      output[token_offset + i] = scalar_out_t(0);
+      if constexpr (has_residual) {
+        residual[token_offset + i] = static_cast<scalar_t>(0);
       }
+    } else {
+      float x = static_cast<float>(input[input_token_offset + i]);
+      if constexpr (has_residual) {
+        x += static_cast<float>(residual[token_offset + i]);
+        residual[token_offset + i] = static_cast<scalar_t>(x);
+      }
+      // Norm
+      x = static_cast<float>(static_cast<scalar_t>(x * rms) * weight[i]);
+      // Quant
+      int64_t scale_idx = 0;
+      if (group_size > 0) {
+        if constexpr (is_scale_transposed) {
+          int64_t const scale_rows = (gridDim.x + outer_scale_stride - 1) /
+                                     outer_scale_stride * outer_scale_stride;
+          scale_idx = (i / group_size) * scale_rows + blockIdx.x;
+        } else {
+          scale_idx = blockIdx.x * (hidden_size / group_size) + i / group_size;
+        }
+      }
+      auto scale_val =
+          (group_size > 0
+               ? (is_scale_inverted ? 1.0f / scale[scale_idx]
+                                    : scale[scale_idx])
+               : *scale);
+      output[token_offset + i] =
+          ScaledQuant<scalar_out_t, is_scale_inverted>::quant_fn(x, scale_val);
     }
-    auto scale_val =
-        (group_size > 0
-             ? (is_scale_inverted ? 1.0f / scale[scale_idx] : scale[scale_idx])
-             : *scale);
-    output[token_offset + i] =
-        ScaledQuant<scalar_out_t, is_scale_inverted>::quant_fn(x, scale_val);
   }
 }
 
@@ -519,54 +527,66 @@ __device__ void norm_and_quant(
 //  replace scaled_fp8_conversion_vec
 #pragma unroll 4
   for (auto i = threadIdx.x; i < num_vec_elems; i += blockDim.x) {
-    vec4_t<scalar_t> const in = vec_input[i];
-    vec4_t<scalar_t> const w = vec_weight[i];
+    if (rms == 0.0f) {
+      // NaN detected: zero output and residual.
+      q8x4_t<scalar_out_t> zero_out;
+      memset(&zero_out, 0, sizeof(zero_out));
+      vec_output[i] = zero_out;
+      if constexpr (has_residual) {
+        vec4_t<scalar_t> zero_r;
+        memset(&zero_r, 0, sizeof(zero_r));
+        vec_residual[i] = zero_r;
+      }
+    } else {
+      vec4_t<scalar_t> const in = vec_input[i];
+      vec4_t<scalar_t> const w = vec_weight[i];
 
-    vec4_t<float> x;
-#pragma unroll
-    for (int j = 0; j < VEC_SIZE; ++j) {
-      x.val[j] = static_cast<float>(in.val[j]);
-    }
-
-    if constexpr (has_residual) {
-      vec4_t<scalar_t> r = vec_residual[i];
+      vec4_t<float> x;
 #pragma unroll
       for (int j = 0; j < VEC_SIZE; ++j) {
-        x.val[j] += static_cast<float>(r.val[j]);
+        x.val[j] = static_cast<float>(in.val[j]);
       }
+
+      if constexpr (has_residual) {
+        vec4_t<scalar_t> r = vec_residual[i];
+#pragma unroll
+        for (int j = 0; j < VEC_SIZE; ++j) {
+          x.val[j] += static_cast<float>(r.val[j]);
+        }
 // Update residual
 #pragma unroll
-      for (int j = 0; j < VEC_SIZE; ++j) {
-        r.val[j] = static_cast<scalar_t>(x.val[j]);
+        for (int j = 0; j < VEC_SIZE; ++j) {
+          r.val[j] = static_cast<scalar_t>(x.val[j]);
+        }
+        vec_residual[i] = r;
       }
-      vec_residual[i] = r;
-    }
 
-    q8x4_t<scalar_out_t> out;
+      q8x4_t<scalar_out_t> out;
 
-    float scale_val;
+      float scale_val;
 
-    if constexpr (group_size > 0) {
-      int64_t const num_groups = hidden_size / group_size;
-      int64_t scale_idx = 0;
-      if constexpr (is_scale_transposed) {
-        int64_t const scale_rows = (gridDim.x + outer_scale_stride - 1) /
-                                   outer_scale_stride * outer_scale_stride;
-        scale_idx = (i * VEC_SIZE / group_size) * scale_rows + blockIdx.x;
+      if constexpr (group_size > 0) {
+        int64_t const num_groups = hidden_size / group_size;
+        int64_t scale_idx = 0;
+        if constexpr (is_scale_transposed) {
+          int64_t const scale_rows = (gridDim.x + outer_scale_stride - 1) /
+                                     outer_scale_stride * outer_scale_stride;
+          scale_idx = (i * VEC_SIZE / group_size) * scale_rows + blockIdx.x;
+        } else {
+          scale_idx = blockIdx.x * num_groups + i * VEC_SIZE / group_size;
+        }
+        scale_val =
+            is_scale_inverted ? 1.0f / scale[scale_idx] : scale[scale_idx];
       } else {
-        scale_idx = blockIdx.x * num_groups + i * VEC_SIZE / group_size;
+        scale_val = *scale;
       }
-      scale_val =
-          is_scale_inverted ? 1.0f / scale[scale_idx] : scale[scale_idx];
-    } else {
-      scale_val = *scale;
-    }
 #pragma unroll
-    for (int j = 0; j < VEC_SIZE; ++j) {
-      out.val[j] = ScaledQuant<scalar_out_t, is_scale_inverted>::quant_fn(
-          static_cast<scalar_t>(x.val[j] * rms) * w.val[j], scale_val);
+      for (int j = 0; j < VEC_SIZE; ++j) {
+        out.val[j] = ScaledQuant<scalar_out_t, is_scale_inverted>::quant_fn(
+            static_cast<scalar_t>(x.val[j] * rms) * w.val[j], scale_val);
+      }
+      vec_output[i] = out;
     }
-    vec_output[i] = out;
   }
 }
 
