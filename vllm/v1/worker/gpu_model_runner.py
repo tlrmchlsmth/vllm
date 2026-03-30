@@ -1087,11 +1087,11 @@ class GPUModelRunner(
         # previous request can persist in recycled KV cache blocks and
         # corrupt subsequent requests via attention.
         #
-        # When VLLM_NAN_DETECT=1, the scheduler also collects new
-        # block IDs (even for attention models) so we can check them
+        # When VLLM_ATTENTION_NAN_DETECT=1, the scheduler also collects
+        # new block IDs (even for attention models) so we can check them
         # for stale NaN before they are reused.
         if scheduler_output.new_block_ids_to_zero:
-            if envs.VLLM_NAN_DETECT:
+            if envs.VLLM_ATTENTION_NAN_DETECT:
                 from vllm.model_executor.layers.nan_detector import (
                     NaNDetector,
                 )

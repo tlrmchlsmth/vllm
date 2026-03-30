@@ -46,6 +46,8 @@ if TYPE_CHECKING:
     VLLM_LOG_STATS_INTERVAL: float = 10.0
     VLLM_TRACE_FUNCTION: int = 0
     VLLM_NAN_DETECT: bool = False
+    VLLM_ATTENTION_NAN_DETECT: bool = False
+    VLLM_NIXL_NAN_DETECT: bool = False
     VLLM_USE_FLASHINFER_SAMPLER: bool | None = None
     VLLM_PP_LAYER_PARTITION: str | None = None
     VLLM_CPU_KVCACHE_SPACE: int | None = 0
@@ -700,6 +702,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Detects per-token NaN/Inf at every layer boundary via the existing
     # variance reduction. Reports layer names and token positions.
     "VLLM_NAN_DETECT": lambda: bool(int(os.getenv("VLLM_NAN_DETECT", "0"))),
+    # If set to 1, zero-inits MLA attention output buffers and checks for
+    # NaN/Inf in padding slots after decode attention.
+    "VLLM_ATTENTION_NAN_DETECT":
+        lambda: bool(int(os.getenv("VLLM_ATTENTION_NAN_DETECT", "0"))),
+    # If set to 1, enables NaN detection in NIXL KV transfer paths.
+    "VLLM_NIXL_NAN_DETECT":
+        lambda: bool(int(os.getenv("VLLM_NIXL_NAN_DETECT", "0"))),
     # If set, vllm will use flashinfer sampler
     "VLLM_USE_FLASHINFER_SAMPLER": lambda: bool(
         int(os.environ["VLLM_USE_FLASHINFER_SAMPLER"])
