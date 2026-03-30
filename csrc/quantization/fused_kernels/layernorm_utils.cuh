@@ -41,9 +41,11 @@ __device__ void compute_rms(float* rms, scalar_t const* __restrict__ input,
 
   __shared__ float s_rms;
   if (threadIdx.x == 0) {
-    s_rms = rsqrtf(ss / hidden_size + epsilon);
     if (nan_flag_ptr && (isnan(ss) || isinf(ss))) {
       nan_flag_ptr[blockIdx.x] = 1;
+      s_rms = 0.0f;
+    } else {
+      s_rms = rsqrtf(ss / hidden_size + epsilon);
     }
   }
   __syncthreads();
@@ -290,9 +292,11 @@ __device__ void compute_rms(float* rms, scalar_t const* __restrict__ input,
 
   __shared__ float s_rms;
   if (threadIdx.x == 0) {
-    s_rms = rsqrtf(ss / hidden_size + epsilon);
     if (nan_flag_ptr && (isnan(ss) || isinf(ss))) {
       nan_flag_ptr[blockIdx.x] = 1;
+      s_rms = 0.0f;
+    } else {
+      s_rms = rsqrtf(ss / hidden_size + epsilon);
     }
   }
   __syncthreads();

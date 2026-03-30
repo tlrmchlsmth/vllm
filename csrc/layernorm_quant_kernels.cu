@@ -51,9 +51,11 @@ __global__ void rms_norm_static_fp8_quant_kernel(
   variance = BlockReduce(reduceStore).Reduce(variance, CubAddOp{}, blockDim.x);
 
   if (threadIdx.x == 0) {
-    s_variance = rsqrtf(variance / hidden_size + epsilon);
     if (nan_flag_ptr && (isnan(variance) || isinf(variance))) {
       nan_flag_ptr[blockIdx.x] = 1;
+      s_variance = 0.0f;
+    } else {
+      s_variance = rsqrtf(variance / hidden_size + epsilon);
     }
   }
   __syncthreads();
@@ -64,14 +66,20 @@ __global__ void rms_norm_static_fp8_quant_kernel(
   auto* v_in = reinterpret_cast<const vec_n_t<scalar_t, VEC_SIZE>*>(input_row);
   auto* v_w = reinterpret_cast<const vec_n_t<scalar_t, VEC_SIZE>*>(weight);
   for (int idx = threadIdx.x; idx < hidden_size / VEC_SIZE; idx += blockDim.x) {
-    vec_n_t<scalar_t, VEC_SIZE> src1 = v_in[idx];
-    vec_n_t<scalar_t, VEC_SIZE> src2 = v_w[idx];
+    if (s_variance == 0.0f) {
+      for (int j = 0; j < VEC_SIZE; j++) {
+        out[blockIdx.x * hidden_size + idx * VEC_SIZE + j] = fp8_type(0);
+      }
+    } else {
+      vec_n_t<scalar_t, VEC_SIZE> src1 = v_in[idx];
+      vec_n_t<scalar_t, VEC_SIZE> src2 = v_w[idx];
 #pragma unroll
-    for (int j = 0; j < VEC_SIZE; j++) {
-      float x = static_cast<float>(src1.val[j]);
-      float const out_norm = ((scalar_t)(x * s_variance)) * src2.val[j];
-      out[blockIdx.x * hidden_size + idx * VEC_SIZE + j] =
-          scaled_fp8_conversion<true, fp8_type>(out_norm, scale_inv);
+      for (int j = 0; j < VEC_SIZE; j++) {
+        float x = static_cast<float>(src1.val[j]);
+        float const out_norm = ((scalar_t)(x * s_variance)) * src2.val[j];
+        out[blockIdx.x * hidden_size + idx * VEC_SIZE + j] =
+            scaled_fp8_conversion<true, fp8_type>(out_norm, scale_inv);
+      }
     }
   }
 }
@@ -123,9 +131,11 @@ fused_add_rms_norm_static_fp8_quant_kernel(
   variance = BlockReduce(reduceStore).Reduce(variance, CubAddOp{}, blockDim.x);
 
   if (threadIdx.x == 0) {
-    s_variance = rsqrtf(variance / hidden_size + epsilon);
     if (nan_flag_ptr && (isnan(variance) || isinf(variance))) {
       nan_flag_ptr[blockIdx.x] = 1;
+      s_variance = 0.0f;
+    } else {
+      s_variance = rsqrtf(variance / hidden_size + epsilon);
     }
   }
   __syncthreads();
@@ -135,13 +145,24 @@ fused_add_rms_norm_static_fp8_quant_kernel(
 
   for (int idx = threadIdx.x; idx < vec_hidden_size; idx += blockDim.x) {
     int id = blockIdx.x * vec_hidden_size + idx;
-    _f16Vec<scalar_t, width> temp = residual_v[id];
-    temp *= s_variance;
-    temp *= weight_v[idx];
+    if (s_variance == 0.0f) {
+      _f16Vec<scalar_t, width> zero;
+      memset(&zero, 0, sizeof(zero));
+      residual_v[id] = zero;
 #pragma unroll
-    for (int i = 0; i < width; ++i) {
-      out[id * width + i] =
-          scaled_fp8_conversion<true, fp8_type>(float(temp.data[i]), scale_inv);
+      for (int i = 0; i < width; ++i) {
+        out[id * width + i] = fp8_type(0);
+      }
+    } else {
+      _f16Vec<scalar_t, width> temp = residual_v[id];
+      temp *= s_variance;
+      temp *= weight_v[idx];
+#pragma unroll
+      for (int i = 0; i < width; ++i) {
+        out[id * width + i] =
+            scaled_fp8_conversion<true, fp8_type>(float(temp.data[i]),
+                                                  scale_inv);
+      }
     }
   }
 }
@@ -176,9 +197,11 @@ fused_add_rms_norm_static_fp8_quant_kernel(
   variance = BlockReduce(reduceStore).Reduce(variance, CubAddOp{}, blockDim.x);
 
   if (threadIdx.x == 0) {
-    s_variance = rsqrtf(variance / hidden_size + epsilon);
     if (nan_flag_ptr && (isnan(variance) || isinf(variance))) {
       nan_flag_ptr[blockIdx.x] = 1;
+      s_variance = 0.0f;
+    } else {
+      s_variance = rsqrtf(variance / hidden_size + epsilon);
     }
   }
   __syncthreads();
@@ -187,10 +210,15 @@ fused_add_rms_norm_static_fp8_quant_kernel(
   float const scale_inv = 1.0f / *scale;
 
   for (int idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
-    float x = (float)residual[blockIdx.x * hidden_size + idx];
-    float const out_norm = ((scalar_t)(x * s_variance)) * weight[idx];
-    out[blockIdx.x * hidden_size + idx] =
-        scaled_fp8_conversion<true, fp8_type>(out_norm, scale_inv);
+    if (s_variance == 0.0f) {
+      residual[blockIdx.x * hidden_size + idx] = (scalar_t)0;
+      out[blockIdx.x * hidden_size + idx] = fp8_type(0);
+    } else {
+      float x = (float)residual[blockIdx.x * hidden_size + idx];
+      float const out_norm = ((scalar_t)(x * s_variance)) * weight[idx];
+      out[blockIdx.x * hidden_size + idx] =
+          scaled_fp8_conversion<true, fp8_type>(out_norm, scale_inv);
+    }
   }
 }
 
