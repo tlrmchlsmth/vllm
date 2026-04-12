@@ -316,7 +316,18 @@ def _run_attention_nan_padding_test(
                     value[num_actual_tokens:] = float('nan')
                     output.fill_(float('nan'))
 
-                    # Replay
+                    # Replay twice: first replay puts NaN into internal
+                    # buffers for padding positions. Second replay tests
+                    # whether stale NaN in those buffers corrupts real
+                    # token output.
+                    graph.replay()
+                    torch.cuda.synchronize()
+
+                    # Re-pollute for second replay
+                    query[num_actual_tokens:] = float('nan')
+                    key[num_actual_tokens:] = float('nan')
+                    value[num_actual_tokens:] = float('nan')
+                    output.fill_(float('nan'))
                     graph.replay()
                 else:
                     output = impl.forward(
@@ -943,7 +954,15 @@ def _run_moe_nan_padding_test(
         hidden_states[num_real:] = float('nan')
         output.fill_(float('nan'))
 
-        # Replay
+        # Replay twice: first replay puts NaN-derived values into
+        # intermediate graph buffers for padding rows. Second replay
+        # tests whether those stale intermediate NaNs corrupt real
+        # token output on the next iteration.
+        graph.replay()
+        torch.cuda.synchronize()
+
+        # Re-pollute input padding for the second replay
+        hidden_states[num_real:] = float('nan')
         graph.replay()
 
     torch.cuda.synchronize()
