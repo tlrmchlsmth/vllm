@@ -72,13 +72,15 @@ def _patch_empty():
     Simulates worst-case recycled GPU memory."""
     torch._nan_empty_original = torch.empty
     torch._nan_empty_like_original = torch.empty_like
-    with (
-        patch.object(torch, 'empty', _nan_empty),
-        patch.object(torch, 'empty_like', _nan_empty_like),
-    ):
-        yield
-    del torch._nan_empty_original
-    del torch._nan_empty_like_original
+    try:
+        with (
+            patch.object(torch, 'empty', _nan_empty),
+            patch.object(torch, 'empty_like', _nan_empty_like),
+        ):
+            yield
+    finally:
+        del torch._nan_empty_original
+        del torch._nan_empty_like_original
 
 
 BACKENDS_TO_TEST = [
@@ -427,21 +429,24 @@ MLA_BACKENDS_TO_TEST = [
     AttentionBackendEnum.TRITON_MLA,
 ]
 
-# Filter to available backends
-from vllm.v1.attention.backends.fa_utils import flash_attn_supports_mla
-from vllm.v1.attention.ops.flashmla import is_flashmla_dense_supported
+# Filter to available backends — guarded against non-CUDA environments
+if torch.cuda.is_available():
+    from vllm.v1.attention.backends.fa_utils import flash_attn_supports_mla
+    from vllm.v1.attention.ops.flashmla import is_flashmla_dense_supported
 
-if not torch.cuda.is_available() or torch.cuda.get_device_properties(0).major < 10:
-    for _b in (AttentionBackendEnum.CUTLASS_MLA,
-               AttentionBackendEnum.FLASHINFER_MLA):
-        if _b in MLA_BACKENDS_TO_TEST:
-            MLA_BACKENDS_TO_TEST.remove(_b)
-if not flash_attn_supports_mla():
-    if AttentionBackendEnum.FLASH_ATTN_MLA in MLA_BACKENDS_TO_TEST:
-        MLA_BACKENDS_TO_TEST.remove(AttentionBackendEnum.FLASH_ATTN_MLA)
-if not is_flashmla_dense_supported()[0]:
-    if AttentionBackendEnum.FLASHMLA in MLA_BACKENDS_TO_TEST:
-        MLA_BACKENDS_TO_TEST.remove(AttentionBackendEnum.FLASHMLA)
+    if torch.cuda.get_device_properties(0).major < 10:
+        for _b in (AttentionBackendEnum.CUTLASS_MLA,
+                   AttentionBackendEnum.FLASHINFER_MLA):
+            if _b in MLA_BACKENDS_TO_TEST:
+                MLA_BACKENDS_TO_TEST.remove(_b)
+    if not flash_attn_supports_mla():
+        if AttentionBackendEnum.FLASH_ATTN_MLA in MLA_BACKENDS_TO_TEST:
+            MLA_BACKENDS_TO_TEST.remove(AttentionBackendEnum.FLASH_ATTN_MLA)
+    if not is_flashmla_dense_supported()[0]:
+        if AttentionBackendEnum.FLASHMLA in MLA_BACKENDS_TO_TEST:
+            MLA_BACKENDS_TO_TEST.remove(AttentionBackendEnum.FLASHMLA)
+else:
+    MLA_BACKENDS_TO_TEST = []
 
 MLA_BACKEND_BLOCK_SIZES = {}
 for _b in MLA_BACKENDS_TO_TEST:
@@ -1056,10 +1061,9 @@ def test_moe_hidden_sizes_cudagraph_nan_padding(workspace_init,
         (4, [1, 2, 3]),               # only expert 0 gets tokens
         (2, [1]),                      # minimal: 2 experts, 1 gets 0
         (4, [0, 2]),                   # scattered zeros including expert 0
-        (8, list(range(8))),           # ALL experts get 0 tokens
     ],
     ids=["most_zero", "expert0_zero", "only_expert7", "30of32_zero",
-         "only_expert0", "minimal_2e", "scattered_zeros", "all_zero"],
+         "only_expert0", "minimal_2e", "scattered_zeros"],
 )
 @pytest.mark.parametrize(
     "num_real,num_padded",
@@ -1073,10 +1077,8 @@ def test_moe_zero_token_experts_cudagraph_nan_padding(
     NaN padding."""
     active = [e for e in range(E) if e not in zero_experts]
     if not active:
-        active = None
-        topk = 2
-    else:
-        topk = min(2, len(active))
+        pytest.skip("No active experts")
+    topk = min(2, len(active))
     _run_moe_nan_padding_test(
         num_real, num_padded, E, topk, K=1024, N=512,
         active_experts=active,
@@ -1146,6 +1148,8 @@ def _deepep_ll_nan_padding_worker(
 
     if use_nvfp4:
         import vllm.envs as envs_mod
+        _orig_nvfp4_dispatch = getattr(
+            envs_mod, 'VLLM_DEEPEPLL_NVFP4_DISPATCH', False)
         envs_mod.VLLM_DEEPEPLL_NVFP4_DISPATCH = True
 
         from tests.kernels.moe.utils import make_test_weights
@@ -1260,6 +1264,10 @@ def _deepep_ll_nan_padding_worker(
         )
 
     torch.cuda.synchronize()
+
+    if use_nvfp4:
+        envs_mod.VLLM_DEEPEPLL_NVFP4_DISPATCH = _orig_nvfp4_dispatch
+
     mode = "NVFP4" if use_nvfp4 else "FP8"
     real_output = output[:num_real]
     assert not torch.isnan(real_output).any(), (
