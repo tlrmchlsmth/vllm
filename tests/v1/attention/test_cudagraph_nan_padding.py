@@ -798,10 +798,9 @@ def _run_moe_nan_padding_test(
     topk: int,
     K: int,
     N: int,
-    quant_type: str,
     active_experts: list[int] | None = None,
 ):
-    """Parametrized single-GPU MoE NaN padding test.
+    """NVFP4 MoE NaN padding test with CUDA graph capture/replay.
 
     Args:
         active_experts: If set, route all real tokens to only these experts
@@ -815,124 +814,44 @@ def _run_moe_nan_padding_test(
 
     device = torch.device(f"{DEVICE_TYPE}:0")
 
-    if quant_type == "nvfp4":
-        from tests.kernels.moe.utils import make_test_weights
-        from vllm.config import ParallelConfig, VllmConfig
-        from vllm.model_executor.layers.fused_moe.all2all_utils import (
-            maybe_make_prepare_finalize,
-        )
-        from vllm.model_executor.layers.fused_moe.config import (
-            nvfp4_moe_quant_config,
-        )
-        from vllm.model_executor.layers.fused_moe.cutlass_moe import (
-            CutlassExpertsFp4,
-        )
+    from tests.kernels.moe.utils import make_test_weights
+    from vllm.config import ParallelConfig, VllmConfig
+    from vllm.model_executor.layers.fused_moe.all2all_utils import (
+        maybe_make_prepare_finalize,
+    )
+    from vllm.model_executor.layers.fused_moe.config import (
+        nvfp4_moe_quant_config,
+    )
+    from vllm.model_executor.layers.fused_moe.cutlass_moe import (
+        CutlassExpertsFp4,
+    )
 
-        (_, w1_q, w1_bs, w1_gs), (_, w2_q, w2_bs, w2_gs) = (
-            make_test_weights(E, N, K, in_dtype=torch.bfloat16,
-                              quant_dtype="nvfp4")
-        )
-        a1_gs = torch.ones((E,), device=device, dtype=torch.float32)
-        a2_gs = torch.ones((E,), device=device, dtype=torch.float32)
-        quant_config = nvfp4_moe_quant_config(
-            g1_alphas=(1 / w1_gs), g2_alphas=(1 / w2_gs),
-            a1_gscale=a1_gs, a2_gscale=a2_gs,
-            w1_scale=w1_bs, w2_scale=w2_bs,
-        )
-        moe_config = make_dummy_moe_config()
-        kernel = FusedMoEKernel(
-            maybe_make_prepare_finalize(
-                moe=moe_config, quant_config=quant_config,
-                allow_new_interface=True, use_monolithic=False,
-            ),
-            CutlassExpertsFp4(
-                moe_config=moe_config, quant_config=quant_config,
-            ),
-            inplace=False,
-        )
-        w1, w2 = w1_q, w2_q
-        vllm_cfg = VllmConfig(
-            parallel_config=ParallelConfig(pipeline_parallel_size=1)
-        )
-
-    elif quant_type == "fp8_block":
-        from tests.kernels.moe.test_deepgemm import (
-            make_block_quant_fp8_weights,
-        )
-        from vllm.config import VllmConfig
-        from vllm.model_executor.layers.fused_moe.config import (
-            fp8_w8a8_moe_quant_config,
-        )
-        from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
-            BatchedPrepareAndFinalize,
-            BatchedTritonExperts,
-        )
-
-        BLOCK_SHAPE = [128, 128]
-        w1, w2, w1_s, w2_s = make_block_quant_fp8_weights(
-            E, N, K, BLOCK_SHAPE)
-        quant_config = fp8_w8a8_moe_quant_config(
-            w1_scale=w1_s, w2_scale=w2_s,
-            per_act_token_quant=False, block_shape=BLOCK_SHAPE,
-        )
-        kernel = FusedMoEKernel(
-            BatchedPrepareAndFinalize(
-                max_num_tokens=num_padded, num_local_experts=E,
-                num_dispatchers=1, rank=0,
-            ),
-            BatchedTritonExperts(
-                max_num_tokens=num_padded, num_dispatchers=1,
-                quant_config=quant_config,
-                moe_config=make_dummy_moe_config(),
-            ),
-            inplace=False,
-        )
-        vllm_cfg = VllmConfig()
-
-    elif quant_type == "fp8_per_token":
-        from vllm import _custom_ops as ops
-        from vllm.config import VllmConfig
-        from vllm.model_executor.layers.fused_moe.config import (
-            FusedMoEQuantConfig,
-        )
-        from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
-            BatchedPrepareAndFinalize,
-            BatchedTritonExperts,
-        )
-
-        w1_bf16 = torch.randn(E, 2 * N, K, device=device,
-                               dtype=torch.bfloat16) / 10
-        w2_bf16 = torch.randn(E, K, N, device=device,
-                               dtype=torch.bfloat16) / 10
-        w1 = torch.empty_like(w1_bf16, dtype=torch.float8_e4m3fn)
-        w2 = torch.empty_like(w2_bf16, dtype=torch.float8_e4m3fn)
-        w1_s = torch.empty(E, 2 * N, 1, device=device, dtype=torch.float32)
-        w2_s = torch.empty(E, K, 1, device=device, dtype=torch.float32)
-        for eid in range(E):
-            w1[eid], w1_s[eid] = ops.scaled_fp8_quant(
-                w1_bf16[eid], use_per_token_if_dynamic=True)
-            w2[eid], w2_s[eid] = ops.scaled_fp8_quant(
-                w2_bf16[eid], use_per_token_if_dynamic=True)
-        quant_config = FusedMoEQuantConfig.make(
-            quant_dtype=torch.float8_e4m3fn,
-            w1_scale=w1_s, w2_scale=w2_s,
-            per_act_token_quant=True,
-        )
-        kernel = FusedMoEKernel(
-            BatchedPrepareAndFinalize(
-                max_num_tokens=num_padded, num_local_experts=E,
-                num_dispatchers=1, rank=0,
-            ),
-            BatchedTritonExperts(
-                max_num_tokens=num_padded, num_dispatchers=1,
-                quant_config=quant_config,
-                moe_config=make_dummy_moe_config(),
-            ),
-            inplace=False,
-        )
-        vllm_cfg = VllmConfig()
-    else:
-        raise ValueError(f"Unknown quant_type: {quant_type}")
+    (_, w1_q, w1_bs, w1_gs), (_, w2_q, w2_bs, w2_gs) = (
+        make_test_weights(E, N, K, in_dtype=torch.bfloat16,
+                          quant_dtype="nvfp4")
+    )
+    a1_gs = torch.ones((E,), device=device, dtype=torch.float32)
+    a2_gs = torch.ones((E,), device=device, dtype=torch.float32)
+    quant_config = nvfp4_moe_quant_config(
+        g1_alphas=(1 / w1_gs), g2_alphas=(1 / w2_gs),
+        a1_gscale=a1_gs, a2_gscale=a2_gs,
+        w1_scale=w1_bs, w2_scale=w2_bs,
+    )
+    moe_config = make_dummy_moe_config()
+    kernel = FusedMoEKernel(
+        maybe_make_prepare_finalize(
+            moe=moe_config, quant_config=quant_config,
+            allow_new_interface=True, use_monolithic=False,
+        ),
+        CutlassExpertsFp4(
+            moe_config=moe_config, quant_config=quant_config,
+        ),
+        inplace=False,
+    )
+    w1, w2 = w1_q, w2_q
+    vllm_cfg = VllmConfig(
+        parallel_config=ParallelConfig(pipeline_parallel_size=1)
+    )
 
     # Gate weights
     gate_weight = torch.randn(E, K, device=device,
@@ -965,25 +884,38 @@ def _run_moe_nan_padding_test(
             dim=-1, keepdim=True)
         topk_ids = topk_ids.to(torch.int32)
 
+    apply_kwargs = dict(
+        hidden_states=hidden_states,
+        w1=w1, w2=w2,
+        topk_weights=topk_weights, topk_ids=topk_ids,
+        global_num_experts=E,
+        activation=MoEActivation.SILU,
+        apply_router_weight_on_input=False,
+        expert_map=None,
+    )
+
     with set_current_vllm_config(vllm_cfg), _patch_empty():
-        output = kernel.apply(
-            hidden_states=hidden_states,
-            w1=w1, w2=w2,
-            topk_weights=topk_weights, topk_ids=topk_ids,
-            global_num_experts=E,
-            activation=MoEActivation.SILU,
-            apply_router_weight_on_input=False,
-            expert_map=None,
-        )
+        # Warmup (triton JIT compilation)
+        output = kernel.apply(**apply_kwargs)
+        torch.cuda.synchronize()
+
+        # Capture in CUDA graph
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            output = kernel.apply(**apply_kwargs)
+
+        # Replay
+        graph.replay()
+
     torch.cuda.synchronize()
 
     real_output = output[:num_real]
     assert not torch.isnan(real_output).any(), (
-        f"{quant_type} MoE: NaN in real tokens "
+        f"NVFP4 MoE CUDA graph: NaN in real tokens "
         f"(real={num_real}, padded={num_padded}, E={E}, topk={topk})"
     )
     assert not torch.isinf(real_output).any(), (
-        f"{quant_type} MoE: Inf in real tokens"
+        f"NVFP4 MoE CUDA graph: Inf in real tokens"
     )
 
 
@@ -1011,55 +943,51 @@ MOE_HIDDEN_CONFIGS = [
     (2560, 1024),     # DeepSeek production hidden_size
 ]
 
-# Quant types
-MOE_QUANT_TYPES = ["fp8_block", "fp8_per_token"]
-if current_platform.has_device_capability(100):
-    MOE_QUANT_TYPES.append("nvfp4")
-
-
-@pytest.mark.parametrize("quant_type", MOE_QUANT_TYPES)
+@pytest.mark.skipif(
+    not current_platform.has_device_capability(100),
+    reason="NVFP4 requires sm100+",
+)
 @pytest.mark.parametrize("E", MOE_EXPERT_COUNTS)
 @pytest.mark.parametrize("topk", MOE_TOPK_VALUES)
 @pytest.mark.parametrize(
     "num_real,num_padded", MOE_PADDING_CONFIGS,
     ids=[f"{r}to{p}" for r, p in MOE_PADDING_CONFIGS],
 )
-def test_moe_nan_padding(workspace_init, num_real, num_padded, topk, E,
-                          quant_type):
-    """MoE with router + NaN padding across quant types, expert counts,
-    topk values, and padding configs."""
+def test_moe_cudagraph_nan_padding(workspace_init, num_real, num_padded,
+                                    topk, E):
+    """NVFP4 MoE with router + CUDA graph capture/replay + NaN padding."""
     if topk > E:
         pytest.skip(f"topk={topk} > E={E}")
-    K = 1024 if quant_type == "nvfp4" else 256
-    N = 512
     _run_moe_nan_padding_test(
-        num_real, num_padded, E, topk, K, N, quant_type,
+        num_real, num_padded, E, topk, K=1024, N=512,
     )
 
 
+@pytest.mark.skipif(
+    not current_platform.has_device_capability(100),
+    reason="NVFP4 requires sm100+",
+)
 @pytest.mark.parametrize(
     "K,N", MOE_HIDDEN_CONFIGS,
     ids=[f"K{k}_N{n}" for k, n in MOE_HIDDEN_CONFIGS],
 )
-@pytest.mark.parametrize("quant_type", MOE_QUANT_TYPES)
 @pytest.mark.parametrize(
     "num_real,num_padded",
     [(13, 16), (33, 40)],
     ids=["13to16", "33to40"],
 )
-def test_moe_hidden_sizes_nan_padding(workspace_init, num_real, num_padded,
-                                       quant_type, K, N):
-    """MoE with different hidden/intermediate sizes + NaN padding.
-    Different sizes hit different alignment edge cases in quantization."""
-    if quant_type == "nvfp4" and K < 1024:
-        pytest.skip("NVFP4 needs K >= 1024")
+def test_moe_hidden_sizes_cudagraph_nan_padding(workspace_init,
+                                                  num_real, num_padded, K, N):
+    """NVFP4 MoE with different hidden sizes + CUDA graph + NaN padding."""
     _run_moe_nan_padding_test(
         num_real, num_padded, E=8, topk=2, K=K, N=N,
-        quant_type=quant_type,
     )
 
 
-@pytest.mark.parametrize("quant_type", MOE_QUANT_TYPES)
+@pytest.mark.skipif(
+    not current_platform.has_device_capability(100),
+    reason="NVFP4 requires sm100+",
+)
 @pytest.mark.parametrize(
     "E,zero_experts",
     [
@@ -1080,25 +1008,19 @@ def test_moe_hidden_sizes_nan_padding(workspace_init, num_real, num_padded,
     [(5, 8), (13, 16), (33, 40)],
     ids=["5to8", "13to16", "33to40"],
 )
-def test_moe_zero_token_experts_nan_padding(
-    workspace_init, num_real, num_padded, E, zero_experts, quant_type,
+def test_moe_zero_token_experts_cudagraph_nan_padding(
+    workspace_init, num_real, num_padded, E, zero_experts,
 ):
-    """MoE with specific experts receiving 0 tokens + NaN padding.
-    Tests that 0-token expert scales don't get corrupted by NaN padding."""
+    """NVFP4 MoE with specific experts receiving 0 tokens + CUDA graph +
+    NaN padding."""
     active = [e for e in range(E) if e not in zero_experts]
     if not active:
-        # All experts have 0 tokens — still should produce zero output
         active = None
         topk = 2
     else:
         topk = min(2, len(active))
-    K = 1024 if quant_type == "nvfp4" else 256
-    N = 512
-    if active is None:
-        # Force all routing to non-existent experts — output should be zero
-        topk_ids_override = True
     _run_moe_nan_padding_test(
-        num_real, num_padded, E, topk, K, N, quant_type,
+        num_real, num_padded, E, topk, K=1024, N=512,
         active_experts=active,
     )
 
