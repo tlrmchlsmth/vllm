@@ -286,10 +286,44 @@ def _run_attention_nan_padding_test(
                         attn_metadata.slot_mapping,
                     )
 
-                output = impl.forward(
-                    mock_layer, query, key, value, kv_cache_for_backend,
-                    attn_metadata, output=output,
+                # Check if this is a decode-only batch (all query_lens=1)
+                is_decode = all(
+                    q == 1 for q in batch_spec.query_lens
                 )
+
+                if is_decode:
+                    # Warmup
+                    output = impl.forward(
+                        mock_layer, query, key, value,
+                        kv_cache_for_backend, attn_metadata,
+                        output=output,
+                    )
+                    torch.cuda.synchronize()
+
+                    # Capture in CUDA graph
+                    graph = torch.cuda.CUDAGraph()
+                    with torch.cuda.graph(graph):
+                        output = impl.forward(
+                            mock_layer, query, key, value,
+                            kv_cache_for_backend, attn_metadata,
+                            output=output,
+                        )
+
+                    # Pollute buffers before replay — simulates stale
+                    # data from previous iteration
+                    query[num_actual_tokens:] = float('nan')
+                    key[num_actual_tokens:] = float('nan')
+                    value[num_actual_tokens:] = float('nan')
+                    output.fill_(float('nan'))
+
+                    # Replay
+                    graph.replay()
+                else:
+                    output = impl.forward(
+                        mock_layer, query, key, value,
+                        kv_cache_for_backend, attn_metadata,
+                        output=output,
+                    )
         torch.cuda.synchronize()
     finally:
         if reset_kv_cache_layout:
@@ -903,6 +937,11 @@ def _run_moe_nan_padding_test(
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
             output = kernel.apply(**apply_kwargs)
+
+        # Pollute buffers before replay — simulates stale data from
+        # previous iteration and fresh NaN in padding regions
+        hidden_states[num_real:] = float('nan')
+        output.fill_(float('nan'))
 
         # Replay
         graph.replay()
