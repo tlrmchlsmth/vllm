@@ -311,23 +311,28 @@ def _run_attention_nan_padding_test(
                             output=output,
                         )
 
-                    # Pollute buffers before replay — simulates stale
-                    # data from previous iteration
-                    query[num_actual_tokens:] = float('nan')
-                    key[num_actual_tokens:] = float('nan')
-                    value[num_actual_tokens:] = float('nan')
+                    # First replay: fill ALL inputs with NaN to
+                    # maximally pollute every internal graph buffer.
+                    # Set slot_mapping to -1 so NaN K/V don't corrupt
+                    # the KV cache.
+                    saved_slot_mapping = attn_metadata.slot_mapping.clone()
+                    attn_metadata.slot_mapping.fill_(-1)
+                    query.fill_(float('nan'))
+                    key.fill_(float('nan'))
+                    value.fill_(float('nan'))
                     output.fill_(float('nan'))
-
-                    # Replay twice: first replay puts NaN into internal
-                    # buffers for padding positions. Second replay tests
-                    # whether stale NaN in those buffers corrupts real
-                    # token output.
                     graph.replay()
                     torch.cuda.synchronize()
 
-                    # Re-pollute for second replay
+                    # Second replay: restore real data + NaN padding.
+                    # Tests whether stale NaN in internal graph buffers
+                    # from the first replay corrupts real token output.
+                    attn_metadata.slot_mapping.copy_(saved_slot_mapping)
+                    query[:num_actual_tokens] = q_real
                     query[num_actual_tokens:] = float('nan')
+                    key[:num_actual_tokens] = k_real
                     key[num_actual_tokens:] = float('nan')
+                    value[:num_actual_tokens] = v_real
                     value[num_actual_tokens:] = float('nan')
                     output.fill_(float('nan'))
                     graph.replay()
@@ -954,20 +959,26 @@ def _run_moe_nan_padding_test(
         with torch.cuda.graph(graph):
             output = kernel.apply(**apply_kwargs)
 
-        # Pollute buffers before replay — simulates stale data from
-        # previous iteration and fresh NaN in padding regions
-        hidden_states[num_real:] = float('nan')
+        # First replay: fill ALL inputs with NaN to maximally
+        # pollute every internal graph buffer (workspaces, intermediates).
+        saved_hidden = hidden_states[:num_real].clone()
+        saved_topk_weights = topk_weights[:num_real].clone()
+        saved_topk_ids = topk_ids[:num_real].clone()
+        hidden_states.fill_(float('nan'))
+        topk_weights.fill_(float('nan'))
+        topk_ids.fill_(0)  # route everything to expert 0
         output.fill_(float('nan'))
-
-        # Replay twice: first replay puts NaN-derived values into
-        # intermediate graph buffers for padding rows. Second replay
-        # tests whether those stale intermediate NaNs corrupt real
-        # token output on the next iteration.
         graph.replay()
         torch.cuda.synchronize()
 
-        # Re-pollute input padding for the second replay
+        # Second replay: restore real data + NaN padding.
+        # Tests whether stale NaN in internal graph buffers from
+        # the first replay corrupts real token output.
+        hidden_states[:num_real] = saved_hidden
         hidden_states[num_real:] = float('nan')
+        topk_weights[:num_real] = saved_topk_weights
+        topk_ids[:num_real] = saved_topk_ids
+        output.fill_(float('nan'))
         graph.replay()
 
     torch.cuda.synchronize()
