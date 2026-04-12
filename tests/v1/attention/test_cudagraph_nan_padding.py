@@ -842,7 +842,198 @@ class TestPerTokenOpsNaNPadding:
 
 
 # ============================================================================
-# Full DeepSeek-R1 decoder layer: end-to-end NaN padding test
+# Full DeepSeek-R1 MLA layer with CUDA graph: projections + attention
+# ============================================================================
+
+
+def _build_deepseek_mla_layer(vllm_config, device, dtype):
+    """Build a DeepseekV2MLAAttention layer with random weights."""
+    from vllm.model_executor.models.deepseek_v2 import (
+        DeepseekV2MLAAttention,
+    )
+
+    config = vllm_config.model_config.hf_config
+    layer = DeepseekV2MLAAttention(
+        vllm_config=vllm_config,
+        config=config,
+        hidden_size=config.hidden_size,
+        num_heads=config.num_attention_heads,
+        qk_nope_head_dim=config.qk_nope_head_dim,
+        qk_rope_head_dim=config.qk_rope_head_dim,
+        v_head_dim=config.v_head_dim,
+        q_lora_rank=config.q_lora_rank,
+        kv_lora_rank=config.kv_lora_rank,
+        max_position_embeddings=config.max_position_embeddings,
+        cache_config=vllm_config.cache_config,
+        quant_config=None,
+        prefix="model.layers.3.self_attn",
+    )
+
+    for name, param in layer.named_parameters():
+        if param.is_floating_point():
+            random_data = torch.randn_like(param, dtype=torch.float32) * 0.02
+            param.data.copy_(random_data.to(param.dtype))
+
+    layer = layer.to(device=device, dtype=dtype)
+    layer.mla_attn.mla_attn.process_weights_after_loading(dtype)
+    return layer
+
+
+@pytest.mark.parametrize(
+    "num_real,num_padded",
+    [(1, 8), (5, 8), (13, 16), (33, 40)],
+    ids=["1to8", "5to8", "13to16", "33to40"],
+)
+def test_deepseek_mla_layer_cudagraph_nan_padding(
+    default_vllm_config, dist_init, num_real, num_padded,
+):
+    """Full DeepSeek-R1 MLA attention layer under CUDA graph with NaN padding.
+
+    Tests the complete projection + attention pipeline:
+    hidden_states → fused_qkv_a_proj → q_a_layernorm → q_b_proj →
+    kv_a_layernorm → RoPE → MLA attention → o_proj
+
+    The first graph replay fills ALL of hidden_states with NaN to pollute
+    every internal buffer (projection outputs, layernorm intermediates,
+    Q/K/V, attention workspace). The second replay restores real data
+    and verifies no NaN leaked from the polluted buffers.
+    """
+    from vllm.forward_context import set_forward_context
+    from vllm.v1.kv_cache_interface import MLAAttentionSpec
+
+    device = torch.device(f"{DEVICE_TYPE}:0")
+    dtype = torch.bfloat16
+    model = "nvidia/DeepSeek-R1-0528-NVFP4-v2"
+
+    batch_spec = BatchSpec(
+        seq_lens=[128] * num_real,
+        query_lens=[1] * num_real,
+    )
+    vllm_config = create_vllm_config(
+        model_name=model,
+        max_model_len=max(batch_spec.seq_lens),
+        num_gpu_blocks=8192,
+        dtype="bfloat16",
+    )
+    block_size = vllm_config.cache_config.block_size
+    config = vllm_config.model_config.hf_config
+
+    old_dtype = torch.get_default_dtype()
+    torch.set_default_dtype(dtype)
+    try:
+        with set_current_vllm_config(vllm_config):
+            layer = _build_deepseek_mla_layer(vllm_config, device, dtype)
+
+            # Build attention metadata
+            common_attn_metadata = create_common_attn_metadata(
+                batch_spec, block_size, device, arange_block_indices=True,
+            )
+
+            # Pad block table for MLA alignment
+            required_divisor = max(1, int(128 / block_size))
+            current_cols = common_attn_metadata.block_table_tensor.shape[1]
+            if current_cols % required_divisor != 0:
+                padded_cols = ((current_cols + required_divisor - 1)
+                               // required_divisor) * required_divisor
+                padding = torch.zeros(
+                    (common_attn_metadata.block_table_tensor.shape[0],
+                     padded_cols - current_cols),
+                    dtype=torch.int32, device=device,
+                )
+                common_attn_metadata.block_table_tensor = torch.cat(
+                    [common_attn_metadata.block_table_tensor, padding],
+                    dim=1,
+                )
+
+            # Allocate KV cache
+            head_size = config.kv_lora_rank + config.qk_rope_head_dim
+            kv_cache = torch.zeros(
+                8192, block_size, head_size, dtype=dtype, device=device,
+            )
+            mla_attn = layer.mla_attn.mla_attn
+            mla_attn.kv_cache = kv_cache
+
+            # Register in static forward context
+            layer_name = mla_attn.layer_name
+            vllm_config.compilation_config.static_forward_context[
+                layer_name
+            ] = mla_attn
+
+            kv_cache_spec = MLAAttentionSpec(
+                block_size=block_size,
+                num_kv_heads=config.num_key_value_heads,
+                head_size=head_size,
+                dtype=vllm_config.model_config.dtype,
+                sliding_window=None,
+                cache_dtype_str="auto",
+            )
+
+            builder_cls = mla_attn.attn_backend.get_builder_cls()
+            builder = builder_cls(
+                kv_cache_spec, [layer_name], vllm_config, device,
+            )
+            attn_metadata = builder.build(
+                common_prefix_len=0,
+                common_attn_metadata=common_attn_metadata,
+            )
+
+            # Create padded inputs
+            num_actual = common_attn_metadata.num_actual_tokens
+            hidden_states = torch.randn(
+                num_padded, config.hidden_size, dtype=dtype, device=device,
+            ) * 0.02
+            hidden_states[num_actual:] = float('nan')
+
+            positions = torch.zeros(
+                num_padded, dtype=torch.long, device=device,
+            )
+            positions[:num_actual] = torch.arange(
+                num_actual, device=device,
+            )
+
+            with set_forward_context(attn_metadata, vllm_config):
+                # Warmup
+                output = layer(positions, hidden_states, None)
+                torch.cuda.synchronize()
+
+                # Capture
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    output = layer(positions, hidden_states, None)
+
+                # First replay: ALL NaN to pollute every internal
+                # buffer (W_q/W_k/W_v projections, layernorms, RoPE,
+                # attention workspace, o_proj)
+                saved_hidden = hidden_states[:num_actual].clone()
+                saved_slot_mapping = attn_metadata.slot_mapping.clone()
+                hidden_states.fill_(float('nan'))
+                attn_metadata.slot_mapping.fill_(-1)
+                output.fill_(float('nan'))
+                graph.replay()
+                torch.cuda.synchronize()
+
+                # Second replay: restore real data + NaN padding
+                hidden_states[:num_actual] = saved_hidden
+                hidden_states[num_actual:] = float('nan')
+                attn_metadata.slot_mapping.copy_(saved_slot_mapping)
+                output.fill_(float('nan'))
+                graph.replay()
+                torch.cuda.synchronize()
+
+        real_output = output[:num_actual]
+        assert not torch.isnan(real_output).any(), (
+            f"DeepSeek MLA layer CUDA graph: NaN in real tokens "
+            f"(real={num_actual}, padded={num_padded})"
+        )
+        assert not torch.isinf(real_output).any(), (
+            f"DeepSeek MLA layer CUDA graph: Inf in real tokens"
+        )
+    finally:
+        torch.set_default_dtype(old_dtype)
+
+
+# ============================================================================
+# NVFP4 MoE with CUDA graph: router + experts
 # ============================================================================
 
 
