@@ -14,9 +14,6 @@ slices Q/K/V to [:num_actual_tokens] before computing attention, and this
 test validates that contract.
 """
 
-import contextlib
-from unittest.mock import patch
-
 import pytest
 import torch
 
@@ -44,43 +41,28 @@ from vllm.v1.attention.backends.utils import set_kv_cache_layout
 DEVICE_TYPE = current_platform.device_type
 
 
-def _nan_empty(*args, **kwargs):
-    """Drop-in for torch.empty that fills with NaN."""
-    t = torch._nan_empty_original(*args, **kwargs)
-    if t.is_floating_point():
-        try:
-            t.fill_(float('nan'))
-        except RuntimeError:
-            pass  # skip if tensor is compiled/requires_grad
-    return t
+def _poison_cuda_allocator(device: torch.device | str = "cuda"):
+    """Poison the CUDA caching allocator's free list with NaN.
 
+    Allocates buffers of various sizes, fills with 0xFF (NaN for all
+    IEEE float types: fp16, bf16, fp32, fp8_e4m3fn), then frees them
+    back to the allocator cache. Subsequent torch.empty() calls that
+    recycle this memory will get NaN-filled tensors.
 
-def _nan_empty_like(*args, **kwargs):
-    """Drop-in for torch.empty_like that fills with NaN."""
-    t = torch._nan_empty_like_original(*args, **kwargs)
-    if t.is_floating_point():
-        try:
-            t.fill_(float('nan'))
-        except RuntimeError:
-            pass  # skip if tensor is compiled/requires_grad
-    return t
-
-
-@contextlib.contextmanager
-def _patch_empty():
-    """Patch torch.empty and torch.empty_like to return NaN-filled tensors.
-    Simulates worst-case recycled GPU memory."""
-    torch._nan_empty_original = torch.empty
-    torch._nan_empty_like_original = torch.empty_like
-    try:
-        with (
-            patch.object(torch, 'empty', _nan_empty),
-            patch.object(torch, 'empty_like', _nan_empty_like),
-        ):
-            yield
-    finally:
-        del torch._nan_empty_original
-        del torch._nan_empty_like_original
+    This is more reliable than patching torch.empty at the Python level
+    because it also catches allocations made from C++ code (CUTLASS
+    workspace buffers, triton intermediates, etc.).
+    """
+    # Poison at multiple sizes to cover different allocator buckets.
+    # The caching allocator rounds up to block sizes, so we poison
+    # a range of sizes to maximize coverage.
+    bufs = []
+    for size_mb in [1, 2, 4, 8, 16, 32, 64, 128, 256]:
+        buf = torch.empty(size_mb * 1024 * 1024, dtype=torch.uint8,
+                          device=device)
+        buf.fill_(0xFF)
+        bufs.append(buf)
+    del bufs  # all return to allocator cache with NaN pattern
 
 
 BACKENDS_TO_TEST = [
@@ -281,67 +263,68 @@ def _run_attention_nan_padding_test(
             mock_layer = MockAttentionLayer(device)
             output = torch.full_like(query, float('nan'))
 
-            with _patch_empty():
-                if not try_backend_includes_kv_cache_update(backend):
-                    impl.do_kv_cache_update(
-                        mock_layer, key, value, kv_cache_for_backend,
-                        attn_metadata.slot_mapping,
-                    )
+            _poison_cuda_allocator(device)
 
-                # Check if this is a decode-only batch (all query_lens=1)
-                is_decode = all(
-                    q == 1 for q in batch_spec.query_lens
+            if not try_backend_includes_kv_cache_update(backend):
+                impl.do_kv_cache_update(
+                    mock_layer, key, value, kv_cache_for_backend,
+                    attn_metadata.slot_mapping,
                 )
 
-                if is_decode:
-                    # Warmup
+            # Check if this is a decode-only batch (all query_lens=1)
+            is_decode = all(
+                q == 1 for q in batch_spec.query_lens
+            )
+
+            if is_decode:
+                # Warmup
+                output = impl.forward(
+                    mock_layer, query, key, value,
+                    kv_cache_for_backend, attn_metadata,
+                    output=output,
+                )
+                torch.cuda.synchronize()
+
+                # Capture in CUDA graph
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
                     output = impl.forward(
                         mock_layer, query, key, value,
                         kv_cache_for_backend, attn_metadata,
                         output=output,
                     )
-                    torch.cuda.synchronize()
 
-                    # Capture in CUDA graph
-                    graph = torch.cuda.CUDAGraph()
-                    with torch.cuda.graph(graph):
-                        output = impl.forward(
-                            mock_layer, query, key, value,
-                            kv_cache_for_backend, attn_metadata,
-                            output=output,
-                        )
+                # First replay: fill ALL inputs with NaN to
+                # maximally pollute every internal graph buffer.
+                # Set slot_mapping to -1 so NaN K/V don't corrupt
+                # the KV cache.
+                saved_slot_mapping = attn_metadata.slot_mapping.clone()
+                attn_metadata.slot_mapping.fill_(-1)
+                query.fill_(float('nan'))
+                key.fill_(float('nan'))
+                value.fill_(float('nan'))
+                output.fill_(float('nan'))
+                graph.replay()
+                torch.cuda.synchronize()
 
-                    # First replay: fill ALL inputs with NaN to
-                    # maximally pollute every internal graph buffer.
-                    # Set slot_mapping to -1 so NaN K/V don't corrupt
-                    # the KV cache.
-                    saved_slot_mapping = attn_metadata.slot_mapping.clone()
-                    attn_metadata.slot_mapping.fill_(-1)
-                    query.fill_(float('nan'))
-                    key.fill_(float('nan'))
-                    value.fill_(float('nan'))
-                    output.fill_(float('nan'))
-                    graph.replay()
-                    torch.cuda.synchronize()
-
-                    # Second replay: restore real data + NaN padding.
-                    # Tests whether stale NaN in internal graph buffers
-                    # from the first replay corrupts real token output.
-                    attn_metadata.slot_mapping.copy_(saved_slot_mapping)
-                    query[:num_actual_tokens] = q_real
-                    query[num_actual_tokens:] = float('nan')
-                    key[:num_actual_tokens] = k_real
-                    key[num_actual_tokens:] = float('nan')
-                    value[:num_actual_tokens] = v_real
-                    value[num_actual_tokens:] = float('nan')
-                    output.fill_(float('nan'))
-                    graph.replay()
-                else:
-                    output = impl.forward(
-                        mock_layer, query, key, value,
-                        kv_cache_for_backend, attn_metadata,
-                        output=output,
-                    )
+                # Second replay: restore real data + NaN padding.
+                # Tests whether stale NaN in internal graph buffers
+                # from the first replay corrupts real token output.
+                attn_metadata.slot_mapping.copy_(saved_slot_mapping)
+                query[:num_actual_tokens] = q_real
+                query[num_actual_tokens:] = float('nan')
+                key[:num_actual_tokens] = k_real
+                key[num_actual_tokens:] = float('nan')
+                value[:num_actual_tokens] = v_real
+                value[num_actual_tokens:] = float('nan')
+                output.fill_(float('nan'))
+                graph.replay()
+            else:
+                output = impl.forward(
+                    mock_layer, query, key, value,
+                    kv_cache_for_backend, attn_metadata,
+                    output=output,
+                )
         torch.cuda.synchronize()
     finally:
         if reset_kv_cache_layout:
@@ -628,15 +611,15 @@ def _run_mla_nan_padding_test(
         cache_dtype_str=kv_cache_dtype,
     )
 
-    with _patch_empty():
-        output = mla_run_attention_backend(
-            backend, kv_cache_spec, ["placeholder"],
-            vllm_config, device, common_attn_metadata,
-            query, kv_c, k_pe, kv_cache,
-            kv_lora_rank, qk_nope_head_dim, qk_rope_head_dim, v_head_dim,
-            mock_kv_b_proj, q_scale=1.0, k_scale=1.0,
-            kv_cache_dtype=kv_cache_dtype,
-        )
+    _poison_cuda_allocator(device)
+    output = mla_run_attention_backend(
+        backend, kv_cache_spec, ["placeholder"],
+        vllm_config, device, common_attn_metadata,
+        query, kv_c, k_pe, kv_cache,
+        kv_lora_rank, qk_nope_head_dim, qk_rope_head_dim, v_head_dim,
+        mock_kv_b_proj, q_scale=1.0, k_scale=1.0,
+        kv_cache_dtype=kv_cache_dtype,
+    )
     torch.cuda.synchronize()
 
     real_output = output[:num_actual_tokens]
@@ -1019,6 +1002,8 @@ def test_deepseek_mla_layer_cudagraph_nan_padding(
                 num_actual, device=device,
             )
 
+            _poison_cuda_allocator(device)
+
             with set_forward_context(attn_metadata, vllm_config):
                 # Warmup
                 output = layer(positions, hidden_states, None)
@@ -1168,7 +1153,9 @@ def _run_moe_nan_padding_test(
         expert_map=None,
     )
 
-    with set_current_vllm_config(vllm_cfg), _patch_empty():
+    _poison_cuda_allocator(device)
+
+    with set_current_vllm_config(vllm_cfg):
         # Warmup (triton JIT compilation)
         output = kernel.apply(**apply_kwargs)
         torch.cuda.synchronize()
@@ -1488,9 +1475,10 @@ def _deepep_ll_nan_padding_worker(
         )
 
         from tests.v1.attention.test_cudagraph_nan_padding import (
-            _patch_empty,
+            _poison_cuda_allocator,
         )
-        with set_current_vllm_config(VllmConfig()), _patch_empty():
+        _poison_cuda_allocator(device)
+        with set_current_vllm_config(VllmConfig()):
             output = kernel.apply(
                 hidden_states=hidden_states, w1=w1, w2=w2,
                 topk_weights=topk_weights, topk_ids=topk_ids,
