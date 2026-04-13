@@ -1046,6 +1046,94 @@ def test_deepseek_mla_layer_cudagraph_nan_padding(
 
 
 # ============================================================================
+# Direct test for silu_and_mul_scaled_fp4_experts_quant padding bug
+# ============================================================================
+
+
+@pytest.mark.xfail(
+    reason="Known bug: silu_mul_cvt_fp16_to_fp4 kernel padding rows "
+           "default to expert_idx=0 and overwrite expert 0's scale. "
+           "Fix: skip rows where rowIdx >= expert_offsets[n_experts].",
+    strict=True,
+)
+@pytest.mark.skipif(
+    not current_platform.has_device_capability(100),
+    reason="NVFP4 requires sm100+",
+)
+@pytest.mark.parametrize(
+    "num_experts,num_covered,m_topk",
+    [
+        (4, 12, 16),    # 4 padding rows beyond last expert
+        (4, 10, 16),    # 6 padding rows
+        (8, 14, 16),    # 2 padding rows
+        (4, 4, 8),      # half the rows are padding
+        (8, 1, 8),      # 7 padding rows, only 1 real
+        (2, 3, 8),      # minimal experts, lots of padding
+    ],
+    ids=["4pad", "6pad", "2pad", "half_pad", "7pad_1real", "minimal"],
+)
+def test_fp4_quant_kernel_padding_corruption(
+    num_experts, num_covered, m_topk,
+):
+    """Direct test for the silu_mul_cvt_fp16_to_fp4 padding bug.
+
+    When expert_offsets[-1] < m_topk, rows beyond the last expert
+    default to expert_idx=0 and overwrite expert 0's scale factor.
+    This is a known bug in the CUDA kernel.
+    """
+    import vllm._custom_ops as ops
+
+    device = "cuda"
+    k = 128  # intermediate size
+
+    # Distribute tokens across experts evenly
+    tokens_per_expert = num_covered // num_experts
+    remainder = num_covered % num_experts
+    offsets = [0]
+    for i in range(num_experts):
+        n = tokens_per_expert + (1 if i < remainder else 0)
+        offsets.append(offsets[-1] + n)
+    assert offsets[-1] == num_covered
+
+    expert_offsets = torch.tensor(offsets, dtype=torch.int32, device=device)
+    blockscale_offsets = torch.tensor(
+        offsets, dtype=torch.int32, device=device,
+    )
+    input_global_scale = torch.ones(
+        num_experts, dtype=torch.float32, device=device,
+    )
+
+    # Clean run: all rows have valid data
+    c1_clean = torch.randn(
+        m_topk, k * 2, dtype=torch.bfloat16, device=device,
+    )
+    _, scales_clean = ops.silu_and_mul_scaled_fp4_experts_quant(
+        c1_clean, input_global_scale, expert_offsets,
+        blockscale_offsets, 1,
+    )
+
+    # Dirty run: padding rows (beyond num_covered) filled with NaN
+    c1_dirty = c1_clean.clone()
+    c1_dirty[num_covered:] = float('nan')
+    _, scales_dirty = ops.silu_and_mul_scaled_fp4_experts_quant(
+        c1_dirty, input_global_scale, expert_offsets,
+        blockscale_offsets, 1,
+    )
+
+    # Check that scales for real expert rows are NOT corrupted
+    # by the NaN padding rows
+    scales_clean_real = scales_clean[:num_covered]
+    scales_dirty_real = scales_dirty[:num_covered]
+    match = torch.equal(scales_clean_real, scales_dirty_real)
+    assert match, (
+        f"FP4 quant kernel: NaN padding rows (rows {num_covered}..{m_topk}) "
+        f"corrupted real expert scales. "
+        f"This is the silu_mul_cvt_fp16_to_fp4 padding bug where orphan "
+        f"rows default to expert_idx=0 and overwrite expert 0's scale."
+    )
+
+
+# ============================================================================
 # NVFP4 MoE with CUDA graph: router + experts
 # ============================================================================
 
