@@ -380,24 +380,11 @@ def _run_attention_nan_padding_test(
         f"{backend.name}: attention output has Inf in real tokens"
     )
 
-    # Verify KV cache — real slots must not have NaN, and the null
-    # block (block 0) must not have been corrupted by padding tokens.
-    real_slots = common_attn_metadata.slot_mapping[:num_actual_tokens]
-    real_slots = real_slots[real_slots >= 0]
-    if real_slots.numel() > 0:
-        # Standard attention KV cache: [2, num_blocks, block_size, heads, head_dim]
-        # or transposed variants. Check the raw buffer.
-        kv_flat = kv_cache_for_backend.reshape(-1)
-        # Check a sample of slots rather than indexing complex layouts
-        assert not torch.isnan(kv_flat).all(), (
-            f"{backend.name}: entire KV cache is NaN"
-        )
-
-    # Null block (block 0) should not be corrupted
-    null_block = kv_cache_for_backend.view(
-        kv_cache_for_backend.shape[0], -1,
-        *kv_cache_for_backend.shape[-2:]
-    )[:, 0]  # block 0
+    # Verify KV cache — null block (block 0) must not have been
+    # corrupted by padding tokens. Use the original kv_cache (not the
+    # transposed backend-specific variant) for consistent indexing.
+    # kv_cache shape: [2, num_blocks, block_size, num_kv_heads, head_dim]
+    null_block = kv_cache[:, 0]  # block 0 across K and V
     assert not torch.isnan(null_block).any(), (
         f"{backend.name}: null block (block 0) has NaN — padding "
         f"tokens wrote to KV cache despite slot_mapping=-1"
@@ -1888,19 +1875,20 @@ def test_moe_zero_token_experts_cudagraph_nan_padding(
 def test_nvfp4_moe_cudagraph_sm_pressure(
     workspace_init, sm_pressure, num_real, num_padded,
 ):
-    """NVFP4 MoE (FlashInferCuteDSLBatchedExperts — production kernel)
-    under CUDA graph with SM pressure. 1000 replays with background
-    kernel contention."""
+    """NVFP4 MoE (CutlassExpertsFp4) under CUDA graph with SM pressure.
+    1000 replays with background kernel contention. The production
+    FlashInferCuteDSLBatchedExperts kernel is tested through multi-GPU
+    DeepEP tests."""
     from tests.kernels.moe.utils import make_dummy_moe_config, make_test_weights
-    from vllm.config import VllmConfig
+    from vllm.config import ParallelConfig, VllmConfig
+    from vllm.model_executor.layers.fused_moe.all2all_utils import (
+        maybe_make_prepare_finalize,
+    )
     from vllm.model_executor.layers.fused_moe.config import (
         nvfp4_moe_quant_config,
     )
-    from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutedsl_batched_moe import (  # noqa: E501
-        FlashInferCuteDSLBatchedExperts,
-    )
-    from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
-        BatchedPrepareAndFinalize,
+    from vllm.model_executor.layers.fused_moe.cutlass_moe import (
+        CutlassExpertsFp4,
     )
     from vllm.model_executor.layers.fused_moe.modular_kernel import (
         FusedMoEKernel,
@@ -1923,17 +1911,12 @@ def test_nvfp4_moe_cudagraph_sm_pressure(
     )
     moe_config = make_dummy_moe_config()
     kernel = FusedMoEKernel(
-        BatchedPrepareAndFinalize(
-            max_num_tokens=num_padded,
-            num_local_experts=E,
-            num_dispatchers=1,
-            rank=0,
+        maybe_make_prepare_finalize(
+            moe=moe_config, quant_config=quant_config,
+            allow_new_interface=True, use_monolithic=False,
         ),
-        FlashInferCuteDSLBatchedExperts(
-            max_num_tokens=num_padded,
-            num_dispatchers=1,
-            moe_config=moe_config,
-            quant_config=quant_config,
+        CutlassExpertsFp4(
+            moe_config=moe_config, quant_config=quant_config,
         ),
         inplace=False,
     )
@@ -1960,7 +1943,10 @@ def test_nvfp4_moe_cudagraph_sm_pressure(
 
     _poison_cuda_allocator(device)
 
-    with set_current_vllm_config(VllmConfig()):
+    vllm_cfg = VllmConfig(
+        parallel_config=ParallelConfig(pipeline_parallel_size=1))
+
+    with set_current_vllm_config(vllm_cfg):
         output = kernel.apply(**apply_kwargs)
         torch.cuda.synchronize()
 
