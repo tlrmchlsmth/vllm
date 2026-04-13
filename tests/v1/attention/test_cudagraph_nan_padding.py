@@ -1352,6 +1352,176 @@ def test_deepseek_mla_layer_cudagraph_nan_padding(
         torch.set_default_dtype(old_dtype)
 
 
+@pytest.mark.parametrize(
+    "num_real,num_padded",
+    [(1, 8), (5, 8), (13, 16)],
+    ids=["1to8", "5to8", "13to16"],
+)
+def test_mla_layer_production_padding(
+    default_vllm_config, dist_init, num_real, num_padded,
+):
+    """MLA layer with production-matching CUDA graph padding behavior.
+
+    In production (gpu_model_runner.py:2188), num_actual_tokens is set
+    to num_tokens_padded, NOT the real token count. This means attention
+    backends don't slice — they process ALL tokens including padding.
+    Padding requests have seq_lens=0 and block_table=NULL_BLOCK_ID (0).
+
+    This test matches that exact contract:
+    - num_actual_tokens = num_padded (not num_real)
+    - Padding requests in query_start_loc, seq_lens, block_table
+    - slot_mapping = -1 for padding tokens
+    - FP8 KV cache (production uses --kv-cache-dtype fp8)
+    """
+    from vllm.forward_context import set_forward_context
+    from vllm.v1.attention.backend import CommonAttentionMetadata
+    from vllm.v1.kv_cache_interface import MLAAttentionSpec
+
+    device = torch.device(f"{DEVICE_TYPE}:0")
+    dtype = torch.bfloat16
+    model = "nvidia/DeepSeek-R1-0528-NVFP4-v2"
+
+    vllm_config = create_vllm_config(
+        model_name=model, max_model_len=128,
+        num_gpu_blocks=8192, dtype="bfloat16",
+    )
+    config = vllm_config.model_config.hf_config
+    block_size = vllm_config.cache_config.block_size
+
+    old_dtype = torch.get_default_dtype()
+    torch.set_default_dtype(dtype)
+    try:
+        with set_current_vllm_config(vllm_config):
+            layer = _build_deepseek_mla_layer(vllm_config, device, dtype)
+
+            # Build metadata matching production: num_actual_tokens =
+            # num_padded, with padding requests having seq_lens=0.
+            # Real requests: indices 0..num_real-1
+            # Padding requests: indices num_real..num_padded-1
+            query_start_loc = torch.arange(
+                num_padded + 1, dtype=torch.int32, device=device,
+            )  # each request has 1 token (decode)
+            query_start_loc_cpu = query_start_loc.cpu()
+
+            seq_lens = torch.zeros(
+                num_padded, dtype=torch.int32, device=device,
+            )
+            seq_lens[:num_real] = 128  # real requests have context
+            seq_lens_cpu = seq_lens.cpu()
+
+            num_computed_tokens_cpu = torch.zeros(
+                num_padded, dtype=torch.int32,
+            )
+            num_computed_tokens_cpu[:num_real] = 127  # context len
+
+            max_blocks = (128 + block_size - 1) // block_size
+            block_table = torch.zeros(
+                num_padded, max_blocks, dtype=torch.int32, device=device,
+            )
+            # Real requests get valid blocks
+            for i in range(num_real):
+                for b in range(max_blocks):
+                    block_table[i, b] = i * max_blocks + b + 1
+            # Padding requests get NULL_BLOCK_ID (0) — already zero
+
+            slot_mapping = torch.full(
+                (num_padded,), -1, dtype=torch.int64, device=device,
+            )
+            # Real tokens get valid slots
+            for i in range(num_real):
+                pos = 127  # decode position
+                blk_idx = pos // block_size
+                blk_off = pos % block_size
+                slot_mapping[i] = (
+                    block_table[i, blk_idx] * block_size + blk_off
+                )
+
+            # KEY: num_actual_tokens = num_padded (production behavior)
+            common_attn_metadata = CommonAttentionMetadata(
+                query_start_loc=query_start_loc,
+                query_start_loc_cpu=query_start_loc_cpu,
+                seq_lens=seq_lens,
+                _seq_lens_cpu=seq_lens_cpu,
+                _num_computed_tokens_cpu=num_computed_tokens_cpu,
+                num_reqs=num_padded,
+                num_actual_tokens=num_padded,  # PADDED, not real
+                max_query_len=1,
+                max_seq_len=128,
+                block_table_tensor=block_table,
+                slot_mapping=slot_mapping,
+                causal=True,
+            )
+
+            # Pad block table for MLA alignment
+            required_divisor = max(1, int(128 / block_size))
+            cols = common_attn_metadata.block_table_tensor.shape[1]
+            if cols % required_divisor != 0:
+                padded_cols = ((cols + required_divisor - 1)
+                               // required_divisor) * required_divisor
+                padding = torch.zeros(
+                    (num_padded, padded_cols - cols),
+                    dtype=torch.int32, device=device,
+                )
+                common_attn_metadata.block_table_tensor = torch.cat(
+                    [common_attn_metadata.block_table_tensor, padding],
+                    dim=1,
+                )
+
+            head_size = config.kv_lora_rank + config.qk_rope_head_dim
+            kv_cache = torch.zeros(
+                8192, block_size, head_size, dtype=dtype, device=device,
+            )
+            mla_attn = layer.mla_attn.mla_attn
+            mla_attn.kv_cache = kv_cache
+            layer_name = mla_attn.layer_name
+            vllm_config.compilation_config.static_forward_context[
+                layer_name
+            ] = mla_attn
+
+            kv_cache_spec = MLAAttentionSpec(
+                block_size=block_size,
+                num_kv_heads=config.num_key_value_heads,
+                head_size=head_size,
+                dtype=vllm_config.model_config.dtype,
+                sliding_window=None,
+                cache_dtype_str="auto",
+            )
+            builder_cls = mla_attn.attn_backend.get_builder_cls()
+            builder = builder_cls(
+                kv_cache_spec, [layer_name], vllm_config, device,
+            )
+            attn_metadata = builder.build(
+                common_prefix_len=0,
+                common_attn_metadata=common_attn_metadata,
+            )
+
+            # Hidden states: real data + NaN padding
+            hidden_states = torch.randn(
+                num_padded, config.hidden_size, dtype=dtype, device=device,
+            ) * 0.02
+            hidden_states[num_real:] = float('nan')
+
+            positions = torch.zeros(
+                num_padded, dtype=torch.long, device=device,
+            )
+            positions[:num_real] = 127  # decode positions
+
+            _poison_cuda_allocator(device)
+
+            with set_forward_context(attn_metadata, vllm_config):
+                output = layer(positions, hidden_states, None)
+            torch.cuda.synchronize()
+
+        real_output = output[:num_real]
+        assert not torch.isnan(real_output).any(), (
+            f"MLA layer (production padding): NaN in real tokens "
+            f"(real={num_real}, padded={num_padded}, "
+            f"num_actual_tokens={num_padded})"
+        )
+    finally:
+        torch.set_default_dtype(old_dtype)
+
+
 @pytest.mark.skipif(
     not current_platform.has_device_capability(100),
     reason="NVFP4 requires sm100+",
