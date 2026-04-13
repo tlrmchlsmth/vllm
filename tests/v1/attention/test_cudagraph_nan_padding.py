@@ -372,6 +372,29 @@ def _run_attention_nan_padding_test(
         f"{backend.name}: attention output has Inf in real tokens"
     )
 
+    # Verify KV cache — real slots must not have NaN, and the null
+    # block (block 0) must not have been corrupted by padding tokens.
+    real_slots = common_attn_metadata.slot_mapping[:num_actual_tokens]
+    real_slots = real_slots[real_slots >= 0]
+    if real_slots.numel() > 0:
+        # Standard attention KV cache: [2, num_blocks, block_size, heads, head_dim]
+        # or transposed variants. Check the raw buffer.
+        kv_flat = kv_cache_for_backend.reshape(-1)
+        # Check a sample of slots rather than indexing complex layouts
+        assert not torch.isnan(kv_flat).all(), (
+            f"{backend.name}: entire KV cache is NaN"
+        )
+
+    # Null block (block 0) should not be corrupted
+    null_block = kv_cache_for_backend.view(
+        kv_cache_for_backend.shape[0], -1,
+        *kv_cache_for_backend.shape[-2:]
+    )[:, 0]  # block 0
+    assert not torch.isnan(null_block).any(), (
+        f"{backend.name}: null block (block 0) has NaN — padding "
+        f"tokens wrote to KV cache despite slot_mapping=-1"
+    )
+
 
 # (batch_name, batch_spec, num_padding_tokens)
 # Padding tokens round up to next multiple of 8 to match production buckets.
@@ -661,6 +684,24 @@ def _run_mla_nan_padding_test(
     )
     assert not torch.isinf(real_output).any(), (
         f"{backend.name}: MLA output has Inf in real tokens"
+    )
+
+    # Verify MLA KV cache — real slots must not have NaN.
+    # MLA cache shape: [num_blocks, block_size, head_size]
+    real_slots = common_attn_metadata.slot_mapping[:num_actual_tokens]
+    real_slots = real_slots[real_slots >= 0]
+    if real_slots.numel() > 0:
+        kv_cache_flat = kv_cache.view(-1, kv_cache.shape[-1])
+        real_cache = kv_cache_flat[real_slots]
+        assert not torch.isnan(real_cache).any(), (
+            f"{backend.name}: MLA KV cache has NaN in real slots"
+        )
+
+    # Null block (block 0) must not be corrupted
+    null_block = kv_cache[0]
+    assert not torch.isnan(null_block).any(), (
+        f"{backend.name}: MLA null block (block 0) has NaN — "
+        f"padding tokens wrote to KV cache"
     )
 
 
@@ -1304,6 +1345,18 @@ def test_deepseek_mla_layer_cudagraph_nan_padding(
         assert not torch.isinf(real_output).any(), (
             f"DeepSeek MLA layer CUDA graph: Inf in real tokens"
         )
+
+        # Check KV cache — real slots must not have NaN.
+        # The slot_mapping tells us which cache slots were written.
+        real_slots = saved_slot_mapping[:num_actual]
+        real_slots = real_slots[real_slots >= 0]  # filter any -1
+        if real_slots.numel() > 0:
+            kv_cache_flat = kv_cache.view(-1, kv_cache.shape[-1])
+            real_cache_entries = kv_cache_flat[real_slots]
+            assert not torch.isnan(real_cache_entries).any(), (
+                f"DeepSeek MLA layer: KV cache has NaN in real slots "
+                f"(real={num_actual}, padded={num_padded})"
+            )
     finally:
         torch.set_default_dtype(old_dtype)
 
