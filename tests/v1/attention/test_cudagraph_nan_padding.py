@@ -1349,7 +1349,7 @@ def test_deepseek_mla_layer_cudagraph_sm_pressure(
                 saved_hidden = hidden_states[:num_actual].clone()
                 saved_slot_mapping = attn_metadata.slot_mapping.clone()
 
-                for i in range(100):
+                for i in range(1000):
                     # Alternate: pollute → replay → restore → replay
                     hidden_states.fill_(float('nan'))
                     attn_metadata.slot_mapping.fill_(-1)
@@ -1361,13 +1361,16 @@ def test_deepseek_mla_layer_cudagraph_sm_pressure(
                     attn_metadata.slot_mapping.copy_(saved_slot_mapping)
                     output.fill_(float('nan'))
                     graph.replay()
-                    torch.cuda.synchronize()
 
-                    real_output = output[:num_actual]
-                    assert not torch.isnan(real_output).any(), (
-                        f"SM pressure MLA CUDA graph: NaN at iteration "
-                        f"{i} (real={num_actual}, padded={num_padded})"
-                    )
+                    # Check every 100 iterations to avoid sync overhead
+                    if i % 100 == 99:
+                        torch.cuda.synchronize()
+                        real_output = output[:num_actual]
+                        assert not torch.isnan(real_output).any(), (
+                            f"SM pressure MLA CUDA graph: NaN at "
+                            f"iteration {i} (real={num_actual}, "
+                            f"padded={num_padded})"
+                        )
     finally:
         torch.set_default_dtype(old_dtype)
 
