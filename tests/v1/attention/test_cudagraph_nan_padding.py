@@ -852,6 +852,96 @@ class TestPerTokenOpsNaNPadding:
         )
 
 
+@pytest.mark.parametrize(
+    "num_real,num_padded",
+    [(1, 8), (5, 8), (13, 16), (33, 40)],
+    ids=["1to8", "5to8", "13to16", "33to40"],
+)
+def test_deepseek_dense_mlp_cudagraph_nan_padding(
+    default_vllm_config, dist_init, num_real, num_padded,
+):
+    """DeepSeek-R1 dense MLP (gate_up_proj + SiLU + down_proj) with
+    CUDA graph capture/replay and NaN padding.
+
+    This is the MLP used in layers 0-2 (before first_k_dense_replace).
+    Tests that gate_up_proj, SiLU*mul activation, and down_proj all
+    handle NaN padding correctly under CUDA graph.
+    """
+    from vllm.config import VllmConfig
+    from vllm.model_executor.models.deepseek_v2 import DeepseekV2MLP
+
+    device = torch.device(f"{DEVICE_TYPE}:0")
+    dtype = torch.bfloat16
+
+    vllm_config = create_vllm_config(
+        model_name="nvidia/DeepSeek-R1-0528-NVFP4-v2",
+        max_model_len=128,
+        num_gpu_blocks=8192,
+        dtype="bfloat16",
+    )
+    config = vllm_config.model_config.hf_config
+
+    old_dtype = torch.get_default_dtype()
+    torch.set_default_dtype(dtype)
+    try:
+        with set_current_vllm_config(vllm_config):
+            mlp = DeepseekV2MLP(
+                hidden_size=config.hidden_size,
+                intermediate_size=config.intermediate_size,
+                hidden_act=config.hidden_act,
+                quant_config=None,
+                prefix="model.layers.0.mlp",
+            )
+            for name, param in mlp.named_parameters():
+                if param.is_floating_point():
+                    random_data = torch.randn_like(
+                        param, dtype=torch.float32) * 0.02
+                    param.data.copy_(random_data.to(param.dtype))
+            mlp = mlp.to(device=device, dtype=dtype)
+
+            # Padded input with NaN
+            hidden = torch.randn(
+                num_padded, config.hidden_size, dtype=dtype, device=device,
+            ) * 0.02
+            hidden[num_real:] = float('nan')
+
+            _poison_cuda_allocator(device)
+
+            # Warmup
+            output = mlp(hidden)
+            torch.cuda.synchronize()
+
+            # Capture
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                output = mlp(hidden)
+
+            # First replay: all NaN to pollute internal buffers
+            saved_hidden = hidden[:num_real].clone()
+            hidden.fill_(float('nan'))
+            output.fill_(float('nan'))
+            graph.replay()
+            torch.cuda.synchronize()
+
+            # Second replay: restore real data + NaN padding
+            hidden[:num_real] = saved_hidden
+            hidden[num_real:] = float('nan')
+            output.fill_(float('nan'))
+            graph.replay()
+            torch.cuda.synchronize()
+
+        real_output = output[:num_real]
+        assert not torch.isnan(real_output).any(), (
+            f"DeepSeek dense MLP CUDA graph: NaN in real tokens "
+            f"(real={num_real}, padded={num_padded})"
+        )
+        assert not torch.isinf(real_output).any(), (
+            f"DeepSeek dense MLP CUDA graph: Inf in real tokens"
+        )
+    finally:
+        torch.set_default_dtype(old_dtype)
+
+
 # ============================================================================
 # Full DeepSeek-R1 MLA layer with CUDA graph: projections + attention
 # ============================================================================
