@@ -2191,6 +2191,155 @@ def test_nvfp4_dense_mlp_numerical_edge_cases(
         torch.set_default_dtype(old_dtype)
 
 
+@pytest.mark.skipif(
+    not current_platform.has_device_capability(100),
+    reason="NVFP4 requires sm100+",
+)
+@pytest.mark.parametrize(
+    "weight_pattern",
+    [
+        "zero_global_scale",        # global scale = 0 → division by zero
+        "huge_global_scale",        # global scale = 1e30 → overflow
+        "tiny_global_scale",        # global scale = 1e-30 → underflow
+        "max_fp4_weights",          # all FP4 values maxed out (0x77)
+        "zero_fp4_weights",         # all FP4 values zero (0x00)
+        "max_fp8_block_scales",     # all block scales at fp8 max (448)
+        "zero_fp8_block_scales",    # all block scales zero
+        "nan_fp8_block_scales",     # NaN in block scales (0xFF = NaN in e4m3)
+        "mixed_extreme_scales",     # some blocks max scale, some zero
+    ],
+)
+def test_nvfp4_moe_weight_edge_cases(workspace_init, weight_pattern):
+    """Test NVFP4 MoE with adversarial weight/scale configurations.
+
+    These test degenerate NVFP4 quantization states that could arise
+    from checkpoint corruption, quantization edge cases, or padding
+    in weight tensors.
+    """
+    from tests.kernels.moe.utils import make_dummy_moe_config, make_test_weights
+    from vllm.config import ParallelConfig, VllmConfig
+    from vllm.model_executor.layers.fused_moe.all2all_utils import (
+        maybe_make_prepare_finalize,
+    )
+    from vllm.model_executor.layers.fused_moe.config import (
+        nvfp4_moe_quant_config,
+    )
+    from vllm.model_executor.layers.fused_moe.cutlass_moe import (
+        CutlassExpertsFp4,
+    )
+    from vllm.model_executor.layers.fused_moe.modular_kernel import (
+        FusedMoEKernel,
+        MoEActivation,
+    )
+
+    device = torch.device(f"{DEVICE_TYPE}:0")
+    E, topk, K, N = 4, 2, 1024, 512
+    num_tokens = 8
+
+    # Start with valid weights
+    (_, w1_q, w1_bs, w1_gs), (_, w2_q, w2_bs, w2_gs) = (
+        make_test_weights(E, N, K, in_dtype=torch.bfloat16,
+                          quant_dtype="nvfp4")
+    )
+
+    # Modify weights/scales based on pattern
+    if weight_pattern == "zero_global_scale":
+        w1_gs = torch.zeros_like(w1_gs)
+        w2_gs = torch.zeros_like(w2_gs)
+    elif weight_pattern == "huge_global_scale":
+        w1_gs = torch.full_like(w1_gs, 1e30)
+        w2_gs = torch.full_like(w2_gs, 1e30)
+    elif weight_pattern == "tiny_global_scale":
+        w1_gs = torch.full_like(w1_gs, 1e-30)
+        w2_gs = torch.full_like(w2_gs, 1e-30)
+    elif weight_pattern == "max_fp4_weights":
+        # 0x77 = both nibbles 0111 = max positive FP4 E2M1 value
+        w1_q.fill_(0x77)
+        w2_q.fill_(0x77)
+    elif weight_pattern == "zero_fp4_weights":
+        w1_q.fill_(0x00)
+        w2_q.fill_(0x00)
+    elif weight_pattern == "max_fp8_block_scales":
+        # 0x7E = 448.0 in fp8 e4m3fn (max finite value)
+        w1_bs.view(torch.uint8).fill_(0x7E)
+        w2_bs.view(torch.uint8).fill_(0x7E)
+    elif weight_pattern == "zero_fp8_block_scales":
+        w1_bs.view(torch.uint8).fill_(0x00)
+        w2_bs.view(torch.uint8).fill_(0x00)
+    elif weight_pattern == "nan_fp8_block_scales":
+        # 0xFF = NaN in fp8 e4m3fn
+        w1_bs.view(torch.uint8).fill_(0xFF)
+        w2_bs.view(torch.uint8).fill_(0xFF)
+    elif weight_pattern == "mixed_extreme_scales":
+        # Alternate between max and zero block scales
+        w1_bs_bytes = w1_bs.view(torch.uint8)
+        w1_bs_bytes[::2] = 0x7E  # max
+        w1_bs_bytes[1::2] = 0x00  # zero
+
+    a1_gs = torch.ones((E,), device=device, dtype=torch.float32)
+    a2_gs = torch.ones((E,), device=device, dtype=torch.float32)
+
+    # Avoid division by zero in alpha computation
+    safe_w1_gs = w1_gs.clamp(min=1e-10)
+    safe_w2_gs = w2_gs.clamp(min=1e-10)
+
+    quant_config = nvfp4_moe_quant_config(
+        g1_alphas=(1 / safe_w1_gs), g2_alphas=(1 / safe_w2_gs),
+        a1_gscale=a1_gs, a2_gscale=a2_gs,
+        w1_scale=w1_bs, w2_scale=w2_bs,
+    )
+    moe_config = make_dummy_moe_config()
+    kernel = FusedMoEKernel(
+        maybe_make_prepare_finalize(
+            moe=moe_config, quant_config=quant_config,
+            allow_new_interface=True, use_monolithic=False,
+        ),
+        CutlassExpertsFp4(
+            moe_config=moe_config, quant_config=quant_config,
+        ),
+        inplace=False,
+    )
+
+    hidden = torch.randn(num_tokens, K, device=device,
+                           dtype=torch.bfloat16) * 0.1
+
+    topk_ids = torch.zeros(num_tokens, topk, dtype=torch.int32,
+                            device=device)
+    for ki in range(topk):
+        topk_ids[:, ki] = ki
+    topk_weights = torch.ones(num_tokens, topk, dtype=torch.float32,
+                               device=device) / topk
+
+    vllm_cfg = VllmConfig(
+        parallel_config=ParallelConfig(pipeline_parallel_size=1))
+
+    with set_current_vllm_config(vllm_cfg):
+        output = kernel.apply(
+            hidden_states=hidden, w1=w1_q, w2=w2_q,
+            topk_weights=topk_weights, topk_ids=topk_ids,
+            global_num_experts=E, activation=MoEActivation.SILU,
+            apply_router_weight_on_input=False, expert_map=None,
+        )
+    torch.cuda.synchronize()
+
+    # For some patterns (NaN scales, zero scales), NaN or Inf output
+    # may be expected. The key check is: no crash, no hang.
+    # For patterns that should produce finite output, check for NaN.
+    if weight_pattern in ("nan_fp8_block_scales",):
+        # NaN in scales → NaN output is expected
+        pass
+    elif weight_pattern in ("zero_global_scale", "zero_fp8_block_scales",
+                            "zero_fp4_weights"):
+        # Zero weights/scales → zero or near-zero output expected
+        assert not torch.isnan(output).any(), (
+            f"NVFP4 MoE: unexpected NaN with {weight_pattern}"
+        )
+    else:
+        assert not torch.isnan(output).any(), (
+            f"NVFP4 MoE: NaN with weight_pattern='{weight_pattern}'"
+        )
+
+
 # ============================================================================
 # SM pressure tests for MoE and dense MLP
 # ============================================================================
