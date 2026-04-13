@@ -1738,8 +1738,95 @@ def test_deepseek_mla_layer_cudagraph_sm_pressure(
 
 @pytest.mark.xfail(
     reason="Known bug: silu_mul_cvt_fp16_to_fp4 kernel padding rows "
-           "default to expert_idx=0 and overwrite expert 0's scale. "
-           "Fix: skip rows where rowIdx >= expert_offsets[n_experts].",
+           "default to expert_idx=0 and overwrite expert 0's scale.",
+    strict=True,
+)
+@pytest.mark.skipif(
+    not current_platform.has_device_capability(100),
+    reason="NVFP4 requires sm100+",
+)
+@pytest.mark.parametrize(
+    "num_experts,m_topk,num_real",
+    [
+        (8, 32, 16),
+        (16, 64, 32),
+        (32, 128, 64),
+        (64, 256, 128),
+        (32, 1024, 512),
+    ],
+    ids=["E8_m32", "E16_m64", "E32_m128", "E64_m256", "E32_m1024"],
+)
+def test_fp4_quant_kernel_cross_row_scale_corruption(
+    num_experts, m_topk, num_real,
+):
+    """silu_and_mul_scaled_fp4_experts_quant corrupts real token scales
+    when other rows in the batch contain NaN.
+
+    This is a DIFFERENT bug from the orphan-row padding corruption.
+    Here expert_offsets[-1] == m_topk (all rows accounted for), but
+    NaN in padding rows still corrupts real rows' scales — likely
+    through warp-level shuffle or shared memory reduction that spans
+    multiple rows within the same threadblock.
+
+    This bug can cause NaN corruption in production with CUDA graph
+    padding where padding tokens have NaN hidden_states.
+    """
+    import vllm._custom_ops as ops
+
+    device = "cuda"
+    k = 128
+
+    # Distribute tokens evenly so expert_offsets[-1] == m_topk
+    base = m_topk // num_experts
+    remainder = m_topk % num_experts
+    offsets = [0]
+    for i in range(num_experts):
+        n = base + (1 if i < remainder else 0)
+        offsets.append(offsets[-1] + n)
+    assert offsets[-1] == m_topk
+
+    expert_offsets = torch.tensor(offsets, dtype=torch.int32, device=device)
+    blockscale_offsets = expert_offsets.clone()
+    input_global_scale = torch.ones(
+        num_experts, dtype=torch.float32, device=device)
+
+    c1 = torch.randn(m_topk, k * 2, dtype=torch.bfloat16, device=device) * 0.1
+
+    # Clean run
+    _, scales_clean = ops.silu_and_mul_scaled_fp4_experts_quant(
+        c1.clone(), input_global_scale, expert_offsets,
+        blockscale_offsets, 1)
+
+    # Dirty: NaN in padding rows (num_real onwards)
+    c1_dirty = c1.clone()
+    c1_dirty[num_real:] = float("nan")
+    _, scales_dirty = ops.silu_and_mul_scaled_fp4_experts_quant(
+        c1_dirty, input_global_scale, expert_offsets,
+        blockscale_offsets, 1)
+
+    # Check ONLY real rows within experts that contain real data
+    corrupted = False
+    for e in range(num_experts):
+        s, end = offsets[e], offsets[e + 1]
+        real_end = min(end, num_real)
+        if real_end <= s:
+            continue
+        if not torch.equal(scales_clean[s:real_end],
+                           scales_dirty[s:real_end]):
+            corrupted = True
+            break
+
+    assert not corrupted, (
+        f"silu_and_mul_scaled_fp4_experts_quant: NaN in padding rows "
+        f"corrupted real token scales (E={num_experts}, m_topk={m_topk}, "
+        f"real={num_real}). This is a cross-row scale corruption bug "
+        f"in the CUDA kernel."
+    )
+
+
+@pytest.mark.xfail(
+    reason="Known bug: silu_mul_cvt_fp16_to_fp4 kernel padding rows "
+           "default to expert_idx=0 and overwrite expert 0's scale.",
     strict=True,
 )
 @pytest.mark.skipif(
