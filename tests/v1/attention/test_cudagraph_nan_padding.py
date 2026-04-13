@@ -2241,7 +2241,7 @@ def _deepep_ll_nan_padding_worker(
             saved_tw = topk_weights[:num_real].clone()
             saved_ti = topk_ids[:num_real].clone()
 
-            for i in range(100):
+            for i in range(1000):
                 # Pollute → replay
                 hidden_states.fill_(float('nan'))
                 topk_weights.fill_(float('nan'))
@@ -2257,7 +2257,7 @@ def _deepep_ll_nan_padding_worker(
                 output.fill_(float('nan'))
                 graph.replay()
 
-                if i % 10 == 9:
+                if i % 100 == 99:
                     torch.cuda.synchronize()
                     mode = "NVFP4" if use_nvfp4 else "FP8"
                     real_output = output[:num_real]
