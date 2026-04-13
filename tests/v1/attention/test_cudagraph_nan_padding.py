@@ -1364,7 +1364,7 @@ def _run_moe_nan_padding_test(
 
     # Router
     if active_experts is not None:
-        # Force routing to specific experts only
+        # Directly set topk_ids to route all tokens to specific experts
         topk_ids = torch.zeros(num_padded, topk, dtype=torch.int32,
                                 device=device)
         for ki in range(topk):
