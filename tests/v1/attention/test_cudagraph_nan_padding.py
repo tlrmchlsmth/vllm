@@ -3072,6 +3072,15 @@ def test_shared_experts_overlap_sm_pressure(
         torch.set_default_dtype(old_dtype)
 
 
+@pytest.mark.xfail(
+    reason="Confirmed race: hidden.fill_(nan) on default stream "
+           "races with shared expert reading hidden on aux stream. "
+           "aux.wait_stream captures default stream state BEFORE the "
+           "fill_ is enqueued, so aux doesn't wait for it. "
+           "Not triggered in DeepSeek-R1 (apply_router_weight_on_input=False) "
+           "but affects models that use apply_router_weight_on_input=True.",
+    strict=True,
+)
 @pytest.mark.parametrize(
     "num_real,num_padded",
     [(5, 8), (13, 16)],
@@ -3145,10 +3154,9 @@ def test_shared_experts_inplace_mutation_race(
 
                 # Simulate apply_router_weight_on_input: mutate
                 # hidden in-place on default stream while shared
-                # experts may still be reading it on aux_stream
-                weights = torch.randn(
-                    num_padded, 1, dtype=dtype, device=device)
-                hidden.mul_(weights)  # IN-PLACE MUTATION
+                # experts may still be reading it on aux_stream.
+                # Use fill_(nan) so corruption is detectable.
+                hidden.fill_(float('nan'))  # IN-PLACE MUTATION
 
                 # Wait for shared experts then add
                 default_stream.wait_stream(aux)
