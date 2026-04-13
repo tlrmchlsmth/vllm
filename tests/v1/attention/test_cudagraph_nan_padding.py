@@ -2143,6 +2143,109 @@ def test_flashinfer_cutedsl_moe_masked_nan_padding(
     )
 
 
+@pytest.mark.skipif(
+    not current_platform.has_device_capability(100),
+    reason="NVFP4 requires sm100+",
+)
+def test_flashinfer_cutedsl_varying_masked_m(workspace_init):
+    """Reproduce production NaN cycle: varying masked_m across CUDA
+    graph replays causes stale workspace rows to corrupt real tokens.
+
+    Iteration 1: expert gets many tokens → fills all M workspace rows
+    Iteration 2: expert gets fewer tokens → masked_m shrinks, but
+    stale rows from iteration 1 remain in the CUDA graph workspace.
+    If iteration 1's output had NaN (or any garbage), the cross-row
+    scale reduction in the SiLU+quant kernel reads those stale rows
+    and corrupts iteration 2's real token scales.
+    """
+    from tests.kernels.moe.utils import make_test_weights
+    from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutedsl_batched_moe import (  # noqa: E501
+        flashinfer_cutedsl_moe_masked,
+    )
+
+    device = "cuda"
+    E, K, N = 4, 1024, 512
+    m = 16  # max tokens per expert (CUDA graph padded size)
+
+    (_, w1_q, w1_bs, w1_gs), (_, w2_q, w2_bs, w2_gs) = (
+        make_test_weights(E, N, K, in_dtype=torch.bfloat16,
+                          quant_dtype="nvfp4")
+    )
+    a1_gs = torch.ones(E, dtype=torch.float32, device=device)
+    a2_gs = torch.ones(E, dtype=torch.float32, device=device)
+
+    hidden = torch.randn(
+        E, m, K, dtype=torch.bfloat16, device=device) * 0.1
+    workspace = torch.zeros(
+        E, m, 2 * N, dtype=torch.bfloat16, device=device)
+    out = torch.zeros(E, m, K, dtype=torch.bfloat16, device=device)
+
+    # Iteration 1: all experts get max tokens (fills all rows)
+    masked_m = torch.full(
+        (E,), m, dtype=torch.int32, device=device)
+
+    # Warmup
+    flashinfer_cutedsl_moe_masked(
+        hidden_states=hidden.clone(),
+        input_global_scale=a1_gs,
+        w1=w1_q, w1_blockscale=w1_bs, w1_alpha=(1 / w1_gs),
+        w2=w2_q, a2_global_scale=a2_gs,
+        w2_blockscale=w2_bs, w2_alpha=(1 / w2_gs),
+        masked_m=masked_m,
+        workspace=workspace.clone(),
+        out=out.clone(),
+    )
+    torch.cuda.synchronize()
+
+    # Capture CUDA graph
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        flashinfer_cutedsl_moe_masked(
+            hidden_states=hidden,
+            input_global_scale=a1_gs,
+            w1=w1_q, w1_blockscale=w1_bs, w1_alpha=(1 / w1_gs),
+            w2=w2_q, a2_global_scale=a2_gs,
+            w2_blockscale=w2_bs, w2_alpha=(1 / w2_gs),
+            masked_m=masked_m,
+            workspace=workspace,
+            out=out,
+        )
+
+    # Replay 1: all experts full (m tokens each)
+    # Poison workspace with NaN to simulate previous iteration's output
+    workspace.fill_(float('nan'))
+    masked_m.fill_(m)
+    hidden.normal_()
+    hidden.mul_(0.1)
+    graph.replay()
+    torch.cuda.synchronize()
+
+    # workspace now contains iteration 1's output (some rows may be NaN
+    # from the kernel itself processing NaN workspace input)
+
+    # Replay 2: experts get FEWER tokens — shrink masked_m
+    # Stale rows from replay 1 remain in workspace
+    few_tokens = 2
+    masked_m.fill_(few_tokens)
+    hidden[:, few_tokens:] = 0  # padding rows zeroed in hidden
+    graph.replay()
+    torch.cuda.synchronize()
+
+    # Check: are real tokens (rows 0..few_tokens-1) corrupted?
+    corrupted = False
+    for e in range(E):
+        real_out = out[e, :few_tokens]
+        if torch.isnan(real_out).any():
+            corrupted = True
+            break
+
+    assert not corrupted, (
+        f"Varying masked_m CUDA graph replay: stale workspace rows "
+        f"from iteration 1 corrupted real tokens in iteration 2 "
+        f"(E={E}, m={m}, few_tokens={few_tokens})"
+    )
+
+
 @pytest.mark.xfail(
     reason="Known bug: silu_mul_cvt_fp16_to_fp4 kernel padding rows "
            "default to expert_idx=0 and overwrite expert 0's scale.",
