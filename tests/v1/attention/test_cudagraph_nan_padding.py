@@ -1623,6 +1623,10 @@ def _run_moe_nan_padding_test(
 ):
     """NVFP4 MoE NaN padding test with CUDA graph capture/replay.
 
+    Uses CutlassExpertsFp4 (standard format). The production
+    FlashInferCuteDSLBatchedExperts kernel is tested through the
+    multi-GPU DeepEP tests, as it requires DeepEP LL prepare/finalize.
+
     Args:
         active_experts: If set, route all real tokens to only these experts
             (others get 0 tokens). If None, use normal router.
@@ -1659,6 +1663,7 @@ def _run_moe_nan_padding_test(
         w1_scale=w1_bs, w2_scale=w2_bs,
     )
     moe_config = make_dummy_moe_config()
+
     kernel = FusedMoEKernel(
         maybe_make_prepare_finalize(
             moe=moe_config, quant_config=quant_config,
@@ -1797,7 +1802,9 @@ MOE_HIDDEN_CONFIGS = [
 )
 def test_moe_cudagraph_nan_padding(workspace_init, num_real, num_padded,
                                     topk, E):
-    """NVFP4 MoE with router + CUDA graph capture/replay + NaN padding."""
+    """NVFP4 MoE (CutlassExpertsFp4) with router + CUDA graph + NaN padding.
+    The production FlashInferCuteDSLBatchedExperts kernel is tested through
+    the multi-GPU DeepEP tests."""
     if topk > E:
         pytest.skip(f"topk={topk} > E={E}")
     _run_moe_nan_padding_test(
@@ -1881,18 +1888,19 @@ def test_moe_zero_token_experts_cudagraph_nan_padding(
 def test_nvfp4_moe_cudagraph_sm_pressure(
     workspace_init, sm_pressure, num_real, num_padded,
 ):
-    """NVFP4 MoE (router + CutlassExpertsFp4) under CUDA graph with
-    SM pressure. 1000 replays with background kernel contention."""
+    """NVFP4 MoE (FlashInferCuteDSLBatchedExperts — production kernel)
+    under CUDA graph with SM pressure. 1000 replays with background
+    kernel contention."""
     from tests.kernels.moe.utils import make_dummy_moe_config, make_test_weights
-    from vllm.config import ParallelConfig, VllmConfig
-    from vllm.model_executor.layers.fused_moe.all2all_utils import (
-        maybe_make_prepare_finalize,
-    )
+    from vllm.config import VllmConfig
     from vllm.model_executor.layers.fused_moe.config import (
         nvfp4_moe_quant_config,
     )
-    from vllm.model_executor.layers.fused_moe.cutlass_moe import (
-        CutlassExpertsFp4,
+    from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutedsl_batched_moe import (  # noqa: E501
+        FlashInferCuteDSLBatchedExperts,
+    )
+    from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
+        BatchedPrepareAndFinalize,
     )
     from vllm.model_executor.layers.fused_moe.modular_kernel import (
         FusedMoEKernel,
@@ -1915,12 +1923,17 @@ def test_nvfp4_moe_cudagraph_sm_pressure(
     )
     moe_config = make_dummy_moe_config()
     kernel = FusedMoEKernel(
-        maybe_make_prepare_finalize(
-            moe=moe_config, quant_config=quant_config,
-            allow_new_interface=True, use_monolithic=False,
+        BatchedPrepareAndFinalize(
+            max_num_tokens=num_padded,
+            num_local_experts=E,
+            num_dispatchers=1,
+            rank=0,
         ),
-        CutlassExpertsFp4(
-            moe_config=moe_config, quant_config=quant_config,
+        FlashInferCuteDSLBatchedExperts(
+            max_num_tokens=num_padded,
+            num_dispatchers=1,
+            moe_config=moe_config,
+            quant_config=quant_config,
         ),
         inplace=False,
     )
@@ -1945,12 +1958,9 @@ def test_nvfp4_moe_cudagraph_sm_pressure(
         apply_router_weight_on_input=False, expert_map=None,
     )
 
-    vllm_cfg = VllmConfig(
-        parallel_config=ParallelConfig(pipeline_parallel_size=1))
-
     _poison_cuda_allocator(device)
 
-    with set_current_vllm_config(vllm_cfg):
+    with set_current_vllm_config(VllmConfig()):
         output = kernel.apply(**apply_kwargs)
         torch.cuda.synchronize()
 
