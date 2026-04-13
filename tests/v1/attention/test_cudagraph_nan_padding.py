@@ -58,6 +58,14 @@ def _poison_cuda_allocator(device: torch.device | str = "cuda"):
     # Poison at multiple sizes to cover different allocator buckets.
     # The caching allocator rounds up to block sizes, so we poison
     # a range of sizes to maximize coverage.
+    # Clear the allocator cache first so our poisoned blocks are the
+    # only ones in the free list. This maximizes the chance that
+    # subsequent torch.empty() calls recycle poisoned memory.
+    # NOTE: This approach is inherently probabilistic — the allocator
+    # may split/coalesce blocks differently across CUDA versions.
+    # TestPoisonVerification validates that poisoning is effective.
+    torch.cuda.empty_cache()
+
     # Poison one size at a time: allocate, fill, free. The freed buffer
     # stays in the allocator cache with NaN. We don't accumulate all
     # sizes simultaneously to avoid OOM.
@@ -788,12 +796,8 @@ class TestPoisonVerification:
         device = torch.device(f"{DEVICE_TYPE}:0")
         _poison_cuda_allocator(device)
 
-        ref = torch.zeros(1024, 1024, dtype=torch.bfloat16, device=device)
-        del ref
-
-        _poison_cuda_allocator(device)
-        ref2 = torch.zeros(1024, 1024, dtype=torch.bfloat16, device=device)
-        t = torch.empty_like(ref2)
+        ref = torch.empty(1024, 1024, dtype=torch.bfloat16, device=device)
+        t = torch.empty_like(ref)
         assert torch.isnan(t).any(), (
             "Allocator poisoning failed: torch.empty_like did not "
             "return NaN."
@@ -2321,13 +2325,16 @@ def _deepep_ll_nan_padding_worker(
                         f"(real={num_real}, padded={num_padded})"
                     )
 
+    finally:
         stop_event.set()
         hog_thread.join(timeout=5)
-    finally:
         if use_nvfp4:
             envs_mod.VLLM_DEEPEPLL_NVFP4_DISPATCH = _orig_nvfp4_dispatch
 
 
+# Smaller configs than single-GPU tests to avoid OOM during CUDA graph
+# capture in multi-GPU workers (each worker runs on a single GPU with
+# workspace + graph memory overhead).
 DEEPEP_PADDING_CONFIGS = [
     (1, 8),
     (5, 8),
