@@ -2985,6 +2985,99 @@ def test_shared_experts_overlap_sm_pressure(
         torch.set_default_dtype(old_dtype)
 
 
+@pytest.mark.parametrize(
+    "num_real,num_padded",
+    [(5, 8), (13, 16)],
+    ids=["5to8", "13to16"],
+)
+def test_shared_experts_inplace_mutation_race(
+    default_vllm_config, dist_init, sm_pressure, num_real, num_padded,
+):
+    """Test for cross-stream race when hidden_states is mutated in-place.
+
+    In FusedMoEKernelModularImpl._prepare(), when
+    apply_router_weight_on_input=True, hidden_states gets mutated
+    via a1.mul_(topk_weights). If shared experts are reading the same
+    tensor on aux_stream concurrently, this is a data race.
+
+    DeepSeek-R1 uses apply_router_weight_on_input=False, but other
+    models might use True. This test checks the race directly.
+    """
+    from vllm.config import VllmConfig
+    from vllm.model_executor.models.deepseek_v2 import DeepseekV2MLP
+
+    device = torch.device(f"{DEVICE_TYPE}:0")
+    dtype = torch.bfloat16
+
+    vllm_config = create_vllm_config(
+        model_name="nvidia/DeepSeek-R1-0528-NVFP4-v2",
+        max_model_len=128, num_gpu_blocks=8192, dtype="bfloat16",
+    )
+    config = vllm_config.model_config.hf_config
+    shared_intermediate = (
+        config.moe_intermediate_size * config.n_shared_experts
+    )
+
+    old_dtype = torch.get_default_dtype()
+    torch.set_default_dtype(dtype)
+    try:
+        with set_current_vllm_config(vllm_config):
+            shared_experts = DeepseekV2MLP(
+                hidden_size=config.hidden_size,
+                intermediate_size=shared_intermediate,
+                hidden_act=config.hidden_act,
+                quant_config=None,
+                reduce_results=False,
+                prefix="model.layers.3.mlp.shared_experts",
+            )
+            for name, param in shared_experts.named_parameters():
+                if param.is_floating_point():
+                    param.data.copy_(torch.randn_like(
+                        param, dtype=torch.float32).mul_(0.02).to(
+                            param.dtype))
+            shared_experts = shared_experts.to(device=device, dtype=dtype)
+
+            aux = torch.cuda.Stream(device=device)
+            default_stream = torch.cuda.current_stream(device)
+
+            saved_hidden = torch.randn(
+                num_real, config.hidden_size, dtype=dtype,
+                device=device) * 0.02
+
+            for i in range(1000):
+                # Fresh hidden_states each iteration
+                hidden = torch.randn(
+                    num_padded, config.hidden_size, dtype=dtype,
+                    device=device) * 0.02
+                hidden[num_real:] = float('nan')
+
+                # Launch shared experts on aux_stream — reads hidden
+                aux.wait_stream(default_stream)
+                with torch.cuda.stream(aux):
+                    shared_output = shared_experts(hidden)
+
+                # Simulate apply_router_weight_on_input: mutate
+                # hidden in-place on default stream while shared
+                # experts may still be reading it on aux_stream
+                weights = torch.randn(
+                    num_padded, 1, dtype=dtype, device=device)
+                hidden.mul_(weights)  # IN-PLACE MUTATION
+
+                # Wait for shared experts then add
+                default_stream.wait_stream(aux)
+
+                if i % 100 == 99:
+                    torch.cuda.synchronize()
+                    real = shared_output[:num_real]
+                    # Check for corruption — if the race fires,
+                    # shared experts read partially mutated data
+                    assert not torch.isnan(real).any(), (
+                        f"In-place mutation race: NaN at "
+                        f"iteration {i}")
+    finally:
+        torch.set_default_dtype(old_dtype)
+
+
 # ============================================================================
 # SM pressure tests for MoE and dense MLP
 # ============================================================================
