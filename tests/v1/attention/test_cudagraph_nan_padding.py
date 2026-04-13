@@ -1991,6 +1991,167 @@ def test_mla_layer_numerical_edge_cases(
     reason="NVFP4 requires sm100+",
 )
 @pytest.mark.parametrize(
+    "weight_pattern",
+    [
+        "zero_global_scale",
+        "huge_global_scale",
+        "tiny_global_scale",
+        "max_fp4_weights",
+        "zero_fp4_weights",
+        "max_fp8_block_scales",
+        "zero_fp8_block_scales",
+        "nan_fp8_block_scales",
+    ],
+)
+def test_mla_layer_nvfp4_weight_edge_cases(
+    default_vllm_config, dist_init, weight_pattern,
+):
+    """Test full MLA layer with adversarial NVFP4 weight configurations.
+
+    The Q/K/V projection weights (fused_qkv_a_proj, q_b_proj, kv_b_proj,
+    o_proj) use NVFP4 quantization. Tests degenerate scale/weight values
+    that could cause NaN through the projection → attention → output
+    pipeline.
+    """
+    from vllm.forward_context import set_forward_context
+    from vllm.model_executor.layers.quantization.modelopt import (
+        ModelOptNvFp4Config,
+    )
+    from vllm.v1.kv_cache_interface import MLAAttentionSpec
+
+    device = torch.device(f"{DEVICE_TYPE}:0")
+    dtype = torch.bfloat16
+    model = "nvidia/DeepSeek-R1-0528-NVFP4-v2"
+    num_tokens = 8
+
+    quant_config = ModelOptNvFp4Config(
+        is_checkpoint_nvfp4_serialized=True,
+        kv_cache_quant_algo=None, exclude_modules=[],
+    )
+
+    batch_spec = BatchSpec(
+        seq_lens=[128] * num_tokens,
+        query_lens=[1] * num_tokens,
+    )
+
+    vllm_config = create_vllm_config(
+        model_name=model, max_model_len=128,
+        num_gpu_blocks=8192, dtype="bfloat16",
+    )
+    config = vllm_config.model_config.hf_config
+
+    old_dtype = torch.get_default_dtype()
+    torch.set_default_dtype(dtype)
+    try:
+        with set_current_vllm_config(vllm_config):
+            layer = _build_deepseek_mla_layer(
+                vllm_config, device, dtype, quant_config=quant_config,
+            )
+
+            # Apply adversarial weight patterns to all quantized modules
+            for module in layer.modules():
+                for name, param in module.named_parameters(recurse=False):
+                    if weight_pattern == "zero_global_scale":
+                        if name == "input_global_scale":
+                            param.data.fill_(0.0)
+                        elif name == "weight_global_scale":
+                            param.data.fill_(0.0)
+                    elif weight_pattern == "huge_global_scale":
+                        if "global_scale" in name:
+                            param.data.fill_(1e30)
+                    elif weight_pattern == "tiny_global_scale":
+                        if "global_scale" in name:
+                            param.data.fill_(1e-30)
+                    elif weight_pattern == "max_fp4_weights":
+                        if name == "weight" and param.dtype == torch.uint8:
+                            param.data.fill_(0x77)
+                    elif weight_pattern == "zero_fp4_weights":
+                        if name == "weight" and param.dtype == torch.uint8:
+                            param.data.fill_(0x00)
+                    elif weight_pattern == "max_fp8_block_scales":
+                        if name == "weight_scale":
+                            param.data.view(torch.uint8).fill_(0x7E)
+                    elif weight_pattern == "zero_fp8_block_scales":
+                        if name == "weight_scale":
+                            param.data.view(torch.uint8).fill_(0x00)
+                    elif weight_pattern == "nan_fp8_block_scales":
+                        if name == "weight_scale":
+                            param.data.view(torch.uint8).fill_(0xFF)
+
+            block_size = vllm_config.cache_config.block_size
+            common_attn_metadata = create_common_attn_metadata(
+                batch_spec, block_size, device,
+                arange_block_indices=True,
+            )
+            required_divisor = max(1, int(128 / block_size))
+            cols = common_attn_metadata.block_table_tensor.shape[1]
+            if cols % required_divisor != 0:
+                padded_cols = ((cols + required_divisor - 1)
+                               // required_divisor) * required_divisor
+                padding = torch.zeros(
+                    (common_attn_metadata.block_table_tensor.shape[0],
+                     padded_cols - cols),
+                    dtype=torch.int32, device=device,
+                )
+                common_attn_metadata.block_table_tensor = torch.cat(
+                    [common_attn_metadata.block_table_tensor, padding],
+                    dim=1,
+                )
+
+            head_size = config.kv_lora_rank + config.qk_rope_head_dim
+            kv_cache = torch.zeros(
+                8192, block_size, head_size, dtype=dtype, device=device,
+            )
+            mla_attn = layer.mla_attn.mla_attn
+            mla_attn.kv_cache = kv_cache
+            layer_name = mla_attn.layer_name
+            vllm_config.compilation_config.static_forward_context[
+                layer_name
+            ] = mla_attn
+
+            kv_cache_spec = MLAAttentionSpec(
+                block_size=block_size,
+                num_kv_heads=config.num_key_value_heads,
+                head_size=head_size,
+                dtype=vllm_config.model_config.dtype,
+                sliding_window=None, cache_dtype_str="auto",
+            )
+            builder_cls = mla_attn.attn_backend.get_builder_cls()
+            builder = builder_cls(
+                kv_cache_spec, [layer_name], vllm_config, device,
+            )
+            attn_metadata = builder.build(
+                common_prefix_len=0,
+                common_attn_metadata=common_attn_metadata,
+            )
+
+            hidden = torch.randn(
+                num_tokens, config.hidden_size,
+                dtype=dtype, device=device) * 0.02
+            positions = torch.arange(
+                num_tokens, dtype=torch.long, device=device)
+
+            with set_forward_context(attn_metadata, vllm_config):
+                output = layer(positions, hidden, None)
+            torch.cuda.synchronize()
+
+            if weight_pattern in ("nan_fp8_block_scales",):
+                # NaN in scales → NaN output expected
+                pass
+            else:
+                assert not torch.isnan(output).any(), (
+                    f"MLA layer produced NaN with NVFP4 "
+                    f"weight_pattern='{weight_pattern}'"
+                )
+    finally:
+        torch.set_default_dtype(old_dtype)
+
+
+@pytest.mark.skipif(
+    not current_platform.has_device_capability(100),
+    reason="NVFP4 requires sm100+",
+)
+@pytest.mark.parametrize(
     "input_pattern",
     [
         "zeros",           # all zeros — risk of 0/0 in scale computation
