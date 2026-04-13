@@ -2030,6 +2030,119 @@ def test_flashinfer_grouped_quant_cross_row_corruption(
     )
 
 
+@pytest.mark.skipif(
+    not current_platform.has_device_capability(100),
+    reason="NVFP4 requires sm100+",
+)
+@pytest.mark.parametrize(
+    "num_experts,m,num_real",
+    [
+        (4, 8, 4),
+        (8, 16, 8),
+        (8, 64, 8),      # sparse — matches production low-token scenario
+        (4, 16, 1),       # extreme: 1 real token
+        (8, 32, 16),
+    ],
+    ids=["E4_m8", "E8_m16", "E8_m64_sparse", "E4_m16_1tok", "E8_m32"],
+)
+def test_flashinfer_cutedsl_moe_masked_nan_padding(
+    num_experts, m, num_real,
+):
+    """Test the full flashinfer_cutedsl_moe_masked wrapper (GEMM1 → SiLU+quant
+    → GEMM2) with NaN in padding rows.
+
+    This is the exact production function called by
+    FlashInferCuteDSLBatchedExperts.apply(). Tests that the wrapper's
+    padding sanitization prevents NaN corruption in real token output.
+    """
+    from tests.kernels.moe.utils import make_test_weights
+    from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutedsl_batched_moe import (  # noqa: E501
+        flashinfer_cutedsl_moe_masked,
+    )
+
+    device = "cuda"
+    K = 1024
+    N = 512
+
+    (_, w1_q, w1_bs, w1_gs), (_, w2_q, w2_bs, w2_gs) = (
+        make_test_weights(num_experts, N, K, in_dtype=torch.bfloat16,
+                          quant_dtype="nvfp4")
+    )
+
+    a1_gs = torch.ones(num_experts, dtype=torch.float32, device=device)
+    a2_gs = torch.ones(num_experts, dtype=torch.float32, device=device)
+
+    # masked_m: distribute real tokens across experts
+    base = num_real // num_experts
+    remainder = num_real % num_experts
+    masked_m_list = []
+    for i in range(num_experts):
+        masked_m_list.append(base + (1 if i < remainder else 0))
+    masked_m = torch.tensor(masked_m_list, dtype=torch.int32, device=device)
+
+    # Input hidden states: [num_experts, m, K] with NaN padding
+    hidden = torch.randn(
+        num_experts, m, K, dtype=torch.bfloat16, device=device) * 0.1
+    for e in range(num_experts):
+        real = masked_m[e].item()
+        if real < m:
+            hidden[e, real:] = float('nan')
+
+    workspace = torch.zeros(
+        num_experts, m, 2 * N, dtype=torch.bfloat16, device=device)
+    out = torch.zeros(
+        num_experts, m, K, dtype=torch.bfloat16, device=device)
+
+    # Clean reference: run with zeros instead of NaN in padding
+    hidden_clean = hidden.clone()
+    for e in range(num_experts):
+        real = masked_m[e].item()
+        if real < m:
+            hidden_clean[e, real:] = 0.0
+    workspace_clean = workspace.clone()
+    out_clean = out.clone()
+
+    flashinfer_cutedsl_moe_masked(
+        hidden_states=hidden_clean,
+        input_global_scale=a1_gs,
+        w1=w1_q, w1_blockscale=w1_bs, w1_alpha=(1 / w1_gs),
+        w2=w2_q, a2_global_scale=a2_gs,
+        w2_blockscale=w2_bs, w2_alpha=(1 / w2_gs),
+        masked_m=masked_m,
+        workspace=workspace_clean,
+        out=out_clean,
+    )
+
+    # Dirty run: NaN in padding
+    flashinfer_cutedsl_moe_masked(
+        hidden_states=hidden,
+        input_global_scale=a1_gs,
+        w1=w1_q, w1_blockscale=w1_bs, w1_alpha=(1 / w1_gs),
+        w2=w2_q, a2_global_scale=a2_gs,
+        w2_blockscale=w2_bs, w2_alpha=(1 / w2_gs),
+        masked_m=masked_m,
+        workspace=workspace,
+        out=out,
+    )
+    torch.cuda.synchronize()
+
+    # Check real rows per expert
+    corrupted = False
+    for e in range(num_experts):
+        real = masked_m[e].item()
+        if real == 0:
+            continue
+        if not torch.equal(out_clean[e, :real], out[e, :real]):
+            corrupted = True
+            break
+
+    assert not corrupted, (
+        f"flashinfer_cutedsl_moe_masked: NaN in padding rows "
+        f"corrupted real token output "
+        f"(E={num_experts}, m={m}, real={num_real})"
+    )
+
+
 @pytest.mark.xfail(
     reason="Known bug: silu_mul_cvt_fp16_to_fp4 kernel padding rows "
            "default to expert_idx=0 and overwrite expert 0's scale.",
