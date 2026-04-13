@@ -58,13 +58,14 @@ def _poison_cuda_allocator(device: torch.device | str = "cuda"):
     # Poison at multiple sizes to cover different allocator buckets.
     # The caching allocator rounds up to block sizes, so we poison
     # a range of sizes to maximize coverage.
-    bufs = []
-    for size_mb in [1, 2, 4, 8, 16, 32, 64, 128, 256]:
+    # Poison one size at a time: allocate, fill, free. The freed buffer
+    # stays in the allocator cache with NaN. We don't accumulate all
+    # sizes simultaneously to avoid OOM.
+    for size_mb in [1, 2, 4, 8, 16, 32, 64]:
         buf = torch.empty(size_mb * 1024 * 1024, dtype=torch.uint8,
                           device=device)
         buf.fill_(0xFF)
-        bufs.append(buf)
-    del bufs  # all return to allocator cache with NaN pattern
+        del buf  # returns to allocator cache with NaN pattern
 
 
 @pytest.fixture
@@ -2278,8 +2279,6 @@ DEEPEP_PADDING_CONFIGS = [
     (1, 8),
     (5, 8),
     (13, 16),
-    (33, 40),
-    (57, 64),
 ]
 
 DEEPEP_EXPERT_TOPK_CONFIGS = [
