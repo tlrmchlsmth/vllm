@@ -1824,6 +1824,170 @@ def test_fp4_quant_kernel_cross_row_scale_corruption(
     )
 
 
+@pytest.mark.skipif(
+    not current_platform.has_device_capability(100),
+    reason="NVFP4 requires sm100+",
+)
+@pytest.mark.parametrize(
+    "num_experts,m,num_real",
+    [
+        (4, 8, 4),
+        (8, 16, 8),
+        (8, 32, 16),
+        (16, 64, 32),
+        (32, 128, 64),
+        (8, 64, 8),      # few real, lots of padding
+        (4, 16, 1),       # extreme: 1 real token
+    ],
+    ids=["E4_m8", "E8_m16", "E8_m32", "E16_m64", "E32_m128",
+         "E8_m64_sparse", "E4_m16_1tok"],
+)
+def test_flashinfer_silu_quant_cross_row_corruption(
+    num_experts, m, num_real,
+):
+    """Test FlashInfer's silu_and_mul_scaled_nvfp4_experts_quantize for
+    cross-row scale corruption with NaN in padding rows.
+
+    This is the production kernel used between gate_up_proj and down_proj
+    in the FlashInferCuteDSLBatchedExperts path. Takes batched expert
+    format [num_experts, m, 2*n] and quantizes to NVFP4.
+    """
+    from flashinfer import silu_and_mul_scaled_nvfp4_experts_quantize
+
+    device = "cuda"
+    n = 512
+
+    # masked_m: distribute real tokens across experts
+    base = num_real // num_experts
+    remainder = num_real % num_experts
+    masked_m_list = []
+    for i in range(num_experts):
+        masked_m_list.append(base + (1 if i < remainder else 0))
+    masked_m = torch.tensor(masked_m_list, dtype=torch.int32, device=device)
+
+    a2_global_scale = torch.ones(
+        num_experts, dtype=torch.float32, device=device)
+
+    workspace = torch.randn(
+        num_experts, m, 2 * n, dtype=torch.bfloat16, device=device) * 0.1
+
+    # Clean run
+    diq_clean, sf_clean = silu_and_mul_scaled_nvfp4_experts_quantize(
+        workspace.clone(), masked_m, a2_global_scale)
+
+    # Dirty: NaN in padding rows beyond masked_m per expert
+    workspace_dirty = workspace.clone()
+    for e in range(num_experts):
+        real = masked_m[e].item()
+        if real < m:
+            workspace_dirty[e, real:] = float('nan')
+
+    diq_dirty, sf_dirty = silu_and_mul_scaled_nvfp4_experts_quantize(
+        workspace_dirty, masked_m, a2_global_scale)
+
+    torch.cuda.synchronize()
+
+    # Check real rows per expert
+    corrupted = False
+    for e in range(num_experts):
+        real = masked_m[e].item()
+        if real == 0:
+            continue
+        if not torch.equal(diq_clean[e, :real], diq_dirty[e, :real]):
+            corrupted = True
+            break
+        if not torch.equal(sf_clean[e, :real], sf_dirty[e, :real]):
+            corrupted = True
+            break
+
+    assert not corrupted, (
+        f"FlashInfer silu_and_mul_scaled_nvfp4_experts_quantize: "
+        f"NaN in padding rows corrupted real token output "
+        f"(E={num_experts}, m={m}, real={num_real})"
+    )
+
+
+@pytest.mark.skipif(
+    not current_platform.has_device_capability(100),
+    reason="NVFP4 requires sm100+",
+)
+@pytest.mark.parametrize(
+    "num_experts,m,num_real",
+    [
+        (4, 8, 4),
+        (8, 16, 8),
+        (8, 32, 16),
+        (16, 64, 32),
+        (32, 128, 64),
+        (8, 64, 8),
+        (4, 16, 1),
+    ],
+    ids=["E4_m8", "E8_m16", "E8_m32", "E16_m64", "E32_m128",
+         "E8_m64_sparse", "E4_m16_1tok"],
+)
+def test_flashinfer_grouped_quant_cross_row_corruption(
+    num_experts, m, num_real,
+):
+    """Test FlashInfer's scaled_fp4_grouped_quantize for cross-row
+    scale corruption with NaN in padding rows.
+
+    This is the production kernel for the FIRST quantization step
+    (hidden_states → NVFP4) in the FlashInferCuteDSLBatchedExperts
+    path when NVFP4 dispatch is NOT used.
+    """
+    from flashinfer import scaled_fp4_grouped_quantize
+
+    device = "cuda"
+    k = 1024
+
+    masked_m_list = []
+    base = num_real // num_experts
+    remainder = num_real % num_experts
+    for i in range(num_experts):
+        masked_m_list.append(base + (1 if i < remainder else 0))
+    masked_m = torch.tensor(masked_m_list, dtype=torch.int32, device=device)
+
+    input_global_scale = torch.ones(
+        num_experts, dtype=torch.float32, device=device)
+
+    hidden = torch.randn(
+        num_experts, m, k, dtype=torch.bfloat16, device=device) * 0.1
+
+    # Clean run
+    aq_clean, sf_clean = scaled_fp4_grouped_quantize(
+        hidden.clone(), masked_m, input_global_scale)
+
+    # Dirty: NaN in padding rows
+    hidden_dirty = hidden.clone()
+    for e in range(num_experts):
+        real = masked_m[e].item()
+        if real < m:
+            hidden_dirty[e, real:] = float('nan')
+
+    aq_dirty, sf_dirty = scaled_fp4_grouped_quantize(
+        hidden_dirty, masked_m, input_global_scale)
+
+    torch.cuda.synchronize()
+
+    corrupted = False
+    for e in range(num_experts):
+        real = masked_m[e].item()
+        if real == 0:
+            continue
+        if not torch.equal(aq_clean[e, :real], aq_dirty[e, :real]):
+            corrupted = True
+            break
+        if not torch.equal(sf_clean[e, :real], sf_dirty[e, :real]):
+            corrupted = True
+            break
+
+    assert not corrupted, (
+        f"FlashInfer scaled_fp4_grouped_quantize: NaN in padding rows "
+        f"corrupted real token output "
+        f"(E={num_experts}, m={m}, real={num_real})"
+    )
+
+
 @pytest.mark.xfail(
     reason="Known bug: silu_mul_cvt_fp16_to_fp4 kernel padding rows "
            "default to expert_idx=0 and overwrite expert 0's scale.",
