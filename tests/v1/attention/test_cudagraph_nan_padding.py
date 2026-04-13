@@ -1509,8 +1509,31 @@ def test_mla_layer_production_padding(
             _poison_cuda_allocator(device)
 
             with set_forward_context(attn_metadata, vllm_config):
+                # Warmup
                 output = layer(positions, hidden_states, None)
-            torch.cuda.synchronize()
+                torch.cuda.synchronize()
+
+                # Capture
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    output = layer(positions, hidden_states, None)
+
+                # First replay: ALL NaN to pollute internal buffers
+                saved_hidden = hidden_states[:num_real].clone()
+                saved_slot_mapping = slot_mapping.clone()
+                hidden_states.fill_(float('nan'))
+                slot_mapping.fill_(-1)
+                output.fill_(float('nan'))
+                graph.replay()
+                torch.cuda.synchronize()
+
+                # Second replay: restore real data + NaN padding
+                hidden_states[:num_real] = saved_hidden
+                hidden_states[num_real:] = float('nan')
+                slot_mapping.copy_(saved_slot_mapping)
+                output.fill_(float('nan'))
+                graph.replay()
+                torch.cuda.synchronize()
 
         real_output = output[:num_real]
         assert not torch.isnan(real_output).any(), (
