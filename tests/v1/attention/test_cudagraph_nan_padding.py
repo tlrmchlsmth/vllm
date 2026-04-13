@@ -1552,9 +1552,9 @@ def test_mla_layer_production_padding(
 
                 # First replay: ALL NaN to pollute internal buffers
                 saved_hidden = hidden_states[:num_real].clone()
-                saved_slot_mapping = slot_mapping.clone()
+                saved_slot_mapping = attn_metadata.slot_mapping.clone()
                 hidden_states.fill_(float('nan'))
-                slot_mapping.fill_(-1)
+                attn_metadata.slot_mapping.fill_(-1)
                 output.fill_(float('nan'))
                 graph.replay()
                 torch.cuda.synchronize()
@@ -1562,7 +1562,7 @@ def test_mla_layer_production_padding(
                 # Second replay: restore real data + NaN padding
                 hidden_states[:num_real] = saved_hidden
                 hidden_states[num_real:] = float('nan')
-                slot_mapping.copy_(saved_slot_mapping)
+                attn_metadata.slot_mapping.copy_(saved_slot_mapping)
                 output.fill_(float('nan'))
                 graph.replay()
                 torch.cuda.synchronize()
