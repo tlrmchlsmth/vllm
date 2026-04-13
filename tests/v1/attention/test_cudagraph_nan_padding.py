@@ -1074,7 +1074,8 @@ def test_deepseek_dense_mlp_nvfp4_cudagraph_nan_padding(
 # ============================================================================
 
 
-def _build_deepseek_mla_layer(vllm_config, device, dtype):
+def _build_deepseek_mla_layer(vllm_config, device, dtype,
+                              quant_config=None):
     """Build a DeepseekV2MLAAttention layer with random weights."""
     from vllm.model_executor.models.deepseek_v2 import (
         DeepseekV2MLAAttention,
@@ -1093,27 +1094,64 @@ def _build_deepseek_mla_layer(vllm_config, device, dtype):
         kv_lora_rank=config.kv_lora_rank,
         max_position_embeddings=config.max_position_embeddings,
         cache_config=vllm_config.cache_config,
-        quant_config=None,
+        quant_config=quant_config,
         prefix="model.layers.3.self_attn",
     )
 
+    # Initialize weights — handle different dtypes from quantization
     for name, param in layer.named_parameters():
-        if param.is_floating_point():
-            random_data = torch.randn_like(param, dtype=torch.float32) * 0.02
+        if param.dtype == torch.uint8:
+            param.data.copy_(torch.randint(
+                0, 256, param.shape, dtype=torch.uint8))
+        elif param.dtype == torch.float8_e4m3fn:
+            param.data.copy_(torch.randint(
+                1, 127, param.shape,
+                dtype=torch.uint8).view(torch.float8_e4m3fn))
+        elif param.dtype == torch.float32:
+            param.data.fill_(1.0)
+        elif param.is_floating_point():
+            random_data = torch.randn_like(
+                param, dtype=torch.float32) * 0.02
             param.data.copy_(random_data.to(param.dtype))
 
-    layer = layer.to(device=device, dtype=dtype)
+    layer = layer.to(device=device)
+
+    # Process quantized weights
+    if quant_config is not None:
+        for module in layer.modules():
+            if hasattr(module, 'quant_method') and hasattr(
+                module.quant_method, 'process_weights_after_loading'
+            ):
+                module.quant_method.process_weights_after_loading(module)
+
     layer.mla_attn.mla_attn.process_weights_after_loading(dtype)
     return layer
 
 
+def _get_nvfp4_quant_config():
+    """Create ModelOptNvFp4Config for NVFP4 tests."""
+    from vllm.model_executor.layers.quantization.modelopt import (
+        ModelOptNvFp4Config,
+    )
+    return ModelOptNvFp4Config(
+        is_checkpoint_nvfp4_serialized=True,
+        kv_cache_quant_algo=None,
+        exclude_modules=[],
+    )
+
+
+@pytest.mark.parametrize(
+    "use_nvfp4",
+    [False, True],
+    ids=["bf16", "nvfp4"],
+)
 @pytest.mark.parametrize(
     "num_real,num_padded",
     [(1, 8), (5, 8), (13, 16), (33, 40)],
     ids=["1to8", "5to8", "13to16", "33to40"],
 )
 def test_deepseek_mla_layer_cudagraph_nan_padding(
-    default_vllm_config, dist_init, num_real, num_padded,
+    default_vllm_config, dist_init, num_real, num_padded, use_nvfp4,
 ):
     """Full DeepSeek-R1 MLA attention layer under CUDA graph with NaN padding.
 
@@ -1126,12 +1164,17 @@ def test_deepseek_mla_layer_cudagraph_nan_padding(
     Q/K/V, attention workspace). The second replay restores real data
     and verifies no NaN leaked from the polluted buffers.
     """
+    if use_nvfp4 and not current_platform.has_device_capability(100):
+        pytest.skip("NVFP4 requires sm100+")
+
     from vllm.forward_context import set_forward_context
     from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
     device = torch.device(f"{DEVICE_TYPE}:0")
     dtype = torch.bfloat16
     model = "nvidia/DeepSeek-R1-0528-NVFP4-v2"
+
+    quant_config = _get_nvfp4_quant_config() if use_nvfp4 else None
 
     batch_spec = BatchSpec(
         seq_lens=[128] * num_real,
@@ -1150,7 +1193,9 @@ def test_deepseek_mla_layer_cudagraph_nan_padding(
     torch.set_default_dtype(dtype)
     try:
         with set_current_vllm_config(vllm_config):
-            layer = _build_deepseek_mla_layer(vllm_config, device, dtype)
+            layer = _build_deepseek_mla_layer(
+                vllm_config, device, dtype, quant_config=quant_config,
+            )
 
             # Build attention metadata
             common_attn_metadata = create_common_attn_metadata(
@@ -1262,6 +1307,10 @@ def test_deepseek_mla_layer_cudagraph_nan_padding(
         torch.set_default_dtype(old_dtype)
 
 
+@pytest.mark.skipif(
+    not current_platform.has_device_capability(100),
+    reason="NVFP4 requires sm100+",
+)
 @pytest.mark.parametrize(
     "num_real,num_padded",
     [(1, 8), (5, 8), (13, 16)],
@@ -1270,13 +1319,13 @@ def test_deepseek_mla_layer_cudagraph_nan_padding(
 def test_deepseek_mla_layer_cudagraph_sm_pressure(
     default_vllm_config, dist_init, sm_pressure, num_real, num_padded,
 ):
-    """Full MLA layer under CUDA graph with SM pressure.
+    """Full MLA layer with NVFP4 weights under CUDA graph with SM pressure.
 
-    Same as test_deepseek_mla_layer_cudagraph_nan_padding but with a
-    background kernel occupying SMs. This changes kernel scheduling
-    and can expose PDL/timing bugs that only manifest under contention.
-    Replays the graph many times to increase the chance of hitting
-    a race.
+    Same as test_deepseek_mla_layer_cudagraph_nan_padding but with NVFP4
+    weights and a background kernel occupying SMs. This changes kernel
+    scheduling and can expose PDL/timing bugs that only manifest under
+    contention. Replays the graph many times to increase the chance of
+    hitting a race.
     """
     from vllm.forward_context import set_forward_context
     from vllm.v1.kv_cache_interface import MLAAttentionSpec
@@ -1284,6 +1333,7 @@ def test_deepseek_mla_layer_cudagraph_sm_pressure(
     device = torch.device(f"{DEVICE_TYPE}:0")
     dtype = torch.bfloat16
     model = "nvidia/DeepSeek-R1-0528-NVFP4-v2"
+    quant_config = _get_nvfp4_quant_config()
 
     batch_spec = BatchSpec(
         seq_lens=[128] * num_real,
@@ -1302,7 +1352,9 @@ def test_deepseek_mla_layer_cudagraph_sm_pressure(
     torch.set_default_dtype(dtype)
     try:
         with set_current_vllm_config(vllm_config):
-            layer = _build_deepseek_mla_layer(vllm_config, device, dtype)
+            layer = _build_deepseek_mla_layer(
+                vllm_config, device, dtype, quant_config=quant_config,
+            )
 
             common_attn_metadata = create_common_attn_metadata(
                 batch_spec,
