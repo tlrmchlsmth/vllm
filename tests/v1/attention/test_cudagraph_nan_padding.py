@@ -1353,12 +1353,21 @@ def test_deepseek_mla_layer_cudagraph_nan_padding(
 
 
 @pytest.mark.parametrize(
+    "kv_cache_dtype", ["auto", "fp8_e4m3"],
+    ids=["kv_auto", "kv_fp8"],
+)
+@pytest.mark.parametrize(
+    "stale_block_table", [False, True],
+    ids=["clean_bt", "stale_bt"],
+)
+@pytest.mark.parametrize(
     "num_real,num_padded",
     [(1, 8), (5, 8), (13, 16)],
     ids=["1to8", "5to8", "13to16"],
 )
 def test_mla_layer_production_padding(
     default_vllm_config, dist_init, num_real, num_padded,
+    stale_block_table, kv_cache_dtype,
 ):
     """MLA layer with production-matching CUDA graph padding behavior.
 
@@ -1372,6 +1381,8 @@ def test_mla_layer_production_padding(
     - Padding requests in query_start_loc, seq_lens, block_table
     - slot_mapping = -1 for padding tokens
     - FP8 KV cache (production uses --kv-cache-dtype fp8)
+    - Stale block table: padding requests point to random cache blocks
+      containing NaN (simulates leftover entries from previous iterations)
     """
     from vllm.forward_context import set_forward_context
     from vllm.v1.attention.backend import CommonAttentionMetadata
@@ -1419,10 +1430,21 @@ def test_mla_layer_production_padding(
                 num_padded, max_blocks, dtype=torch.int32, device=device,
             )
             # Real requests get valid blocks
+            num_real_blocks = num_real * max_blocks
             for i in range(num_real):
                 for b in range(max_blocks):
                     block_table[i, b] = i * max_blocks + b + 1
-            # Padding requests get NULL_BLOCK_ID (0) — already zero
+
+            if stale_block_table:
+                # Simulate stale block table entries from previous
+                # iterations — padding requests point to random cache
+                # blocks that may contain NaN/garbage data.
+                stale_start = num_real_blocks + 1
+                for i in range(num_real, num_padded):
+                    for b in range(max_blocks):
+                        block_table[i, b] = stale_start + (
+                            i - num_real) * max_blocks + b
+            # else: padding requests keep NULL_BLOCK_ID (0)
 
             slot_mapping = torch.full(
                 (num_padded,), -1, dtype=torch.int64, device=device,
@@ -1471,6 +1493,16 @@ def test_mla_layer_production_padding(
             kv_cache = torch.zeros(
                 8192, block_size, head_size, dtype=dtype, device=device,
             )
+
+            if stale_block_table:
+                # Poison stale blocks with NaN — simulates cache blocks
+                # containing garbage from previous iterations that
+                # padding requests' stale block table entries point to.
+                stale_start = num_real_blocks + 1
+                num_stale = (num_padded - num_real) * max_blocks
+                kv_cache[stale_start:stale_start + num_stale] = float(
+                    'nan')
+
             mla_attn = layer.mla_attn.mla_attn
             mla_attn.kv_cache = kv_cache
             layer_name = mla_attn.layer_name
@@ -1484,7 +1516,7 @@ def test_mla_layer_production_padding(
                 head_size=head_size,
                 dtype=vllm_config.model_config.dtype,
                 sliding_window=None,
-                cache_dtype_str="auto",
+                cache_dtype_str=kv_cache_dtype,
             )
             builder_cls = mla_attn.attn_backend.get_builder_cls()
             builder = builder_cls(
