@@ -474,8 +474,6 @@ def _run_mla_nan_padding_test(
 ):
     """Run MLA attention with NaN-filled padding and verify real output."""
     from tests.v1.attention.test_mla_backends import (
-        BACKEND_BLOCK_SIZES,
-        MockMLAAttentionLayer,
         create_and_prepopulate_kv_cache as mla_create_kv_cache,
         run_attention_backend as mla_run_attention_backend,
     )
@@ -838,6 +836,36 @@ class TestPerTokenOpsNaNPadding:
         )
         assert not torch.isnan(key_out[:num_real]).any(), (
             "RoPE: NaN in padding rows corrupted real key output"
+        )
+
+    def test_embedding_nan_padding(self):
+        """Embedding lookup with out-of-range padding indices must not
+        corrupt real token embeddings or crash."""
+        device = torch.device(f"{DEVICE_TYPE}:0")
+        vocab_size = 32000
+        hidden_size = 256
+        num_real = 32
+        num_padded = 40
+
+        embedding = torch.nn.Embedding(vocab_size, hidden_size).to(
+            device=device, dtype=torch.float16,
+        )
+
+        # Real tokens get valid IDs, padding gets 0 (safe index)
+        input_ids = torch.zeros(num_padded, dtype=torch.long, device=device)
+        input_ids[:num_real] = torch.randint(
+            0, vocab_size, (num_real,), device=device,
+        )
+
+        output = embedding(input_ids)
+        torch.cuda.synchronize()
+
+        real_output = output[:num_real]
+        assert not torch.isnan(real_output).any(), (
+            "Embedding: NaN in real token output"
+        )
+        assert not torch.isinf(real_output).any(), (
+            "Embedding: Inf in real token output"
         )
 
 
@@ -1348,138 +1376,145 @@ def _deepep_ll_nan_padding_worker(
     num_local_experts = num_experts // pgi.world_size
     max_tokens_per_rank = num_padded
 
-    if use_nvfp4:
-        import vllm.envs as envs_mod
-        _orig_nvfp4_dispatch = getattr(
-            envs_mod, 'VLLM_DEEPEPLL_NVFP4_DISPATCH', False)
-        envs_mod.VLLM_DEEPEPLL_NVFP4_DISPATCH = True
+    try:
+        if use_nvfp4:
+            import vllm.envs as envs_mod
+            _orig_nvfp4_dispatch = getattr(
+                envs_mod, 'VLLM_DEEPEPLL_NVFP4_DISPATCH', False)
+            envs_mod.VLLM_DEEPEPLL_NVFP4_DISPATCH = True
 
-        from tests.kernels.moe.utils import make_test_weights
-        from vllm.model_executor.layers.fused_moe.config import (
-            nvfp4_moe_quant_config,
-        )
-        from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutedsl_batched_moe import (  # noqa: E501
-            FlashInferCuteDSLBatchedExperts,
-        )
+            from tests.kernels.moe.utils import make_test_weights
+            from vllm.model_executor.layers.fused_moe.config import (
+                nvfp4_moe_quant_config,
+            )
+            from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutedsl_batched_moe import (  # noqa: E501
+                FlashInferCuteDSLBatchedExperts,
+            )
 
-        (_, w1_q, w1_bs, w1_gs), (_, w2_q, w2_bs, w2_gs) = (
-            make_test_weights(num_local_experts, n, k,
-                              in_dtype=torch.bfloat16, quant_dtype="nvfp4")
-        )
-        a1_gs = torch.ones((num_local_experts,), device=device,
-                            dtype=torch.float32)
-        a2_gs = torch.ones((num_local_experts,), device=device,
-                            dtype=torch.float32)
-        quant_config = nvfp4_moe_quant_config(
-            g1_alphas=(1 / w1_gs), g2_alphas=(1 / w2_gs),
-            a1_gscale=a1_gs, a2_gscale=a2_gs,
-            w1_scale=w1_bs, w2_scale=w2_bs,
-        )
-        moe_config = make_dummy_moe_config()
-        fused_experts = FlashInferCuteDSLBatchedExperts(
-            max_num_tokens=max_tokens_per_rank,
-            num_dispatchers=pgi.world_size // dp_size,
-            moe_config=moe_config, quant_config=quant_config,
-        )
-        w1, w2 = w1_q, w2_q
-    else:
-        # FP8 per-token quant
-        e = num_local_experts
-        w1_bf16 = torch.randn(e, 2 * n, k, device=device,
-                               dtype=torch.bfloat16) / 10
-        w2_bf16 = torch.randn(e, k, n, device=device,
-                               dtype=torch.bfloat16) / 10
-        w1 = torch.empty_like(w1_bf16, dtype=torch.float8_e4m3fn)
-        w2 = torch.empty_like(w2_bf16, dtype=torch.float8_e4m3fn)
-        w1_scale = torch.empty(e, 2 * n, 1, device=device,
+            (_, w1_q, w1_bs, w1_gs), (_, w2_q, w2_bs, w2_gs) = (
+                make_test_weights(num_local_experts, n, k,
+                                  in_dtype=torch.bfloat16,
+                                  quant_dtype="nvfp4")
+            )
+            a1_gs = torch.ones((num_local_experts,), device=device,
                                 dtype=torch.float32)
-        w2_scale = torch.empty(e, k, 1, device=device,
+            a2_gs = torch.ones((num_local_experts,), device=device,
                                 dtype=torch.float32)
-        for eid in range(e):
-            w1[eid], w1_scale[eid] = ops.scaled_fp8_quant(
-                w1_bf16[eid], use_per_token_if_dynamic=True)
-            w2[eid], w2_scale[eid] = ops.scaled_fp8_quant(
-                w2_bf16[eid], use_per_token_if_dynamic=True)
+            quant_config = nvfp4_moe_quant_config(
+                g1_alphas=(1 / w1_gs), g2_alphas=(1 / w2_gs),
+                a1_gscale=a1_gs, a2_gscale=a2_gs,
+                w1_scale=w1_bs, w2_scale=w2_bs,
+            )
+            moe_config = make_dummy_moe_config()
+            fused_experts = FlashInferCuteDSLBatchedExperts(
+                max_num_tokens=max_tokens_per_rank,
+                num_dispatchers=pgi.world_size // dp_size,
+                moe_config=moe_config, quant_config=quant_config,
+            )
+            w1, w2 = w1_q, w2_q
+        else:
+            # FP8 per-token quant
+            e = num_local_experts
+            w1_bf16 = torch.randn(e, 2 * n, k, device=device,
+                                   dtype=torch.bfloat16) / 10
+            w2_bf16 = torch.randn(e, k, n, device=device,
+                                   dtype=torch.bfloat16) / 10
+            w1 = torch.empty_like(w1_bf16, dtype=torch.float8_e4m3fn)
+            w2 = torch.empty_like(w2_bf16, dtype=torch.float8_e4m3fn)
+            w1_scale = torch.empty(e, 2 * n, 1, device=device,
+                                    dtype=torch.float32)
+            w2_scale = torch.empty(e, k, 1, device=device,
+                                    dtype=torch.float32)
+            for eid in range(e):
+                w1[eid], w1_scale[eid] = ops.scaled_fp8_quant(
+                    w1_bf16[eid], use_per_token_if_dynamic=True)
+                w2[eid], w2_scale[eid] = ops.scaled_fp8_quant(
+                    w2_bf16[eid], use_per_token_if_dynamic=True)
 
-        from vllm.model_executor.layers.fused_moe.config import (
-            FusedMoEQuantConfig,
+            from vllm.model_executor.layers.fused_moe.config import (
+                FusedMoEQuantConfig,
+            )
+            quant_config = FusedMoEQuantConfig.make(
+                quant_dtype=torch.float8_e4m3fn,
+                w1_scale=w1_scale, w2_scale=w2_scale,
+                per_act_token_quant=True,
+            )
+            moe_config = make_dummy_moe_config()
+            fused_experts = BatchedTritonExperts(
+                max_num_tokens=max_tokens_per_rank,
+                num_dispatchers=pgi.world_size // dp_size,
+                moe_config=moe_config, quant_config=quant_config,
+            )
+
+        # Gate weights (router)
+        gate_weight = torch.randn(num_experts, k, device=device,
+                                   dtype=torch.bfloat16) * 0.02
+
+        # Padded hidden_states with NaN
+        hidden_states = torch.randn(num_padded, k, device=device,
+                                     dtype=torch.bfloat16) * 0.1
+        hidden_states[num_real:] = float('nan')
+
+        # Router on padded input
+        router_logits = hidden_states @ gate_weight.t()
+        routing_weights = torch.softmax(router_logits, dim=-1,
+                                         dtype=torch.float32)
+        topk_weights, topk_ids = torch.topk(
+            routing_weights, topk, dim=-1)
+        topk_weights = topk_weights / topk_weights.sum(
+            dim=-1, keepdim=True)
+        topk_ids = topk_ids.to(torch.int64)
+
+        # Expert map
+        expert_map = torch.full((num_experts,), -1, dtype=torch.int32,
+                                 device=device)
+        e_start = pgi.rank * num_local_experts
+        expert_map[e_start:e_start + num_local_experts] = torch.arange(
+            num_local_experts, dtype=torch.int32, device=device,
         )
-        quant_config = FusedMoEQuantConfig.make(
-            quant_dtype=torch.float8_e4m3fn,
-            w1_scale=w1_scale, w2_scale=w2_scale,
-            per_act_token_quant=True,
+
+        # DeepEP LL all2all
+        ll_args = DeepEPLLArgs(
+            max_tokens_per_rank=max_tokens_per_rank,
+            hidden_size=k, num_experts=num_experts,
+            use_fp8_dispatch=False,
         )
-        moe_config = make_dummy_moe_config()
-        fused_experts = BatchedTritonExperts(
-            max_num_tokens=max_tokens_per_rank,
-            num_dispatchers=pgi.world_size // dp_size,
-            moe_config=moe_config, quant_config=quant_config,
-        )
+        a2a = make_deepep_a2a(pg=pg, pgi=pgi, dp_size=dp_size,
+                               deepep_ht_args=None, deepep_ll_args=ll_args)
 
-    # Gate weights (router)
-    gate_weight = torch.randn(num_experts, k, device=device,
-                               dtype=torch.bfloat16) * 0.02
-
-    # Padded hidden_states with NaN
-    hidden_states = torch.randn(num_padded, k, device=device,
-                                 dtype=torch.bfloat16) * 0.1
-    hidden_states[num_real:] = float('nan')
-
-    # Router on padded input
-    router_logits = hidden_states @ gate_weight.t()
-    routing_weights = torch.softmax(router_logits, dim=-1,
-                                     dtype=torch.float32)
-    topk_weights, topk_ids = torch.topk(routing_weights, topk, dim=-1)
-    topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
-    topk_ids = topk_ids.to(torch.int64)
-
-    # Expert map
-    expert_map = torch.full((num_experts,), -1, dtype=torch.int32,
-                             device=device)
-    e_start = pgi.rank * num_local_experts
-    expert_map[e_start:e_start + num_local_experts] = torch.arange(
-        num_local_experts, dtype=torch.int32, device=device,
-    )
-
-    # DeepEP LL all2all
-    ll_args = DeepEPLLArgs(
-        max_tokens_per_rank=max_tokens_per_rank,
-        hidden_size=k, num_experts=num_experts,
-        use_fp8_dispatch=False,
-    )
-    a2a = make_deepep_a2a(pg=pg, pgi=pgi, dp_size=dp_size,
-                           deepep_ht_args=None, deepep_ll_args=ll_args)
-
-    kernel = FusedMoEKernel(
-        prepare_finalize=a2a, fused_experts=fused_experts, inplace=False,
-    )
-
-    from tests.v1.attention.test_cudagraph_nan_padding import _patch_empty
-    with set_current_vllm_config(VllmConfig()), _patch_empty():
-        output = kernel.apply(
-            hidden_states=hidden_states, w1=w1, w2=w2,
-            topk_weights=topk_weights, topk_ids=topk_ids,
-            activation=MoEActivation.SILU,
-            global_num_experts=num_experts,
-            expert_map=expert_map,
-            apply_router_weight_on_input=False,
+        kernel = FusedMoEKernel(
+            prepare_finalize=a2a, fused_experts=fused_experts,
+            inplace=False,
         )
 
-    torch.cuda.synchronize()
+        from tests.v1.attention.test_cudagraph_nan_padding import (
+            _patch_empty,
+        )
+        with set_current_vllm_config(VllmConfig()), _patch_empty():
+            output = kernel.apply(
+                hidden_states=hidden_states, w1=w1, w2=w2,
+                topk_weights=topk_weights, topk_ids=topk_ids,
+                activation=MoEActivation.SILU,
+                global_num_experts=num_experts,
+                expert_map=expert_map,
+                apply_router_weight_on_input=False,
+            )
 
-    if use_nvfp4:
-        envs_mod.VLLM_DEEPEPLL_NVFP4_DISPATCH = _orig_nvfp4_dispatch
+        torch.cuda.synchronize()
 
-    mode = "NVFP4" if use_nvfp4 else "FP8"
-    real_output = output[:num_real]
-    assert not torch.isnan(real_output).any(), (
-        f"DeepEP LL {mode} MoE with router: NaN in real tokens on "
-        f"rank {pgi.rank} (real={num_real}, padded={num_padded})"
-    )
-    assert not torch.isinf(real_output).any(), (
-        f"DeepEP LL {mode} MoE with router: Inf in real tokens on "
-        f"rank {pgi.rank}"
-    )
+        mode = "NVFP4" if use_nvfp4 else "FP8"
+        real_output = output[:num_real]
+        assert not torch.isnan(real_output).any(), (
+            f"DeepEP LL {mode} MoE with router: NaN in real tokens on "
+            f"rank {pgi.rank} (real={num_real}, padded={num_padded})"
+        )
+        assert not torch.isinf(real_output).any(), (
+            f"DeepEP LL {mode} MoE with router: Inf in real tokens on "
+            f"rank {pgi.rank}"
+        )
+    finally:
+        if use_nvfp4:
+            envs_mod.VLLM_DEEPEPLL_NVFP4_DISPATCH = _orig_nvfp4_dispatch
 
 
 DEEPEP_PADDING_CONFIGS = [
