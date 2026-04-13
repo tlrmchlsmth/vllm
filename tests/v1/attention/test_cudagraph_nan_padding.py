@@ -694,6 +694,68 @@ def test_mla_nan_padding(default_vllm_config, dist_init,
 # ============================================================================
 
 
+class TestPoisonVerification:
+    """Verify that allocator poisoning actually works — torch.empty
+    returns NaN-filled tensors after poisoning."""
+
+    def test_poison_covers_torch_empty(self):
+        """After poisoning, torch.empty should return NaN for float types."""
+        device = torch.device(f"{DEVICE_TYPE}:0")
+        _poison_cuda_allocator(device)
+
+        for dtype in [torch.float16, torch.bfloat16, torch.float32]:
+            t = torch.empty(1024, 1024, dtype=dtype, device=device)
+            assert torch.isnan(t).any(), (
+                f"Allocator poisoning failed: torch.empty({dtype}) "
+                f"did not return NaN. Poisoning is not effective."
+            )
+
+    def test_poison_covers_torch_empty_like(self):
+        """torch.empty_like should also get poisoned memory."""
+        device = torch.device(f"{DEVICE_TYPE}:0")
+        _poison_cuda_allocator(device)
+
+        ref = torch.zeros(1024, 1024, dtype=torch.bfloat16, device=device)
+        del ref
+
+        _poison_cuda_allocator(device)
+        ref2 = torch.zeros(1024, 1024, dtype=torch.bfloat16, device=device)
+        t = torch.empty_like(ref2)
+        assert torch.isnan(t).any(), (
+            "Allocator poisoning failed: torch.empty_like did not "
+            "return NaN."
+        )
+
+    def test_poison_covers_fp8(self):
+        """FP8 tensors should also get NaN from poisoned allocator."""
+        device = torch.device(f"{DEVICE_TYPE}:0")
+        _poison_cuda_allocator(device)
+
+        t = torch.empty(1024, 1024, dtype=torch.float8_e4m3fn,
+                         device=device)
+        # 0xFF in FP8 E4M3FN is NaN
+        assert torch.isnan(t.float()).any(), (
+            "Allocator poisoning failed: torch.empty(fp8) did not "
+            "return NaN."
+        )
+
+    def test_poison_covers_workspace_sizes(self):
+        """Verify poisoning covers the workspace sizes used by MoE/attention
+        kernels (typically 1-64MB)."""
+        device = torch.device(f"{DEVICE_TYPE}:0")
+        _poison_cuda_allocator(device)
+
+        for size_kb in [64, 256, 1024, 4096, 16384]:
+            numel = size_kb * 1024 // 2  # bf16 = 2 bytes
+            t = torch.empty(numel, dtype=torch.bfloat16, device=device)
+            has_nan = torch.isnan(t).any().item()
+            assert has_nan, (
+                f"Allocator poisoning missed {size_kb}KB allocation. "
+                f"Workspace buffers of this size won't be NaN-poisoned."
+            )
+            del t
+
+
 class TestPerTokenOpsNaNPadding:
     """Verify that per-token ops (RMSNorm, Linear, RoPE) process each
     token independently, so NaN in padding rows cannot corrupt real rows.
