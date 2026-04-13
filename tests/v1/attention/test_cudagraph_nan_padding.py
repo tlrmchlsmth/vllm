@@ -2816,14 +2816,17 @@ def test_nvfp4_moe_weight_edge_cases(workspace_init, weight_pattern):
 def test_deepseek_moe_with_shared_experts_nan_padding(
     default_vllm_config, dist_init, workspace_init, num_real, num_padded,
 ):
-    """Shared experts + routed MoE addition with NaN padding.
+    """Shared experts + routed MoE with concurrent execution + NaN padding.
 
-    In DeepseekV2MoE.forward(), shared expert output is added to routed
-    expert output: final_hidden_states += shared_output. Both run on
-    the same NaN-padded hidden_states. This tests the shared expert
-    MLP (DeepseekV2MLP) produces NaN-free output for real tokens even
-    when padding tokens contain NaN, and that the addition doesn't
-    corrupt real tokens.
+    In production, shared experts run on aux_stream concurrently with
+    all2all dispatch. This test simulates that overlap:
+    1. Launch shared expert MLP on aux_stream
+    2. Launch routed expert MoE on default stream (simulated)
+    3. Synchronize both
+    4. Add: final = routed * scaling + shared
+
+    Tests that concurrent execution with NaN-padded hidden_states
+    doesn't cause cross-stream corruption of real token output.
 
     Uses DeepSeek-R1 config (n_shared_experts=1, moe_intermediate_size=2048).
     """
@@ -2839,7 +2842,6 @@ def test_deepseek_moe_with_shared_experts_nan_padding(
     )
     config = vllm_config.model_config.hf_config
 
-    # Shared experts: n_shared_experts=1, uses moe_intermediate_size
     shared_intermediate = (
         config.moe_intermediate_size * config.n_shared_experts
     )
@@ -2871,22 +2873,33 @@ def test_deepseek_moe_with_shared_experts_nan_padding(
 
             _poison_cuda_allocator(device)
 
-            # Simulate the production path:
-            # shared_output = shared_experts(hidden)
-            # routed_output = ... (simulated as random finite data)
-            # final = routed_output * scaling + shared_output
-            shared_output = shared_experts(hidden)
-            routed_output = torch.randn_like(shared_output) * 0.01
-            routed_output[num_real:] = float('nan')  # padding is NaN
+            # Simulate production overlap: shared experts on aux_stream
+            # concurrent with routed experts on default stream
+            aux = torch.cuda.Stream(device=device)
 
+            # Routed expert output (simulated — real path tested in
+            # other MoE tests)
+            routed_output = torch.randn(
+                num_padded, config.hidden_size, dtype=dtype,
+                device=device) * 0.01
+            routed_output[num_real:] = float('nan')
+
+            # Run shared experts on aux stream (production overlap)
+            default_stream = torch.cuda.current_stream(device)
+            aux.wait_stream(default_stream)
+            with torch.cuda.stream(aux):
+                shared_output = shared_experts(hidden)
+
+            # Synchronize and add (production path)
+            default_stream.wait_stream(aux)
             scaling = getattr(config, 'routed_scaling_factor', 1.0)
             final = routed_output * scaling + shared_output
             torch.cuda.synchronize()
 
         real_output = final[:num_real]
         assert not torch.isnan(real_output).any(), (
-            f"Shared experts + MoE addition: NaN in real tokens "
-            f"(real={num_real}, padded={num_padded})"
+            f"Shared experts (concurrent) + MoE addition: NaN in "
+            f"real tokens (real={num_real}, padded={num_padded})"
         )
     finally:
         torch.set_default_dtype(old_dtype)
