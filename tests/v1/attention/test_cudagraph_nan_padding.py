@@ -2200,28 +2200,75 @@ def _deepep_ll_nan_padding_worker(
             _poison_cuda_allocator,
         )
         _poison_cuda_allocator(device)
+
+        apply_kwargs = dict(
+            hidden_states=hidden_states, w1=w1, w2=w2,
+            topk_weights=topk_weights, topk_ids=topk_ids,
+            activation=MoEActivation.SILU,
+            global_num_experts=num_experts,
+            expert_map=expert_map,
+            apply_router_weight_on_input=False,
+        )
+
+        # SM pressure: background kernel on separate stream
+        stop_event = threading.Event()
+        hog_stream = torch.cuda.Stream(device=device)
+
+        def _sm_hog():
+            with torch.cuda.stream(hog_stream):
+                a = torch.randn(2048, 2048, device=device,
+                                 dtype=torch.bfloat16)
+                b = torch.randn(2048, 2048, device=device,
+                                 dtype=torch.bfloat16)
+                while not stop_event.is_set():
+                    torch.mm(a, b, out=a)
+
+        hog_thread = threading.Thread(target=_sm_hog, daemon=True)
+        hog_thread.start()
+
         with set_current_vllm_config(VllmConfig()):
-            output = kernel.apply(
-                hidden_states=hidden_states, w1=w1, w2=w2,
-                topk_weights=topk_weights, topk_ids=topk_ids,
-                activation=MoEActivation.SILU,
-                global_num_experts=num_experts,
-                expert_map=expert_map,
-                apply_router_weight_on_input=False,
-            )
+            # Warmup
+            output = kernel.apply(**apply_kwargs)
+            torch.cuda.synchronize()
 
-        torch.cuda.synchronize()
+            # Capture in CUDA graph
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                output = kernel.apply(**apply_kwargs)
 
-        mode = "NVFP4" if use_nvfp4 else "FP8"
-        real_output = output[:num_real]
-        assert not torch.isnan(real_output).any(), (
-            f"DeepEP LL {mode} MoE with router: NaN in real tokens on "
-            f"rank {pgi.rank} (real={num_real}, padded={num_padded})"
-        )
-        assert not torch.isinf(real_output).any(), (
-            f"DeepEP LL {mode} MoE with router: Inf in real tokens on "
-            f"rank {pgi.rank}"
-        )
+            # Multiple replays with pollution under SM pressure
+            saved_hidden = hidden_states[:num_real].clone()
+            saved_tw = topk_weights[:num_real].clone()
+            saved_ti = topk_ids[:num_real].clone()
+
+            for i in range(100):
+                # Pollute → replay
+                hidden_states.fill_(float('nan'))
+                topk_weights.fill_(float('nan'))
+                topk_ids.fill_(0)
+                output.fill_(float('nan'))
+                graph.replay()
+
+                # Restore → replay
+                hidden_states[:num_real] = saved_hidden
+                hidden_states[num_real:] = float('nan')
+                topk_weights[:num_real] = saved_tw
+                topk_ids[:num_real] = saved_ti
+                output.fill_(float('nan'))
+                graph.replay()
+
+                if i % 10 == 9:
+                    torch.cuda.synchronize()
+                    mode = "NVFP4" if use_nvfp4 else "FP8"
+                    real_output = output[:num_real]
+                    assert not torch.isnan(real_output).any(), (
+                        f"DeepEP LL {mode} MoE: NaN at iteration {i} "
+                        f"on rank {pgi.rank} "
+                        f"(real={num_real}, padded={num_padded})"
+                    )
+
+        stop_event.set()
+        hog_thread.join(timeout=5)
     finally:
         if use_nvfp4:
             envs_mod.VLLM_DEEPEPLL_NVFP4_DISPATCH = _orig_nvfp4_dispatch
