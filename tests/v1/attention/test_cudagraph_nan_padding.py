@@ -14,6 +14,8 @@ slices Q/K/V to [:num_actual_tokens] before computing attention, and this
 test validates that contract.
 """
 
+import threading
+
 import pytest
 import torch
 
@@ -63,6 +65,35 @@ def _poison_cuda_allocator(device: torch.device | str = "cuda"):
         buf.fill_(0xFF)
         bufs.append(buf)
     del bufs  # all return to allocator cache with NaN pattern
+
+
+@pytest.fixture
+def sm_pressure():
+    """Run a background kernel on a separate CUDA stream to occupy SMs.
+
+    In production, other operations (e.g. DP all-reduce, shared experts,
+    KV cache management) run concurrently. This fixture simulates that
+    SM contention, which can change kernel scheduling and expose
+    timing-dependent bugs (especially PDL issues).
+    """
+    device = torch.device(f"{DEVICE_TYPE}:0")
+    stop_event = threading.Event()
+    stream = torch.cuda.Stream(device=device)
+
+    def _hog():
+        with torch.cuda.stream(stream):
+            a = torch.randn(2048, 2048, device=device,
+                             dtype=torch.bfloat16)
+            b = torch.randn(2048, 2048, device=device,
+                             dtype=torch.bfloat16)
+            while not stop_event.is_set():
+                torch.mm(a, b, out=a)
+
+    thread = threading.Thread(target=_hog, daemon=True)
+    thread.start()
+    yield
+    stop_event.set()
+    thread.join(timeout=5)
 
 
 BACKENDS_TO_TEST = [
@@ -1193,6 +1224,150 @@ def test_deepseek_mla_layer_cudagraph_nan_padding(
         assert not torch.isinf(real_output).any(), (
             f"DeepSeek MLA layer CUDA graph: Inf in real tokens"
         )
+    finally:
+        torch.set_default_dtype(old_dtype)
+
+
+@pytest.mark.parametrize(
+    "num_real,num_padded",
+    [(1, 8), (5, 8), (13, 16)],
+    ids=["1to8", "5to8", "13to16"],
+)
+def test_deepseek_mla_layer_cudagraph_sm_pressure(
+    default_vllm_config, dist_init, sm_pressure, num_real, num_padded,
+):
+    """Full MLA layer under CUDA graph with SM pressure.
+
+    Same as test_deepseek_mla_layer_cudagraph_nan_padding but with a
+    background kernel occupying SMs. This changes kernel scheduling
+    and can expose PDL/timing bugs that only manifest under contention.
+    Replays the graph many times to increase the chance of hitting
+    a race.
+    """
+    from vllm.forward_context import set_forward_context
+    from vllm.v1.kv_cache_interface import MLAAttentionSpec
+
+    device = torch.device(f"{DEVICE_TYPE}:0")
+    dtype = torch.bfloat16
+    model = "nvidia/DeepSeek-R1-0528-NVFP4-v2"
+
+    batch_spec = BatchSpec(
+        seq_lens=[128] * num_real,
+        query_lens=[1] * num_real,
+    )
+
+    vllm_config = create_vllm_config(
+        model_name=model,
+        max_model_len=max(batch_spec.seq_lens),
+        num_gpu_blocks=8192,
+        dtype="bfloat16",
+    )
+    config = vllm_config.model_config.hf_config
+
+    old_dtype = torch.get_default_dtype()
+    torch.set_default_dtype(dtype)
+    try:
+        with set_current_vllm_config(vllm_config):
+            layer = _build_deepseek_mla_layer(vllm_config, device, dtype)
+
+            common_attn_metadata = create_common_attn_metadata(
+                batch_spec,
+                vllm_config.cache_config.block_size,
+                device, arange_block_indices=True,
+            )
+            block_size = vllm_config.cache_config.block_size
+
+            required_divisor = max(1, int(128 / block_size))
+            cols = common_attn_metadata.block_table_tensor.shape[1]
+            if cols % required_divisor != 0:
+                padded_cols = ((cols + required_divisor - 1)
+                               // required_divisor) * required_divisor
+                padding = torch.zeros(
+                    (common_attn_metadata.block_table_tensor.shape[0],
+                     padded_cols - cols),
+                    dtype=torch.int32, device=device,
+                )
+                common_attn_metadata.block_table_tensor = torch.cat(
+                    [common_attn_metadata.block_table_tensor, padding],
+                    dim=1,
+                )
+
+            head_size = config.kv_lora_rank + config.qk_rope_head_dim
+            kv_cache = torch.zeros(
+                8192, block_size, head_size, dtype=dtype, device=device,
+            )
+            mla_attn = layer.mla_attn.mla_attn
+            mla_attn.kv_cache = kv_cache
+            layer_name = mla_attn.layer_name
+            vllm_config.compilation_config.static_forward_context[
+                layer_name
+            ] = mla_attn
+
+            kv_cache_spec = MLAAttentionSpec(
+                block_size=block_size,
+                num_kv_heads=config.num_key_value_heads,
+                head_size=head_size,
+                dtype=vllm_config.model_config.dtype,
+                sliding_window=None,
+                cache_dtype_str="auto",
+            )
+            builder_cls = mla_attn.attn_backend.get_builder_cls()
+            builder = builder_cls(
+                kv_cache_spec, [layer_name], vllm_config, device,
+            )
+            attn_metadata = builder.build(
+                common_prefix_len=0,
+                common_attn_metadata=common_attn_metadata,
+            )
+
+            num_actual = common_attn_metadata.num_actual_tokens
+            hidden_states = torch.randn(
+                num_padded, config.hidden_size, dtype=dtype, device=device,
+            ) * 0.02
+            hidden_states[num_actual:] = float('nan')
+            positions = torch.zeros(
+                num_padded, dtype=torch.long, device=device,
+            )
+            positions[:num_actual] = torch.arange(
+                num_actual, device=device,
+            )
+
+            _poison_cuda_allocator(device)
+
+            with set_forward_context(attn_metadata, vllm_config):
+                # Warmup
+                output = layer(positions, hidden_states, None)
+                torch.cuda.synchronize()
+
+                # Capture
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    output = layer(positions, hidden_states, None)
+
+                # Replay many times under SM pressure to stress
+                # kernel scheduling and expose timing bugs
+                saved_hidden = hidden_states[:num_actual].clone()
+                saved_slot_mapping = attn_metadata.slot_mapping.clone()
+
+                for i in range(100):
+                    # Alternate: pollute → replay → restore → replay
+                    hidden_states.fill_(float('nan'))
+                    attn_metadata.slot_mapping.fill_(-1)
+                    output.fill_(float('nan'))
+                    graph.replay()
+
+                    hidden_states[:num_actual] = saved_hidden
+                    hidden_states[num_actual:] = float('nan')
+                    attn_metadata.slot_mapping.copy_(saved_slot_mapping)
+                    output.fill_(float('nan'))
+                    graph.replay()
+                    torch.cuda.synchronize()
+
+                    real_output = output[:num_actual]
+                    assert not torch.isnan(real_output).any(), (
+                        f"SM pressure MLA CUDA graph: NaN at iteration "
+                        f"{i} (real={num_actual}, padded={num_padded})"
+                    )
     finally:
         torch.set_default_dtype(old_dtype)
 
