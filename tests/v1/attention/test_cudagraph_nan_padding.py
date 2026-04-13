@@ -2421,6 +2421,63 @@ def test_flashinfer_cutedsl_fix_prevents_corruption(
     )
 
 
+@pytest.mark.skipif(
+    not current_platform.has_device_capability(100),
+    reason="NVFP4 requires sm100+",
+)
+@pytest.mark.parametrize(
+    "num_real,num_padded",
+    [(1, 8), (5, 8), (13, 16), (33, 40)],
+    ids=["1to8", "5to8", "13to16", "33to40"],
+)
+def test_scaled_fp4_quant_cross_row_corruption(num_real, num_padded):
+    """Test per-token scaled_fp4_quant for cross-row corruption with NaN.
+
+    This is the non-expert FP4 quantization kernel used in MLA
+    projections (fused_qkv_a_proj, q_b_proj, kv_b_proj, o_proj).
+    It operates on a flat [M, K] tensor — every forward pass through
+    MLA projections calls this on the full padded tensor including
+    NaN padding rows.
+
+    Each row should be independently quantized (no cross-row reduction).
+    This test verifies NaN in padding rows doesn't corrupt real rows.
+    """
+    import vllm._custom_ops as ops
+
+    device = "cuda"
+    K = 1024
+
+    input_global_scale = torch.tensor(1.0, dtype=torch.float32,
+                                       device=device)
+
+    x = torch.randn(num_padded, K, dtype=torch.bfloat16,
+                     device=device) * 0.1
+
+    # Clean reference
+    x_clean = x.clone()
+    x_clean[num_real:] = 0.0
+    out_clean, scales_clean = ops.scaled_fp4_quant(x_clean,
+                                                    input_global_scale)
+
+    # Dirty: NaN in padding
+    x_dirty = x.clone()
+    x_dirty[num_real:] = float('nan')
+    out_dirty, scales_dirty = ops.scaled_fp4_quant(x_dirty,
+                                                    input_global_scale)
+
+    torch.cuda.synchronize()
+
+    # Real rows must match
+    assert torch.equal(out_clean[:num_real], out_dirty[:num_real]), (
+        "scaled_fp4_quant: NaN in padding rows corrupted real token "
+        "FP4 output. This kernel is used in every MLA projection."
+    )
+    assert torch.equal(scales_clean[:num_real], scales_dirty[:num_real]), (
+        "scaled_fp4_quant: NaN in padding rows corrupted real token "
+        "scales. This kernel is used in every MLA projection."
+    )
+
+
 @pytest.mark.xfail(
     reason="Known bug: silu_mul_cvt_fp16_to_fp4 kernel padding rows "
            "default to expert_idx=0 and overwrite expert 0's scale.",
