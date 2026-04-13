@@ -2406,6 +2406,9 @@ def test_nvfp4_dense_mlp_numerical_edge_cases(
         "huge_act_global_scale",    # activation global scale huge
         "zero_act_global_scale",    # activation global scale = 0
         "mismatched_act_scales",    # a1_gscale tiny, a2_gscale huge
+        "subnormal_fp8_scales",     # FP8 block scales at subnormal (0x01)
+        "min_normal_fp8_scales",    # FP8 block scales at min normal
+        "all_scales_tiny",          # both global and block scales tiny
     ],
 )
 def test_nvfp4_moe_weight_edge_cases(workspace_init, weight_pattern):
@@ -2491,6 +2494,22 @@ def test_nvfp4_moe_weight_edge_cases(workspace_init, weight_pattern):
     elif weight_pattern == "mismatched_act_scales":
         a1_gs.fill_(1e-20)
         a2_gs.fill_(1e20)
+    elif weight_pattern == "subnormal_fp8_scales":
+        # 0x01 in fp8 e4m3fn = smallest subnormal ≈ 2^-9 ≈ 0.001953
+        w1_bs.view(torch.uint8).fill_(0x01)
+        w2_bs.view(torch.uint8).fill_(0x01)
+    elif weight_pattern == "min_normal_fp8_scales":
+        # 0x08 in fp8 e4m3fn = smallest normal = 2^-6 = 0.015625
+        w1_bs.view(torch.uint8).fill_(0x08)
+        w2_bs.view(torch.uint8).fill_(0x08)
+    elif weight_pattern == "all_scales_tiny":
+        # Everything tiny: global weight scales, act scales, block scales
+        w1_gs = torch.full_like(w1_gs, 1e-10)
+        w2_gs = torch.full_like(w2_gs, 1e-10)
+        w1_bs.view(torch.uint8).fill_(0x01)  # subnormal fp8
+        w2_bs.view(torch.uint8).fill_(0x01)
+        a1_gs.fill_(1e-10)
+        a2_gs.fill_(1e-10)
 
     # Avoid division by zero in alpha computation
     safe_w1_gs = w1_gs.clamp(min=1e-10)
