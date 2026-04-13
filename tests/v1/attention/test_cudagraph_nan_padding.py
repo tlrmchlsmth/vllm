@@ -945,22 +945,27 @@ class TestPerTokenOpsNaNPadding:
         )
 
 
+@pytest.mark.skipif(
+    not current_platform.has_device_capability(100),
+    reason="NVFP4 requires sm100+",
+)
 @pytest.mark.parametrize(
     "num_real,num_padded",
     [(1, 8), (5, 8), (13, 16), (33, 40)],
     ids=["1to8", "5to8", "13to16", "33to40"],
 )
-def test_deepseek_dense_mlp_cudagraph_nan_padding(
+def test_deepseek_dense_mlp_nvfp4_cudagraph_nan_padding(
     default_vllm_config, dist_init, num_real, num_padded,
 ):
-    """DeepSeek-R1 dense MLP (gate_up_proj + SiLU + down_proj) with
-    CUDA graph capture/replay and NaN padding.
+    """DeepSeek-R1 dense MLP with NVFP4 quantized weights, CUDA graph
+    capture/replay, and NaN padding.
 
-    This is the MLP used in layers 0-2 (before first_k_dense_replace).
-    Tests that gate_up_proj, SiLU*mul activation, and down_proj all
-    handle NaN padding correctly under CUDA graph.
+    This is the MLP used in layers 0-2 (before first_k_dense_replace)
+    with nvidia/DeepSeek-R1-0528-NVFP4-v2 NVFP4 weight format.
     """
-    from vllm.config import VllmConfig
+    from vllm.model_executor.layers.quantization.modelopt import (
+        ModelOptNvFp4Config,
+    )
     from vllm.model_executor.models.deepseek_v2 import DeepseekV2MLP
 
     device = torch.device(f"{DEVICE_TYPE}:0")
@@ -974,6 +979,12 @@ def test_deepseek_dense_mlp_cudagraph_nan_padding(
     )
     config = vllm_config.model_config.hf_config
 
+    quant_config = ModelOptNvFp4Config(
+        is_checkpoint_nvfp4_serialized=True,
+        kv_cache_quant_algo=None,
+        exclude_modules=[],
+    )
+
     old_dtype = torch.get_default_dtype()
     torch.set_default_dtype(dtype)
     try:
@@ -982,15 +993,38 @@ def test_deepseek_dense_mlp_cudagraph_nan_padding(
                 hidden_size=config.hidden_size,
                 intermediate_size=config.intermediate_size,
                 hidden_act=config.hidden_act,
-                quant_config=None,
+                quant_config=quant_config,
                 prefix="model.layers.0.mlp",
             )
+
+            # Fill NVFP4 weights with random valid data
             for name, param in mlp.named_parameters():
-                if param.is_floating_point():
+                if param.dtype == torch.uint8:
+                    # Packed FP4 weights — random bytes
+                    param.data.copy_(torch.randint(
+                        0, 256, param.shape, dtype=torch.uint8))
+                elif param.dtype == torch.float8_e4m3fn:
+                    # Per-block weight scales — random positive fp8
+                    param.data.copy_(torch.randint(
+                        1, 127, param.shape,
+                        dtype=torch.uint8).view(torch.float8_e4m3fn))
+                elif param.dtype == torch.float32:
+                    # Global scales — set to reasonable values
+                    param.data.fill_(1.0)
+                elif param.is_floating_point():
                     random_data = torch.randn_like(
                         param, dtype=torch.float32) * 0.02
                     param.data.copy_(random_data.to(param.dtype))
-            mlp = mlp.to(device=device, dtype=dtype)
+
+            mlp = mlp.to(device=device)
+
+            # Process weights (computes alpha, renames scales)
+            for module in mlp.modules():
+                if hasattr(module, 'quant_method') and hasattr(
+                    module.quant_method, 'process_weights_after_loading'
+                ):
+                    module.quant_method.process_weights_after_loading(
+                        module)
 
             # Padded input with NaN
             hidden = torch.randn(
@@ -1025,11 +1059,11 @@ def test_deepseek_dense_mlp_cudagraph_nan_padding(
 
         real_output = output[:num_real]
         assert not torch.isnan(real_output).any(), (
-            f"DeepSeek dense MLP CUDA graph: NaN in real tokens "
+            f"DeepSeek NVFP4 dense MLP CUDA graph: NaN in real tokens "
             f"(real={num_real}, padded={num_padded})"
         )
         assert not torch.isinf(real_output).any(), (
-            f"DeepSeek dense MLP CUDA graph: Inf in real tokens"
+            f"DeepSeek NVFP4 dense MLP CUDA graph: Inf in real tokens"
         )
     finally:
         torch.set_default_dtype(old_dtype)
