@@ -2246,6 +2246,181 @@ def test_flashinfer_cutedsl_varying_masked_m(workspace_init):
     )
 
 
+@pytest.mark.skipif(
+    not current_platform.has_device_capability(100),
+    reason="NVFP4 requires sm100+",
+)
+@pytest.mark.parametrize(
+    "num_experts,m,num_real",
+    [
+        (8, 64, 8),
+        (4, 16, 1),
+    ],
+    ids=["E8_m64_sparse", "E4_m16_1tok"],
+)
+def test_flashinfer_cutedsl_fix_prevents_corruption(
+    num_experts, m, num_real,
+):
+    """Prove the padding zero-fill fix prevents cross-row corruption.
+
+    Runs flashinfer_cutedsl_moe_masked twice on the same NaN-padded
+    input:
+    1. With the fix (current code) — should produce clean output
+    2. Without the fix (monkeypatched to skip zero-fill) — should
+       produce corrupted output
+
+    If both produce the same output, the fix isn't doing anything.
+    If only the unfixed version is corrupted, the fix is real.
+    """
+    from unittest.mock import patch
+
+    from tests.kernels.moe.utils import make_test_weights
+    from vllm.model_executor.layers.fused_moe.experts import (
+        flashinfer_cutedsl_batched_moe as cutedsl_mod,
+    )
+    from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutedsl_batched_moe import (  # noqa: E501
+        flashinfer_cutedsl_moe_masked,
+    )
+
+    device = "cuda"
+    K, N = 1024, 512
+
+    (_, w1_q, w1_bs, w1_gs), (_, w2_q, w2_bs, w2_gs) = (
+        make_test_weights(num_experts, N, K, in_dtype=torch.bfloat16,
+                          quant_dtype="nvfp4")
+    )
+    a1_gs = torch.ones(num_experts, dtype=torch.float32, device=device)
+    a2_gs = torch.ones(num_experts, dtype=torch.float32, device=device)
+
+    base = num_real // num_experts
+    remainder = num_real % num_experts
+    masked_m_list = []
+    for i in range(num_experts):
+        masked_m_list.append(base + (1 if i < remainder else 0))
+    masked_m = torch.tensor(masked_m_list, dtype=torch.int32, device=device)
+
+    # Input with NaN padding
+    hidden = torch.randn(
+        num_experts, m, K, dtype=torch.bfloat16, device=device) * 0.1
+    for e in range(num_experts):
+        real = masked_m[e].item()
+        if real < m:
+            hidden[e, real:] = float('nan')
+
+    call_kwargs = dict(
+        input_global_scale=a1_gs,
+        w1=w1_q, w1_blockscale=w1_bs, w1_alpha=(1 / w1_gs),
+        w2=w2_q, a2_global_scale=a2_gs,
+        w2_blockscale=w2_bs, w2_alpha=(1 / w2_gs),
+        masked_m=masked_m,
+    )
+
+    # Run WITH fix (current code)
+    workspace_fixed = torch.zeros(
+        num_experts, m, 2 * N, dtype=torch.bfloat16, device=device)
+    out_fixed = torch.zeros(
+        num_experts, m, K, dtype=torch.bfloat16, device=device)
+    flashinfer_cutedsl_moe_masked(
+        hidden_states=hidden.clone(),
+        workspace=workspace_fixed, out=out_fixed,
+        **call_kwargs,
+    )
+    torch.cuda.synchronize()
+
+    # Run WITHOUT fix: monkeypatch to skip the zero-fill
+    original_fn = cutedsl_mod.flashinfer_cutedsl_moe_masked
+
+    from flashinfer import (
+        scaled_fp4_grouped_quantize,
+        silu_and_mul_scaled_nvfp4_experts_quantize,
+    )
+    from vllm.utils.flashinfer import (
+        flashinfer_cutedsl_grouped_gemm_nt_masked,
+    )
+
+    def unfixed_wrapper(
+        hidden_states, input_global_scale, w1, w1_blockscale, w1_alpha,
+        w2, a2_global_scale, w2_blockscale, w2_alpha, masked_m,
+        workspace, out,
+    ):
+        """Same as flashinfer_cutedsl_moe_masked but WITHOUT the
+        padding zero-fill fix."""
+        from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutedsl_batched_moe import (  # noqa: E501
+            get_cute_dtype,
+        )
+
+        num_experts_l, m_l, k_l = hidden_states.shape
+        n_l = w2.shape[-1] * 2
+        sf_vec_size = 16
+
+        aq, aq_sf = scaled_fp4_grouped_quantize(
+            hidden_states, masked_m, input_global_scale,
+        )
+
+        c_dtype = get_cute_dtype(hidden_states)
+        workspace_perm = workspace.permute(1, 2, 0)
+        flashinfer_cutedsl_grouped_gemm_nt_masked(
+            (aq, aq_sf),
+            (w1.permute(1, 2, 0), w1_blockscale),
+            workspace_perm,
+            masked_m,
+            ab_dtype="float4_e2m1fn", sf_dtype="float8_e4m3fn",
+            c_dtype=c_dtype, sf_vec_size=sf_vec_size,
+            alpha=w1_alpha.view(1, 1, num_experts_l),
+            alpha_dtype=get_cute_dtype(w1_alpha),
+        )
+
+        # NO zero-fill — this is the bug
+        workspace_for_quant = workspace_perm.permute(2, 0, 1)
+        diq, diq_sf = silu_and_mul_scaled_nvfp4_experts_quantize(
+            workspace_for_quant, masked_m, a2_global_scale,
+        )
+
+        out_perm = out.permute(1, 2, 0)
+        flashinfer_cutedsl_grouped_gemm_nt_masked(
+            (diq, diq_sf),
+            (w2.permute(1, 2, 0), w2_blockscale),
+            out_perm,
+            masked_m,
+            ab_dtype="float4_e2m1fn", sf_dtype="float8_e4m3fn",
+            c_dtype=c_dtype, sf_vec_size=sf_vec_size,
+            alpha=w2_alpha.view(1, 1, num_experts_l),
+            alpha_dtype=get_cute_dtype(w2_alpha),
+        )
+        out_perm.permute(2, 0, 1)
+
+    workspace_unfixed = torch.zeros(
+        num_experts, m, 2 * N, dtype=torch.bfloat16, device=device)
+    out_unfixed = torch.zeros(
+        num_experts, m, K, dtype=torch.bfloat16, device=device)
+    unfixed_wrapper(
+        hidden_states=hidden.clone(),
+        workspace=workspace_unfixed, out=out_unfixed,
+        **call_kwargs,
+    )
+    torch.cuda.synchronize()
+
+    # Check results
+    fixed_clean = True
+    unfixed_corrupt = False
+    for e in range(num_experts):
+        real = masked_m[e].item()
+        if real == 0:
+            continue
+        if torch.isnan(out_fixed[e, :real]).any():
+            fixed_clean = False
+        if not torch.equal(out_fixed[e, :real], out_unfixed[e, :real]):
+            unfixed_corrupt = True
+
+    assert fixed_clean, (
+        "Fix failed: output still has NaN in real tokens"
+    )
+    assert unfixed_corrupt, (
+        "Fix isn't needed: unfixed version produces identical output. "
+        "The zero-fill fix may not be exercising the bug in this config."
+    )
+
+
 @pytest.mark.xfail(
     reason="Known bug: silu_mul_cvt_fp16_to_fp4 kernel padding rows "
            "default to expert_idx=0 and overwrite expert 0's scale.",
