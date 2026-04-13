@@ -1859,6 +1859,339 @@ def test_moe_zero_token_experts_cudagraph_nan_padding(
 
 
 # ============================================================================
+# Numerical edge cases: inputs that could induce NaN via computation
+# ============================================================================
+
+
+@pytest.mark.parametrize(
+    "input_pattern",
+    [
+        "zeros",           # all zeros — degenerate attention scores
+        "large",           # large values — overflow risk in QK^T
+        "tiny",            # very small — underflow in softmax
+        "identical",       # all tokens identical — uniform attention
+    ],
+)
+def test_mla_layer_numerical_edge_cases(
+    default_vllm_config, dist_init, input_pattern,
+):
+    """Test that the full MLA layer doesn't produce NaN from edge-case
+    hidden_states. Covers Q/K/V projections, RoPE, softmax, attention,
+    and o_proj."""
+    from vllm.forward_context import set_forward_context
+    from vllm.v1.kv_cache_interface import MLAAttentionSpec
+
+    device = torch.device(f"{DEVICE_TYPE}:0")
+    dtype = torch.bfloat16
+    model = "nvidia/DeepSeek-R1-0528-NVFP4-v2"
+    num_tokens = 8
+
+    batch_spec = BatchSpec(
+        seq_lens=[128] * num_tokens,
+        query_lens=[1] * num_tokens,
+    )
+
+    vllm_config = create_vllm_config(
+        model_name=model, max_model_len=128,
+        num_gpu_blocks=8192, dtype="bfloat16",
+    )
+    config = vllm_config.model_config.hf_config
+
+    old_dtype = torch.get_default_dtype()
+    torch.set_default_dtype(dtype)
+    try:
+        with set_current_vllm_config(vllm_config):
+            layer = _build_deepseek_mla_layer(vllm_config, device, dtype)
+
+            block_size = vllm_config.cache_config.block_size
+            common_attn_metadata = create_common_attn_metadata(
+                batch_spec, block_size, device,
+                arange_block_indices=True,
+            )
+
+            required_divisor = max(1, int(128 / block_size))
+            cols = common_attn_metadata.block_table_tensor.shape[1]
+            if cols % required_divisor != 0:
+                padded_cols = ((cols + required_divisor - 1)
+                               // required_divisor) * required_divisor
+                padding = torch.zeros(
+                    (common_attn_metadata.block_table_tensor.shape[0],
+                     padded_cols - cols),
+                    dtype=torch.int32, device=device,
+                )
+                common_attn_metadata.block_table_tensor = torch.cat(
+                    [common_attn_metadata.block_table_tensor, padding],
+                    dim=1,
+                )
+
+            head_size = config.kv_lora_rank + config.qk_rope_head_dim
+            kv_cache = torch.zeros(
+                8192, block_size, head_size, dtype=dtype, device=device,
+            )
+            mla_attn = layer.mla_attn.mla_attn
+            mla_attn.kv_cache = kv_cache
+            layer_name = mla_attn.layer_name
+            vllm_config.compilation_config.static_forward_context[
+                layer_name
+            ] = mla_attn
+
+            kv_cache_spec = MLAAttentionSpec(
+                block_size=block_size,
+                num_kv_heads=config.num_key_value_heads,
+                head_size=head_size,
+                dtype=vllm_config.model_config.dtype,
+                sliding_window=None,
+                cache_dtype_str="auto",
+            )
+            builder_cls = mla_attn.attn_backend.get_builder_cls()
+            builder = builder_cls(
+                kv_cache_spec, [layer_name], vllm_config, device,
+            )
+            attn_metadata = builder.build(
+                common_prefix_len=0,
+                common_attn_metadata=common_attn_metadata,
+            )
+
+            # Create edge-case input
+            if input_pattern == "zeros":
+                hidden = torch.zeros(
+                    num_tokens, config.hidden_size,
+                    dtype=dtype, device=device)
+            elif input_pattern == "large":
+                hidden = torch.full(
+                    (num_tokens, config.hidden_size), 1e4,
+                    dtype=dtype, device=device)
+            elif input_pattern == "tiny":
+                hidden = torch.full(
+                    (num_tokens, config.hidden_size), 1e-7,
+                    dtype=dtype, device=device)
+            elif input_pattern == "identical":
+                row = torch.randn(
+                    1, config.hidden_size,
+                    dtype=dtype, device=device) * 0.02
+                hidden = row.expand(num_tokens, -1).contiguous()
+
+            positions = torch.arange(
+                num_tokens, dtype=torch.long, device=device)
+
+            with set_forward_context(attn_metadata, vllm_config):
+                output = layer(positions, hidden, None)
+            torch.cuda.synchronize()
+
+            assert not torch.isnan(output).any(), (
+                f"MLA layer produced NaN with "
+                f"input_pattern='{input_pattern}'"
+            )
+    finally:
+        torch.set_default_dtype(old_dtype)
+
+
+@pytest.mark.skipif(
+    not current_platform.has_device_capability(100),
+    reason="NVFP4 requires sm100+",
+)
+@pytest.mark.parametrize(
+    "input_pattern",
+    [
+        "zeros",           # all zeros — risk of 0/0 in scale computation
+        "large",           # large values — risk of overflow in fp4 quant
+        "tiny",            # very small values — risk of underflow
+        "identical",       # all tokens identical — degenerate routing
+        "inf",             # inf in hidden_states
+        "mixed_inf_zero",  # some rows inf, some zero
+    ],
+)
+def test_moe_numerical_edge_cases(workspace_init, input_pattern):
+    """Test that specific numerical edge cases don't produce NaN in the
+    NVFP4 MoE pipeline (router + CutlassExpertsFp4)."""
+    from tests.kernels.moe.utils import make_dummy_moe_config, make_test_weights
+    from vllm.config import ParallelConfig, VllmConfig
+    from vllm.model_executor.layers.fused_moe.all2all_utils import (
+        maybe_make_prepare_finalize,
+    )
+    from vllm.model_executor.layers.fused_moe.config import (
+        nvfp4_moe_quant_config,
+    )
+    from vllm.model_executor.layers.fused_moe.cutlass_moe import (
+        CutlassExpertsFp4,
+    )
+    from vllm.model_executor.layers.fused_moe.modular_kernel import (
+        FusedMoEKernel,
+        MoEActivation,
+    )
+
+    device = torch.device(f"{DEVICE_TYPE}:0")
+    E, topk, K, N = 8, 2, 1024, 512
+    num_tokens = 16
+
+    (_, w1_q, w1_bs, w1_gs), (_, w2_q, w2_bs, w2_gs) = (
+        make_test_weights(E, N, K, in_dtype=torch.bfloat16,
+                          quant_dtype="nvfp4")
+    )
+    a1_gs = torch.ones((E,), device=device, dtype=torch.float32)
+    a2_gs = torch.ones((E,), device=device, dtype=torch.float32)
+    quant_config = nvfp4_moe_quant_config(
+        g1_alphas=(1 / w1_gs), g2_alphas=(1 / w2_gs),
+        a1_gscale=a1_gs, a2_gscale=a2_gs,
+        w1_scale=w1_bs, w2_scale=w2_bs,
+    )
+    moe_config = make_dummy_moe_config()
+    kernel = FusedMoEKernel(
+        maybe_make_prepare_finalize(
+            moe=moe_config, quant_config=quant_config,
+            allow_new_interface=True, use_monolithic=False,
+        ),
+        CutlassExpertsFp4(
+            moe_config=moe_config, quant_config=quant_config,
+        ),
+        inplace=False,
+    )
+
+    # Create edge-case input
+    if input_pattern == "zeros":
+        hidden = torch.zeros(num_tokens, K, device=device,
+                              dtype=torch.bfloat16)
+    elif input_pattern == "large":
+        hidden = torch.full((num_tokens, K), 1e4, device=device,
+                             dtype=torch.bfloat16)
+    elif input_pattern == "tiny":
+        hidden = torch.full((num_tokens, K), 1e-7, device=device,
+                             dtype=torch.bfloat16)
+    elif input_pattern == "identical":
+        row = torch.randn(1, K, device=device, dtype=torch.bfloat16)
+        hidden = row.expand(num_tokens, -1).contiguous()
+    elif input_pattern == "inf":
+        hidden = torch.full((num_tokens, K), float('inf'), device=device,
+                             dtype=torch.bfloat16)
+    elif input_pattern == "mixed_inf_zero":
+        hidden = torch.zeros(num_tokens, K, device=device,
+                              dtype=torch.bfloat16)
+        hidden[::2] = float('inf')
+    else:
+        raise ValueError(f"Unknown input_pattern: {input_pattern}")
+
+    # Router — use fixed routing to avoid NaN from softmax(inf)
+    topk_ids = torch.zeros(num_tokens, topk, dtype=torch.int32,
+                            device=device)
+    for ki in range(topk):
+        topk_ids[:, ki] = ki
+    topk_weights = torch.ones(num_tokens, topk, dtype=torch.float32,
+                               device=device) / topk
+
+    vllm_cfg = VllmConfig(
+        parallel_config=ParallelConfig(pipeline_parallel_size=1))
+
+    with set_current_vllm_config(vllm_cfg):
+        output = kernel.apply(
+            hidden_states=hidden, w1=w1_q, w2=w2_q,
+            topk_weights=topk_weights, topk_ids=topk_ids,
+            global_num_experts=E, activation=MoEActivation.SILU,
+            apply_router_weight_on_input=False, expert_map=None,
+        )
+    torch.cuda.synchronize()
+
+    assert not torch.isnan(output).any(), (
+        f"NVFP4 MoE produced NaN with input_pattern='{input_pattern}'"
+    )
+
+
+@pytest.mark.skipif(
+    not current_platform.has_device_capability(100),
+    reason="NVFP4 requires sm100+",
+)
+@pytest.mark.parametrize(
+    "input_pattern",
+    [
+        "zeros",
+        "large",
+        "tiny",
+        "identical",
+    ],
+)
+def test_nvfp4_dense_mlp_numerical_edge_cases(
+    default_vllm_config, dist_init, input_pattern,
+):
+    """Test that NVFP4 dense MLP doesn't produce NaN from edge-case inputs."""
+    from vllm.model_executor.layers.quantization.modelopt import (
+        ModelOptNvFp4Config,
+    )
+    from vllm.model_executor.models.deepseek_v2 import DeepseekV2MLP
+
+    device = torch.device(f"{DEVICE_TYPE}:0")
+    dtype = torch.bfloat16
+
+    vllm_config = create_vllm_config(
+        model_name="nvidia/DeepSeek-R1-0528-NVFP4-v2",
+        max_model_len=128, num_gpu_blocks=8192, dtype="bfloat16",
+    )
+    config = vllm_config.model_config.hf_config
+    quant_config = ModelOptNvFp4Config(
+        is_checkpoint_nvfp4_serialized=True,
+        kv_cache_quant_algo=None, exclude_modules=[],
+    )
+
+    old_dtype = torch.get_default_dtype()
+    torch.set_default_dtype(dtype)
+    try:
+        with set_current_vllm_config(vllm_config):
+            mlp = DeepseekV2MLP(
+                hidden_size=config.hidden_size,
+                intermediate_size=config.intermediate_size,
+                hidden_act=config.hidden_act,
+                quant_config=quant_config,
+                prefix="model.layers.0.mlp",
+            )
+            for name, param in mlp.named_parameters():
+                if param.dtype == torch.uint8:
+                    param.data.copy_(torch.randint(
+                        0, 256, param.shape, dtype=torch.uint8))
+                elif param.dtype == torch.float8_e4m3fn:
+                    param.data.copy_(torch.randint(
+                        1, 127, param.shape,
+                        dtype=torch.uint8).view(torch.float8_e4m3fn))
+                elif param.dtype == torch.float32:
+                    param.data.fill_(1.0)
+                elif param.is_floating_point():
+                    param.data.copy_(torch.randn_like(
+                        param, dtype=torch.float32).mul_(0.02).to(
+                            param.dtype))
+            mlp = mlp.to(device=device)
+            for module in mlp.modules():
+                if hasattr(module, 'quant_method') and hasattr(
+                    module.quant_method, 'process_weights_after_loading'
+                ):
+                    module.quant_method.process_weights_after_loading(
+                        module)
+
+            num_tokens = 16
+            if input_pattern == "zeros":
+                hidden = torch.zeros(num_tokens, config.hidden_size,
+                                      dtype=dtype, device=device)
+            elif input_pattern == "large":
+                hidden = torch.full(
+                    (num_tokens, config.hidden_size), 1e4,
+                    dtype=dtype, device=device)
+            elif input_pattern == "tiny":
+                hidden = torch.full(
+                    (num_tokens, config.hidden_size), 1e-7,
+                    dtype=dtype, device=device)
+            elif input_pattern == "identical":
+                row = torch.randn(1, config.hidden_size, dtype=dtype,
+                                   device=device) * 0.02
+                hidden = row.expand(num_tokens, -1).contiguous()
+
+            output = mlp(hidden)
+            torch.cuda.synchronize()
+
+            assert not torch.isnan(output).any(), (
+                f"NVFP4 dense MLP produced NaN with "
+                f"input_pattern='{input_pattern}'"
+            )
+    finally:
+        torch.set_default_dtype(old_dtype)
+
+
+# ============================================================================
 # SM pressure tests for MoE and dense MLP
 # ============================================================================
 
