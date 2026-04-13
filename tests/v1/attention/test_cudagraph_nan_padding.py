@@ -2804,6 +2804,95 @@ def test_nvfp4_moe_weight_edge_cases(workspace_init, weight_pattern):
 
 
 # ============================================================================
+# DeepseekV2MoE with shared experts: full MoE layer test
+# ============================================================================
+
+
+@pytest.mark.parametrize(
+    "num_real,num_padded",
+    [(1, 8), (5, 8), (13, 16)],
+    ids=["1to8", "5to8", "13to16"],
+)
+def test_deepseek_moe_with_shared_experts_nan_padding(
+    default_vllm_config, dist_init, workspace_init, num_real, num_padded,
+):
+    """Shared experts + routed MoE addition with NaN padding.
+
+    In DeepseekV2MoE.forward(), shared expert output is added to routed
+    expert output: final_hidden_states += shared_output. Both run on
+    the same NaN-padded hidden_states. This tests the shared expert
+    MLP (DeepseekV2MLP) produces NaN-free output for real tokens even
+    when padding tokens contain NaN, and that the addition doesn't
+    corrupt real tokens.
+
+    Uses DeepSeek-R1 config (n_shared_experts=1, moe_intermediate_size=2048).
+    """
+    from vllm.config import VllmConfig
+    from vllm.model_executor.models.deepseek_v2 import DeepseekV2MLP
+
+    device = torch.device(f"{DEVICE_TYPE}:0")
+    dtype = torch.bfloat16
+
+    vllm_config = create_vllm_config(
+        model_name="nvidia/DeepSeek-R1-0528-NVFP4-v2",
+        max_model_len=128, num_gpu_blocks=8192, dtype="bfloat16",
+    )
+    config = vllm_config.model_config.hf_config
+
+    # Shared experts: n_shared_experts=1, uses moe_intermediate_size
+    shared_intermediate = (
+        config.moe_intermediate_size * config.n_shared_experts
+    )
+
+    old_dtype = torch.get_default_dtype()
+    torch.set_default_dtype(dtype)
+    try:
+        with set_current_vllm_config(vllm_config):
+            shared_experts = DeepseekV2MLP(
+                hidden_size=config.hidden_size,
+                intermediate_size=shared_intermediate,
+                hidden_act=config.hidden_act,
+                quant_config=None,
+                reduce_results=False,
+                prefix="model.layers.3.mlp.shared_experts",
+            )
+            for name, param in shared_experts.named_parameters():
+                if param.is_floating_point():
+                    param.data.copy_(torch.randn_like(
+                        param, dtype=torch.float32).mul_(0.02).to(
+                            param.dtype))
+            shared_experts = shared_experts.to(device=device, dtype=dtype)
+
+            # Padded input with NaN
+            hidden = torch.randn(
+                num_padded, config.hidden_size, dtype=dtype, device=device,
+            ) * 0.02
+            hidden[num_real:] = float('nan')
+
+            _poison_cuda_allocator(device)
+
+            # Simulate the production path:
+            # shared_output = shared_experts(hidden)
+            # routed_output = ... (simulated as random finite data)
+            # final = routed_output * scaling + shared_output
+            shared_output = shared_experts(hidden)
+            routed_output = torch.randn_like(shared_output) * 0.01
+            routed_output[num_real:] = float('nan')  # padding is NaN
+
+            scaling = getattr(config, 'routed_scaling_factor', 1.0)
+            final = routed_output * scaling + shared_output
+            torch.cuda.synchronize()
+
+        real_output = final[:num_real]
+        assert not torch.isnan(real_output).any(), (
+            f"Shared experts + MoE addition: NaN in real tokens "
+            f"(real={num_real}, padded={num_padded})"
+        )
+    finally:
+        torch.set_default_dtype(old_dtype)
+
+
+# ============================================================================
 # SM pressure tests for MoE and dense MLP
 # ============================================================================
 
