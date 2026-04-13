@@ -1807,6 +1807,224 @@ def test_moe_zero_token_experts_cudagraph_nan_padding(
 
 
 # ============================================================================
+# SM pressure tests for MoE and dense MLP
+# ============================================================================
+
+
+@pytest.mark.skipif(
+    not current_platform.has_device_capability(100),
+    reason="NVFP4 requires sm100+",
+)
+@pytest.mark.parametrize(
+    "num_real,num_padded",
+    [(1, 8), (5, 8), (13, 16)],
+    ids=["1to8", "5to8", "13to16"],
+)
+def test_nvfp4_moe_cudagraph_sm_pressure(
+    workspace_init, sm_pressure, num_real, num_padded,
+):
+    """NVFP4 MoE (router + CutlassExpertsFp4) under CUDA graph with
+    SM pressure. 1000 replays with background kernel contention."""
+    from tests.kernels.moe.utils import make_dummy_moe_config, make_test_weights
+    from vllm.config import ParallelConfig, VllmConfig
+    from vllm.model_executor.layers.fused_moe.all2all_utils import (
+        maybe_make_prepare_finalize,
+    )
+    from vllm.model_executor.layers.fused_moe.config import (
+        nvfp4_moe_quant_config,
+    )
+    from vllm.model_executor.layers.fused_moe.cutlass_moe import (
+        CutlassExpertsFp4,
+    )
+    from vllm.model_executor.layers.fused_moe.modular_kernel import (
+        FusedMoEKernel,
+        MoEActivation,
+    )
+
+    device = torch.device(f"{DEVICE_TYPE}:0")
+    E, topk, K, N = 8, 2, 1024, 512
+
+    (_, w1_q, w1_bs, w1_gs), (_, w2_q, w2_bs, w2_gs) = (
+        make_test_weights(E, N, K, in_dtype=torch.bfloat16,
+                          quant_dtype="nvfp4")
+    )
+    a1_gs = torch.ones((E,), device=device, dtype=torch.float32)
+    a2_gs = torch.ones((E,), device=device, dtype=torch.float32)
+    quant_config = nvfp4_moe_quant_config(
+        g1_alphas=(1 / w1_gs), g2_alphas=(1 / w2_gs),
+        a1_gscale=a1_gs, a2_gscale=a2_gs,
+        w1_scale=w1_bs, w2_scale=w2_bs,
+    )
+    moe_config = make_dummy_moe_config()
+    kernel = FusedMoEKernel(
+        maybe_make_prepare_finalize(
+            moe=moe_config, quant_config=quant_config,
+            allow_new_interface=True, use_monolithic=False,
+        ),
+        CutlassExpertsFp4(
+            moe_config=moe_config, quant_config=quant_config,
+        ),
+        inplace=False,
+    )
+
+    gate_weight = torch.randn(E, K, device=device,
+                               dtype=torch.bfloat16) * 0.02
+    hidden_states = torch.randn(
+        num_padded, K, device=device, dtype=torch.bfloat16) * 0.1
+    hidden_states[num_real:] = float('nan')
+
+    router_logits = hidden_states @ gate_weight.t()
+    routing_weights = torch.softmax(
+        router_logits, dim=-1, dtype=torch.float32)
+    topk_weights, topk_ids = torch.topk(routing_weights, topk, dim=-1)
+    topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
+    topk_ids = topk_ids.to(torch.int32)
+
+    apply_kwargs = dict(
+        hidden_states=hidden_states, w1=w1_q, w2=w2_q,
+        topk_weights=topk_weights, topk_ids=topk_ids,
+        global_num_experts=E, activation=MoEActivation.SILU,
+        apply_router_weight_on_input=False, expert_map=None,
+    )
+
+    vllm_cfg = VllmConfig(
+        parallel_config=ParallelConfig(pipeline_parallel_size=1))
+
+    _poison_cuda_allocator(device)
+
+    with set_current_vllm_config(vllm_cfg):
+        output = kernel.apply(**apply_kwargs)
+        torch.cuda.synchronize()
+
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            output = kernel.apply(**apply_kwargs)
+
+        saved_hidden = hidden_states[:num_real].clone()
+        saved_tw = topk_weights[:num_real].clone()
+        saved_ti = topk_ids[:num_real].clone()
+
+        for i in range(1000):
+            hidden_states.fill_(float('nan'))
+            topk_weights.fill_(float('nan'))
+            topk_ids.fill_(0)
+            output.fill_(float('nan'))
+            graph.replay()
+
+            hidden_states[:num_real] = saved_hidden
+            hidden_states[num_real:] = float('nan')
+            topk_weights[:num_real] = saved_tw
+            topk_ids[:num_real] = saved_ti
+            output.fill_(float('nan'))
+            graph.replay()
+
+            if i % 100 == 99:
+                torch.cuda.synchronize()
+                assert not torch.isnan(output[:num_real]).any(), (
+                    f"SM pressure NVFP4 MoE: NaN at iteration {i}")
+
+
+@pytest.mark.skipif(
+    not current_platform.has_device_capability(100),
+    reason="NVFP4 requires sm100+",
+)
+@pytest.mark.parametrize(
+    "num_real,num_padded",
+    [(1, 8), (5, 8), (13, 16)],
+    ids=["1to8", "5to8", "13to16"],
+)
+def test_nvfp4_dense_mlp_cudagraph_sm_pressure(
+    default_vllm_config, dist_init, sm_pressure, num_real, num_padded,
+):
+    """NVFP4 dense MLP under CUDA graph with SM pressure.
+    1000 replays with background kernel contention."""
+    from vllm.model_executor.layers.quantization.modelopt import (
+        ModelOptNvFp4Config,
+    )
+    from vllm.model_executor.models.deepseek_v2 import DeepseekV2MLP
+
+    device = torch.device(f"{DEVICE_TYPE}:0")
+    dtype = torch.bfloat16
+
+    vllm_config = create_vllm_config(
+        model_name="nvidia/DeepSeek-R1-0528-NVFP4-v2",
+        max_model_len=128, num_gpu_blocks=8192, dtype="bfloat16",
+    )
+    config = vllm_config.model_config.hf_config
+    quant_config = ModelOptNvFp4Config(
+        is_checkpoint_nvfp4_serialized=True,
+        kv_cache_quant_algo=None, exclude_modules=[],
+    )
+
+    old_dtype = torch.get_default_dtype()
+    torch.set_default_dtype(dtype)
+    try:
+        with set_current_vllm_config(vllm_config):
+            mlp = DeepseekV2MLP(
+                hidden_size=config.hidden_size,
+                intermediate_size=config.intermediate_size,
+                hidden_act=config.hidden_act,
+                quant_config=quant_config,
+                prefix="model.layers.0.mlp",
+            )
+            for name, param in mlp.named_parameters():
+                if param.dtype == torch.uint8:
+                    param.data.copy_(torch.randint(
+                        0, 256, param.shape, dtype=torch.uint8))
+                elif param.dtype == torch.float8_e4m3fn:
+                    param.data.copy_(torch.randint(
+                        1, 127, param.shape,
+                        dtype=torch.uint8).view(torch.float8_e4m3fn))
+                elif param.dtype == torch.float32:
+                    param.data.fill_(1.0)
+                elif param.is_floating_point():
+                    param.data.copy_(torch.randn_like(
+                        param, dtype=torch.float32).mul_(0.02).to(
+                            param.dtype))
+            mlp = mlp.to(device=device)
+            for module in mlp.modules():
+                if hasattr(module, 'quant_method') and hasattr(
+                    module.quant_method, 'process_weights_after_loading'
+                ):
+                    module.quant_method.process_weights_after_loading(
+                        module)
+
+            hidden = torch.randn(
+                num_padded, config.hidden_size, dtype=dtype,
+                device=device) * 0.02
+            hidden[num_real:] = float('nan')
+
+            _poison_cuda_allocator(device)
+
+            output = mlp(hidden)
+            torch.cuda.synchronize()
+
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                output = mlp(hidden)
+
+            saved_hidden = hidden[:num_real].clone()
+
+            for i in range(1000):
+                hidden.fill_(float('nan'))
+                output.fill_(float('nan'))
+                graph.replay()
+
+                hidden[:num_real] = saved_hidden
+                hidden[num_real:] = float('nan')
+                output.fill_(float('nan'))
+                graph.replay()
+
+                if i % 100 == 99:
+                    torch.cuda.synchronize()
+                    assert not torch.isnan(output[:num_real]).any(), (
+                        f"SM pressure NVFP4 dense MLP: NaN at "
+                        f"iteration {i}")
+    finally:
+        torch.set_default_dtype(old_dtype)
+
+
+# ============================================================================
 # Multi-GPU EP MoE: DeepEP LL + NVFP4 and FlashInfer NVLink
 # ============================================================================
 
