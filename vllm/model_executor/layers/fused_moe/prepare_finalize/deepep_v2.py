@@ -76,6 +76,7 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         self.use_fp8_dispatch = use_fp8_dispatch
         self.use_cudagraph = use_cudagraph
         self.dedup_topk = dedup_topk
+        self._dedup_neg_one: torch.Tensor | None = None
 
         # DBO microbatching: one handle slot per micro-batch.
         self.handles: list[deep_ep.EPHandle | None] = [None, None]
@@ -96,8 +97,8 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
     def topk_indices_dtype(self) -> torch.dtype | None:
         return torch.int64
 
-    @staticmethod
     def _dedup_topk(
+        self,
         topk_ids: torch.Tensor,
         topk_weights: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -109,8 +110,10 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         """
         topk_ids = topk_ids.clone()
         topk_weights = topk_weights.clone()
-        neg_one = torch.tensor(-1, dtype=topk_ids.dtype,
-                               device=topk_ids.device)
+        if self._dedup_neg_one is None:
+            self._dedup_neg_one = torch.tensor(
+                -1, dtype=topk_ids.dtype, device=topk_ids.device)
+        neg_one = self._dedup_neg_one
         K = topk_ids.size(1)
         for j in range(1, K):
             for i in range(j):
