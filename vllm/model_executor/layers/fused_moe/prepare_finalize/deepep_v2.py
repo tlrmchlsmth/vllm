@@ -77,10 +77,6 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         self.use_cudagraph = use_cudagraph
         self.dedup_topk = dedup_topk
         self._dedup_neg_one: torch.Tensor | None = None
-        if dedup_topk:
-            import logging
-            logging.getLogger(__name__).info(
-                "DeepEPV2: dedup_topk enabled (num_topk=%d)", num_topk)
 
         # DBO microbatching: one handle slot per micro-batch.
         self.handles: list[deep_ep.EPHandle | None] = [None, None]
