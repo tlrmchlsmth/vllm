@@ -337,6 +337,7 @@ class FusedMoE(PluggableLayer):
             routing_method=self.routing_method_type,
             # TODO: in_dtype == out_dtype?
             disable_inplace=disable_inplace() or shared_experts is not None,
+            has_hash_routing=self.hash_indices_table is not None,
         )
         if self.moe_config.use_mori_kernels:
             assert self.rocm_aiter_fmoe_enabled, (

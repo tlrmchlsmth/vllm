@@ -64,6 +64,7 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         num_topk: int,
         use_fp8_dispatch: bool = False,
         use_cudagraph: bool = False,
+        dedup_topk: bool = False,
     ):
         super().__init__()
         self.buffer = buffer
@@ -74,6 +75,7 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         self.num_topk = num_topk
         self.use_fp8_dispatch = use_fp8_dispatch
         self.use_cudagraph = use_cudagraph
+        self.dedup_topk = dedup_topk
 
         # DBO microbatching: one handle slot per micro-batch.
         self.handles: list[deep_ep.EPHandle | None] = [None, None]
@@ -93,6 +95,34 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
 
     def topk_indices_dtype(self) -> torch.dtype | None:
         return torch.int64
+
+    @staticmethod
+    def _dedup_topk(
+        topk_ids: torch.Tensor,
+        topk_weights: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Merge duplicate expert IDs per token (from hash-based MoE routing).
+
+        For each token, if two topk slots select the same expert, sum their
+        weights into the first occurrence and set the duplicate to -1 / 0.
+        All ops are unconditional torch.where so this is CUDA-graph safe.
+        """
+        topk_ids = topk_ids.clone()
+        topk_weights = topk_weights.clone()
+        neg_one = torch.tensor(-1, dtype=topk_ids.dtype,
+                               device=topk_ids.device)
+        K = topk_ids.size(1)
+        for j in range(1, K):
+            for i in range(j):
+                dup = (topk_ids[:, j] == topk_ids[:, i]) & (topk_ids[:, j] >= 0)
+                topk_weights[:, i] = torch.where(
+                    dup, topk_weights[:, i] + topk_weights[:, j],
+                    topk_weights[:, i])
+                topk_weights[:, j] = torch.where(
+                    dup, 0.0, topk_weights[:, j])
+                topk_ids[:, j] = torch.where(
+                    dup, neg_one, topk_ids[:, j])
+        return topk_ids, topk_weights
 
     def _do_dispatch(
         self,
@@ -274,6 +304,9 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
                 if quant_config.quant_dtype == "nvfp4"
                 else quant_config.a1_scale
             )
+
+        if self.dedup_topk:
+            topk_ids, topk_weights = self._dedup_topk(topk_ids, topk_weights)
 
         return self._do_dispatch(
             tokens=a1q,

@@ -1269,6 +1269,7 @@ class FusedMoEConfig:
     has_bias: bool = False
     is_act_and_mul: bool = True
     is_lora_enabled: bool = False
+    has_hash_routing: bool = False
 
     # This flag is used to disable the inplace optimization
     # in MoE kernels. If this flag is True then the kernel

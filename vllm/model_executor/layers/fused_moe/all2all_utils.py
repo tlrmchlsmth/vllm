@@ -221,6 +221,7 @@ def maybe_make_prepare_finalize(
             num_topk=moe.experts_per_token,
             use_fp8_dispatch=use_fp8_dispatch,
             use_cudagraph=use_cudagraph,
+            dedup_topk=moe.has_hash_routing,
         )
 
     elif moe.use_mori_kernels:
