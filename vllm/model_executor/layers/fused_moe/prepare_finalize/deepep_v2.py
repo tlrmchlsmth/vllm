@@ -110,7 +110,8 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         defer_input_quant: bool,
     ) -> Callable:
         if self.use_nvfp4_dispatch and token_scales is None:
-            tokens, token_scales = deep_ep.per_token_cast_to_nvfp4(
+            from deep_ep.utils.math import per_token_cast_to_nvfp4
+            tokens, token_scales = per_token_cast_to_nvfp4(
                 tokens, use_fp8_sf=True)
 
         has_scales = token_scales is not None
