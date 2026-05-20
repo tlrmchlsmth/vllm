@@ -283,7 +283,7 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
                     quant_dtype=quant_config.quant_dtype,
                     per_act_token_quant=False,
                     block_shape=quant_config.block_shape,
-                    is_scale_swizzled=quant_config.is_scale_swizzled,
+                    is_scale_swizzled=getattr(quant_config, 'is_scale_swizzled', quant_config.is_nvfp4_scale_swizzled),
                 )
 
         return (
