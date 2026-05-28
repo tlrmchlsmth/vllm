@@ -59,7 +59,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.interfaces import SupportsPP
+from vllm.model_executor.models.interfaces import MixtureOfExperts, SupportsPP
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
@@ -738,10 +738,25 @@ class DeepseekV4MoE(nn.Module):
                 "moe backend."
             )
 
+        parallel_config = vllm_config.parallel_config
+        eplb_config = parallel_config.eplb_config
+        self.enable_eplb = parallel_config.enable_eplb
+        if self.use_mega_moe and self.enable_eplb:
+            raise NotImplementedError(
+                "EPLB is not yet supported with DeepSeek V4 MegaMoE. "
+                "Use the FusedMoE backend instead."
+            )
+        self.n_redundant_experts = eplb_config.num_redundant_experts
+
         self.routed_scaling_factor = getattr(config, "routed_scaling_factor", 1.0)
         self.hidden_size = config.hidden_size
 
         self.n_routed_experts = config.n_routed_experts
+        self.n_logical_experts = self.n_routed_experts
+        self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
+        ep_size = get_ep_group().world_size
+        self.n_local_physical_experts = self.n_physical_experts // ep_size
+        self.n_shared_experts = config.n_shared_experts or 0
         self.n_activated_experts = config.num_experts_per_tok
         self.moe_intermediate_size = config.moe_intermediate_size
         self.swiglu_limit = config.swiglu_limit
@@ -863,6 +878,8 @@ class DeepseekV4MoE(nn.Module):
             hash_indices_table=self.norm_gate.tid2eid,
             swiglu_limit=self.swiglu_limit,
             router_logits_dtype=torch.float32,
+            enable_eplb=self.enable_eplb,
+            num_redundant_experts=self.n_redundant_experts,
         )
 
     def forward(
@@ -1640,7 +1657,44 @@ def _make_deepseek_v4_weights_mapper(expert_dtype: str) -> WeightsMapper:
     )
 
 
-class DeepseekV4ForCausalLM(nn.Module, SupportsPP):
+class DeepseekV4MixtureOfExperts(MixtureOfExperts):
+    moe_mlp_layers: list[DeepseekV4MoE]
+
+    def extract_moe_parameters(self, example_moe: DeepseekV4MoE | None):
+        if example_moe is None:
+            self.num_moe_layers = 0
+            self.num_expert_groups = 0
+            self.num_logical_experts = 0
+            self.num_physical_experts = 0
+            self.num_local_physical_experts = 0
+            self.num_routed_experts = 0
+            self.num_shared_experts = 0
+            self.num_redundant_experts = 0
+        else:
+            self.num_logical_experts = example_moe.n_logical_experts
+            self.num_physical_experts = example_moe.n_physical_experts
+            self.num_local_physical_experts = example_moe.n_local_physical_experts
+            self.num_routed_experts = example_moe.n_routed_experts
+            self.num_shared_experts = example_moe.n_shared_experts
+            self.num_redundant_experts = example_moe.n_redundant_experts
+
+    def update_physical_experts_metadata(
+        self,
+        num_physical_experts: int,
+        num_local_physical_experts: int,
+    ) -> None:
+        assert self.num_local_physical_experts == num_local_physical_experts
+        self.num_physical_experts = num_physical_experts
+        self.num_local_physical_experts = num_local_physical_experts
+        self.num_redundant_experts = num_physical_experts - self.num_logical_experts
+        for moe in self.moe_mlp_layers:
+            moe.n_local_physical_experts = num_local_physical_experts
+            moe.n_physical_experts = num_physical_experts
+            moe.n_redundant_experts = self.num_redundant_experts
+            moe.experts.update_expert_map()
+
+
+class DeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV4MixtureOfExperts):
     model_cls = DeepseekV4Model
 
     # Default mapper assumes the original FP4-expert checkpoint layout.
@@ -1671,6 +1725,24 @@ class DeepseekV4ForCausalLM(nn.Module, SupportsPP):
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
         )
+
+        self.num_moe_layers = config.num_hidden_layers
+        self.set_moe_parameters()
+
+    def set_moe_parameters(self):
+        self.expert_weights = []
+        self.num_expert_groups = 1
+        self.moe_layers = []
+        self.moe_mlp_layers = []
+        example_moe = None
+        for layer in self.model.layers:
+            if isinstance(layer, PPMissingLayer):
+                continue
+            assert isinstance(layer, DeepseekV4DecoderLayer)
+            example_moe = layer.ffn
+            self.moe_mlp_layers.append(layer.ffn)
+            self.moe_layers.append(layer.ffn.experts)
+        self.extract_moe_parameters(example_moe)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
