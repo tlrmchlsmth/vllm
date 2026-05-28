@@ -445,6 +445,29 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             vllm_config, labelnames, per_engine_labelvalues
         )
 
+        _deepep_buckets = [1e-5, 2.5e-5, 5e-5, 7.5e-5, 1e-4, 2.5e-4, 5e-4,
+                           1e-3, 2.5e-3, 5e-3, 1e-2, 2.5e-2, 5e-2, 1e-1]
+        _h = self._histogram_cls(
+            name="vllm:deepep_dispatch_duration_seconds",
+            documentation="DeepEP all-to-all dispatch latency.",
+            labelnames=labelnames, buckets=_deepep_buckets)
+        self.deepep_dispatch_histogram = create_metric_per_engine(
+            _h, per_engine_labelvalues)
+        _h = self._histogram_cls(
+            name="vllm:deepep_combine_duration_seconds",
+            documentation="DeepEP all-to-all combine latency.",
+            labelnames=labelnames, buckets=_deepep_buckets)
+        self.deepep_combine_histogram = create_metric_per_engine(
+            _h, per_engine_labelvalues)
+        _dp_buckets = [1e-5, 5e-5, 1e-4, 2.5e-4, 5e-4, 1e-3, 2.5e-3,
+                       5e-3, 1e-2, 2.5e-2, 5e-2, 1e-1, 2.5e-1, 5e-1]
+        _h = self._histogram_cls(
+            name="vllm:dp_sync_duration_seconds",
+            documentation="DP rank synchronization (gloo allreduce) latency.",
+            labelnames=labelnames, buckets=_dp_buckets)
+        self.dp_sync_histogram = create_metric_per_engine(
+            _h, per_engine_labelvalues)
+
         #
         # Scheduler state
         #
@@ -1107,6 +1130,16 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
 
             if scheduler_stats.perf_stats is not None:
                 self.perf_metrics_prom.observe(scheduler_stats.perf_stats, engine_idx)
+
+            if scheduler_stats.deepep_stats is not None:
+                for v in scheduler_stats.deepep_stats.get("dispatch_duration", []):
+                    self.deepep_dispatch_histogram[engine_idx].observe(v)
+                for v in scheduler_stats.deepep_stats.get("combine_duration", []):
+                    self.deepep_combine_histogram[engine_idx].observe(v)
+
+            if scheduler_stats.dp_sync_stats is not None:
+                for v in scheduler_stats.dp_sync_stats:
+                    self.dp_sync_histogram[engine_idx].observe(v)
 
             if (
                 self.kv_cache_metrics_enabled

@@ -12,7 +12,22 @@ from vllm.v1.worker.ubatch_utils import (
     is_last_ubatch_empty,
 )
 
+import threading
+import time
+
 logger = init_logger(__name__)
+
+_dp_sync_stats_lock = threading.Lock()
+_dp_sync_stats: list[float] = []
+
+
+def get_dp_sync_stats() -> list[float] | None:
+    with _dp_sync_stats_lock:
+        if not _dp_sync_stats:
+            return None
+        result = list(_dp_sync_stats)
+        _dp_sync_stats.clear()
+        return result
 
 
 def _get_device_and_group(parallel_config: ParallelConfig):
@@ -50,7 +65,11 @@ def _run_ar(
     tensor_cpu[2][dp_rank] = 1 if should_ubatch else 0
     tensor_cpu[3][dp_rank] = cudagraph_mode
     tensor = tensor_cpu.to(device, non_blocking=True)
+    t0 = time.monotonic()
     dist.all_reduce(tensor, group=group)
+    elapsed = time.monotonic() - t0
+    with _dp_sync_stats_lock:
+        _dp_sync_stats.append(elapsed)
     return tensor
 
 

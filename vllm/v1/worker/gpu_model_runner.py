@@ -162,6 +162,22 @@ from vllm.v1.outputs import (
     SamplerOutput,
     make_empty_encoder_model_runner_output,
 )
+
+def _get_deepep_stats():
+    try:
+        from vllm.model_executor.layers.fused_moe.prepare_finalize.deepep_v2 import get_deepep_stats
+        return get_deepep_stats()
+    except Exception:
+        return None
+
+
+def _get_dp_sync_stats():
+    try:
+        from vllm.v1.worker.dp_utils import get_dp_sync_stats
+        return get_dp_sync_stats()
+    except Exception:
+        return None
+
 from vllm.v1.pool.metadata import PoolingMetadata, PoolingStates
 from vllm.v1.sample.logits_processor import LogitsProcessors, build_logitsprocs
 from vllm.v1.sample.logits_processor.interface import LogitsProcessor
@@ -4462,6 +4478,8 @@ class GPUModelRunner(
                 num_nans_in_logits=num_nans_in_logits,
                 cudagraph_stats=cudagraph_stats,
                 routed_experts=None,
+                deepep_stats=_get_deepep_stats(),
+                dp_sync_stats=_get_dp_sync_stats(),
             )
 
         if not self.use_async_scheduling:

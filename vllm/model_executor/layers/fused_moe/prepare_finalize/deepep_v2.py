@@ -17,6 +17,57 @@ from vllm.v1.worker.ubatching import (
     dbo_current_ubatch_id,
 )
 
+import os
+import threading
+
+_deepep_stats_lock = threading.Lock()
+_deepep_stats: dict[str, list[float]] = {
+    "dispatch_duration": [],
+    "combine_duration": [],
+}
+_deepep_events: dict[str, tuple] = {}
+_deepep_collector_running = False
+
+
+def get_deepep_stats() -> "dict[str, list[float]] | None":
+    if _deepep_events and not _deepep_collector_running:
+        _start_deepep_collector()
+    with _deepep_stats_lock:
+        if (not _deepep_stats["dispatch_duration"]
+                and not _deepep_stats["combine_duration"]):
+            return None
+        result = {k: list(v) for k, v in _deepep_stats.items()}
+        _deepep_stats["dispatch_duration"].clear()
+        _deepep_stats["combine_duration"].clear()
+        return result
+
+
+def _start_deepep_collector():
+    global _deepep_collector_running
+    if _deepep_collector_running:
+        return
+    _deepep_collector_running = True
+
+    import time
+
+    def _loop():
+        while True:
+            time.sleep(0.5)
+            for name, (start_evt, end_evt) in _deepep_events.items():
+                try:
+                    if not start_evt.query() or not end_evt.query():
+                        continue
+                    elapsed_ms = start_evt.elapsed_time(end_evt)
+                    if elapsed_ms > 0:
+                        with _deepep_stats_lock:
+                            _deepep_stats[name].append(elapsed_ms / 1000.0)
+                except (RuntimeError, ValueError):
+                    pass
+
+    t = threading.Thread(target=_loop, daemon=True,
+                         name="deepep-stats-collector")
+    t.start()
+
 
 class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
     """
@@ -80,6 +131,17 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
 
         # DBO microbatching: one handle slot per micro-batch.
         self.handles: list[deep_ep.EPHandle | None] = [None, None]
+
+        self._timing = os.environ.get("DEEPEP_METRICS_ENABLED") == "1"
+        if self._timing:
+            self._dispatch_start = torch.cuda.Event(enable_timing=True)
+            self._dispatch_end = torch.cuda.Event(enable_timing=True)
+            self._combine_start = torch.cuda.Event(enable_timing=True)
+            self._combine_end = torch.cuda.Event(enable_timing=True)
+            _deepep_events["dispatch_duration"] = (
+                self._dispatch_start, self._dispatch_end)
+            _deepep_events["combine_duration"] = (
+                self._combine_start, self._combine_end)
 
     def num_dispatchers(self) -> int:
         return self.num_dispatchers_
@@ -149,6 +211,9 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         do_expand = not self.use_cudagraph
         do_cpu_sync = not self.use_cudagraph
 
+        if self._timing:
+            self._dispatch_start.record()
+
         (
             recv_x,
             recv_topk_idx,
@@ -164,6 +229,9 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             do_cpu_sync=do_cpu_sync,
             async_with_compute_stream=False,
         )
+
+        if self._timing:
+            self._dispatch_end.record()
 
         a2a_idx = dbo_current_ubatch_id()
         self.handles[a2a_idx] = handle
@@ -376,12 +444,18 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
                 f"got {fused_expert_output.dtype}"
             )
 
+        if self._timing:
+            self._combine_start.record()
+
         combined_x, _, event = self.buffer.combine(
             x=fused_expert_output,
             handle=handle,
             topk_weights=None,
             async_with_compute_stream=False,
         )
+
+        if self._timing:
+            self._combine_end.record()
 
         output.copy_(combined_x, non_blocking=True)
         return None

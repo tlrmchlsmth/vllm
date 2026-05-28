@@ -197,6 +197,9 @@ class SchedulerStats:
 
     perf_stats: PerfStats | None = None
 
+    deepep_stats: dict[str, list[float]] | None = None
+    dp_sync_stats: list[float] | None = None
+
 
 @dataclass
 class RequestStateStats:
