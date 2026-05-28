@@ -259,7 +259,7 @@ class Config:
 
     def needs_mori(self):
         info = prepare_finalize_info(self.prepare_finalize_type)
-        return info.backend == "mori"
+        return info.backend in ("mori_high_throughput", "mori_low_latency")
 
     def all2all_backend(self):
         info = prepare_finalize_info(self.prepare_finalize_type)
@@ -659,7 +659,6 @@ def make_modular_kernel(
     modular_kernel = mk.FusedMoEKernel(
         prepare_finalize=prepare_finalize,
         fused_experts=fused_experts,
-        inplace=False,
     )
 
     return modular_kernel

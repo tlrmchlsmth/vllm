@@ -50,9 +50,6 @@ from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
     UnquantizedFusedMoEMethod,
 )
-from vllm.model_executor.layers.fused_moe.utils import (
-    disable_inplace,
-)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
 )
@@ -335,6 +332,7 @@ class FusedMoE(PluggableLayer):
             activation=self.activation,
             device=vllm_config.device_config.device,
             routing_method=self.routing_method_type,
+            swiglu_limit=swiglu_limit,
             # TODO: in_dtype == out_dtype?
             disable_inplace=disable_inplace() or shared_experts is not None,
             has_hash_routing=self.hash_indices_table is not None,
@@ -410,7 +408,7 @@ class FusedMoE(PluggableLayer):
         }
         # need full intermediate size pre-sharding for WNA16 act order
         if self.quant_method.__class__.__name__ in (
-            "GPTQMarlinMoEMethod",
+            "AutoGPTQMoEMethod",
             "CompressedTensorsWNA16MarlinMoEMethod",
             "CompressedTensorsWNA16MoEMethod",
         ):
@@ -473,7 +471,6 @@ class FusedMoE(PluggableLayer):
                     self,
                     self.base_quant_method,
                     prepare_finalize,
-                    inplace=not self.moe_config.disable_inplace,
                 )
             )
 
