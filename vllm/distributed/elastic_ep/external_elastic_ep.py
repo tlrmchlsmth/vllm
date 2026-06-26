@@ -3,6 +3,7 @@
 
 import asyncio
 import contextlib
+import sys
 from collections.abc import Sequence
 from threading import Event, Thread
 from typing import TYPE_CHECKING, Any
@@ -78,6 +79,13 @@ class ExternalElasticEPScaleUpHandshakeServer:
         self._stop_event.set()
         if self._thread.is_alive():
             self._thread.join(timeout=5)
+        if self._error is not None:
+            raise self._error
+
+    def raise_if_failed(self) -> None:
+        # The server runs on its own thread; callers poll this so a failed
+        # new-rank handshake surfaces fast instead of hanging to the
+        # notification timeout.
         if self._error is not None:
             raise self._error
 
@@ -377,6 +385,7 @@ class ExternalElasticEPScaleCoordinator:
         notification_type: EEPNotificationType,
         source_ranks: Sequence[int],
         timeout_s: float = 300,
+        handshake_server: ExternalElasticEPScaleUpHandshakeServer | None = None,
     ) -> None:
         """Wait for source ranks to publish a specific scale notification.
         Once all are ready, forward the notification to existing engines."""
@@ -389,6 +398,8 @@ class ExternalElasticEPScaleCoordinator:
 
         backoff_step = 0
         while True:
+            if handshake_server is not None:
+                handshake_server.raise_if_failed()
             error = self._get_error(control_store)
             if error is not None:
                 raise RuntimeError(
@@ -528,12 +539,14 @@ class ExternalElasticEPScaleCoordinator:
                     reconfig_store,
                     EEPNotificationType.NEW_CORE_ENGINES_INIT_READY,
                     new_ranks,
+                    handshake_server=handshake_server,
                 )
                 await self._wait_for_notification(
                     control_store,
                     reconfig_store,
                     EEPNotificationType.NEW_CORE_ENGINES_WEIGHTS_INIT_READY,
                     new_ranks,
+                    handshake_server=handshake_server,
                 )
 
             await self._wait_for_local_reconfig_finished(
@@ -556,8 +569,13 @@ class ExternalElasticEPScaleCoordinator:
             raise
         finally:
             if handshake_server is not None:
-                with contextlib.suppress(Exception):
+                if sys.exc_info()[0] is None:
+                    # Happy path: surface a late server-thread error.
                     handshake_server.stop()
+                else:
+                    # Already unwinding; don't let stop() mask the real error.
+                    with contextlib.suppress(Exception):
+                        handshake_server.stop()
 
     async def process_engine_core_notification(
         self, notification_data: tuple[str, int]
