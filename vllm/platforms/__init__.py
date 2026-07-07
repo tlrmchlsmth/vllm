@@ -199,6 +199,27 @@ def cpu_platform_plugin() -> str | None:
     return "vllm.platforms.cpu.CpuPlatform"
 
 
+def utility_platform_plugin() -> str | None:
+    if envs.VLLM_TARGET_DEVICE == "empty":
+        logger.debug(
+            "Confirmed utility platform is available because "
+            "VLLM_TARGET_DEVICE=empty."
+        )
+        return "vllm.platforms.utility.UtilityPlatform"
+
+    try:
+        if vllm_version_matches_substr("empty"):
+            logger.debug(
+                "Confirmed utility platform is available because "
+                "vLLM is built without a device target."
+            )
+            return "vllm.platforms.utility.UtilityPlatform"
+    except Exception as e:
+        logger.debug("Utility platform is not available because: %s", str(e))
+
+    return None
+
+
 builtin_platform_plugins = {
     "tpu": tpu_platform_plugin,
     "cuda": cuda_platform_plugin,
@@ -209,6 +230,11 @@ builtin_platform_plugins = {
 
 
 def resolve_current_platform_cls_qualname() -> str:
+    utility_platform_cls_qualname = utility_platform_plugin()
+    if utility_platform_cls_qualname is not None:
+        logger.debug("Automatically detected platform utility.")
+        return utility_platform_cls_qualname
+
     platform_plugins = load_plugins_by_group(PLATFORM_PLUGINS_GROUP)
 
     activated_plugins = []

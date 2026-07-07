@@ -78,8 +78,10 @@ def has_precompiled_rust_extensions() -> bool:
     return not get_missing_precompiled_rust_extension_modules()
 
 
-if sys.platform.startswith("darwin") and VLLM_TARGET_DEVICE != "cpu":
-    logger.warning("VLLM_TARGET_DEVICE automatically set to `cpu` due to macOS")
+if sys.platform.startswith("darwin") and VLLM_TARGET_DEVICE not in ("cpu", "empty"):
+    logger.warning(
+        "VLLM_TARGET_DEVICE automatically set to `cpu` due to macOS"
+    )
     VLLM_TARGET_DEVICE = "cpu"
 elif not (sys.platform.startswith("linux") or sys.platform.startswith("darwin")):
     logger.warning(
@@ -1233,6 +1235,16 @@ rust_extensions = rust_build.rust_extensions(
     optional=not should_require_rust_frontend()
 )
 
+BENCH_REQUIREMENTS = [
+    "pandas",
+    "matplotlib",
+    "seaborn",
+    "datasets",
+    "scipy",
+    "plotly",
+]
+UTILS_REQUIREMENTS = [*BENCH_REQUIREMENTS]
+
 setup(
     # static metadata should rather go in pyproject.toml
     version=get_vllm_version(),
@@ -1242,7 +1254,8 @@ setup(
     extras_require={
         # AMD Zen CPU optimizations via zentorch
         "zen": ["zentorch==2.11.0.0"],
-        "bench": ["pandas", "matplotlib", "seaborn", "datasets", "scipy", "plotly"],
+        "bench": BENCH_REQUIREMENTS,
+        "utils": UTILS_REQUIREMENTS,
         "tensorizer": ["tensorizer==2.10.1"],
         "fastsafetensors": ["fastsafetensors >= 0.3.2"],
         "instanttensor": ["instanttensor >= 0.1.5"],

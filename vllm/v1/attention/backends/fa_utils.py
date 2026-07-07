@@ -15,7 +15,18 @@ logger = init_logger(__name__)
 # consistent behavior (similar to IS_AITER_FOUND in _aiter_ops.py).
 _ROCM_FLASH_ATTN_AVAILABLE = False
 
-if current_platform.is_cuda():
+if getattr(current_platform, "is_utility_platform", lambda: False)():
+
+    def reshape_and_cache_flash(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("The utility platform cannot execute attention kernels.")
+
+    def flash_attn_varlen_func(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("The utility platform cannot execute attention kernels.")
+
+    def get_scheduler_metadata(*args: Any, **kwargs: Any) -> None:
+        return None
+
+elif current_platform.is_cuda():
     from vllm._custom_ops import reshape_and_cache_flash
     from vllm.vllm_flash_attn import (  # type: ignore[attr-defined]
         flash_attn_varlen_func,
@@ -59,6 +70,11 @@ def get_flash_attn_version(
     head_size_v: int | None = None,
     has_sinks: bool = False,
 ) -> int | None:
+    if getattr(current_platform, "is_utility_platform", lambda: False)():
+        device_capability = current_platform.get_device_capability()
+        if device_capability is not None and device_capability.major >= 9:
+            return 3
+        return 2
     if current_platform.is_xpu():
         return 2
     if current_platform.is_rocm():

@@ -23,6 +23,10 @@ from vllm.utils.collection_utils import LazyDict
 logger = init_logger(__name__)
 
 
+def _use_native_for_utility_platform() -> bool:
+    return getattr(current_platform, "is_utility_platform", lambda: False)()
+
+
 @triton.jit
 def _swiglustep_and_mul_kernel(
     o_ptr,
@@ -93,7 +97,9 @@ class FatreluAndMul(CustomOp):
     def __init__(self, threshold: float = 0.0):
         super().__init__()
         self.threshold = threshold
-        if current_platform.is_cuda_alike():
+        if _use_native_for_utility_platform():
+            self._forward_method = self.forward_native
+        elif current_platform.is_cuda_alike():
             self.op = torch.ops._C.fatrelu_and_mul
         elif current_platform.is_cpu():
             self._forward_method = self.forward_native
@@ -129,7 +135,9 @@ class SiluAndMul(CustomOp):
 
     def __init__(self, *, compile_native: bool = True):
         super().__init__(compile_native=compile_native)
-        if current_platform.is_cuda_alike() or current_platform.is_xpu():
+        if _use_native_for_utility_platform():
+            self._forward_method = self.forward_native
+        elif current_platform.is_cuda_alike() or current_platform.is_xpu():
             self.op = torch.ops._C.silu_and_mul
         elif current_platform.is_cpu():
             self._forward_method = self.forward_native
@@ -180,7 +188,11 @@ class SiluAndMulWithClamp(CustomOp):
         self.swiglu_limit = float(swiglu_limit)
         self.alpha = float(alpha)
         self.beta = float(beta)
-        if current_platform.is_rocm() or current_platform.is_xpu():
+        if (
+            _use_native_for_utility_platform()
+            or current_platform.is_rocm()
+            or current_platform.is_xpu()
+        ):
             self._forward_method = self.forward_native
         elif current_platform.is_cuda_alike():
             self.op = torch.ops._C.silu_and_mul_with_clamp
@@ -226,7 +238,9 @@ class MulAndSilu(CustomOp):
 
     def __init__(self):
         super().__init__()
-        if current_platform.is_cuda_alike() or current_platform.is_xpu():
+        if _use_native_for_utility_platform():
+            self._forward_method = self.forward_native
+        elif current_platform.is_cuda_alike() or current_platform.is_xpu():
             self.op = torch.ops._C.mul_and_silu
         elif current_platform.is_cpu():
             self._forward_method = self.forward_native
@@ -353,7 +367,9 @@ class GeluAndMul(CustomOp):
         self.approximate = approximate
         if approximate not in ("none", "tanh"):
             raise ValueError(f"Unknown approximate mode: {approximate}")
-        if (
+        if _use_native_for_utility_platform():
+            self._forward_method = self.forward_native
+        elif (
             current_platform.is_cuda_alike()
             or current_platform.is_cpu()
             or current_platform.is_xpu()
@@ -469,7 +485,9 @@ class NewGELU(CustomOp):
 
     def __init__(self):
         super().__init__()
-        if (
+        if _use_native_for_utility_platform():
+            self._forward_method = self.forward_native
+        elif (
             current_platform.is_cuda_alike()
             or current_platform.is_cpu()
             or current_platform.is_xpu()
@@ -497,7 +515,9 @@ class FastGELU(CustomOp):
 
     def __init__(self):
         super().__init__()
-        if (
+        if _use_native_for_utility_platform():
+            self._forward_method = self.forward_native
+        elif (
             current_platform.is_cuda_alike()
             or current_platform.is_cpu()
             or current_platform.is_xpu()
@@ -525,7 +545,9 @@ class QuickGELU(CustomOp):
 
     def __init__(self):
         super().__init__()
-        if (
+        if _use_native_for_utility_platform():
+            self._forward_method = self.forward_native
+        elif (
             current_platform.is_cuda_alike()
             or current_platform.is_cpu()
             or current_platform.is_xpu()
