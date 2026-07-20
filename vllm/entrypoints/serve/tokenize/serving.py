@@ -6,6 +6,7 @@ from typing import Any, Final
 from fastapi import Request
 
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.models.serving import (
     OpenAIModelRegistry,
@@ -68,28 +69,40 @@ class ServingTokenization(BaseServing):
         lora_request = self._maybe_get_adapters(request)
 
         if isinstance(request, TokenizeChatRequest):
-            tool_dicts = (
-                None
-                if request.tools is None
-                else [tool.model_dump() for tool in request.tools]
-            )
-            error_check_ret = self.online_renderer.validate_chat_template(
-                request_chat_template=request.chat_template,
-                chat_template_kwargs=request.chat_template_kwargs,
-                trust_request_chat_template=self.trust_request_chat_template,
-            )
-            if error_check_ret is not None:
-                return error_check_ret
+            if self.online_renderer.use_harmony:
+                chat_request = ChatCompletionRequest.model_validate(
+                    request.model_dump(include=set(ChatCompletionRequest.model_fields))
+                )
+                render_result = await self.online_renderer.render_chat(
+                    chat_request,
+                    skip_mm_cache=True,
+                )
+                if isinstance(render_result, ErrorResponse):
+                    return render_result
+                _, engine_inputs = render_result
+            else:
+                tool_dicts = (
+                    None
+                    if request.tools is None
+                    else [tool.model_dump() for tool in request.tools]
+                )
+                error_check_ret = self.online_renderer.validate_chat_template(
+                    request_chat_template=request.chat_template,
+                    chat_template_kwargs=request.chat_template_kwargs,
+                    trust_request_chat_template=self.trust_request_chat_template,
+                )
+                if error_check_ret is not None:
+                    return error_check_ret
 
-            _, engine_inputs = await self.online_renderer.preprocess_chat(
-                request,
-                request.messages,
-                default_template=self.chat_template,
-                default_template_content_format=self.chat_template_content_format,
-                default_template_kwargs=self.default_chat_template_kwargs,
-                tool_dicts=tool_dicts,
-                skip_mm_cache=True,
-            )
+                _, engine_inputs = await self.online_renderer.preprocess_chat(
+                    request,
+                    request.messages,
+                    default_template=self.chat_template,
+                    default_template_content_format=self.chat_template_content_format,
+                    default_template_kwargs=self.default_chat_template_kwargs,
+                    tool_dicts=tool_dicts,
+                    skip_mm_cache=True,
+                )
         else:
             engine_inputs = await self.online_renderer.preprocess_completion(
                 request,

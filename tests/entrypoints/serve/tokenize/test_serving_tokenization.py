@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from vllm.config.multimodal import MultiModalConfig
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.tokenize.protocol import (
@@ -106,6 +107,51 @@ async def test_tokenize_chat_skips_mm_cache_for_renderer_only_path():
         serving.online_renderer.preprocess_chat.call_args.kwargs["skip_mm_cache"]
         is True
     )
+
+
+@pytest.mark.asyncio
+async def test_tokenize_chat_uses_chat_completion_rendering_for_harmony():
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.errored = False
+    mock_engine.model_config = MockModelConfig()
+    mock_engine.model_config.hf_config = MockHFConfig(model_type="gpt_oss")
+    mock_engine.input_processor = MagicMock()
+    mock_engine.renderer = MagicMock()
+
+    serving = _build_serving_tokenization(mock_engine)
+    serving.online_renderer.render_chat = AsyncMock(
+        return_value=(
+            [{"role": "user", "content": "Test"}],
+            [{"prompt_token_ids": [1, 2, 3]}],
+        )
+    )
+    messages = [
+        {"role": "system", "content": "Use the available tools."},
+        {"role": "user", "content": "What is my PTO balance?"},
+    ]
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_pto_balance",
+                "description": "Get the user's PTO balance.",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+    ]
+    request = TokenizeChatRequest(
+        model=MODEL_NAME,
+        messages=messages,
+        tools=tools,
+    )
+    response = await serving.create_tokenize(request, MagicMock(headers={}))
+
+    assert response.tokens == [1, 2, 3]
+    harmony_request = serving.online_renderer.render_chat.call_args.args[0]
+    assert isinstance(harmony_request, ChatCompletionRequest)
+    assert harmony_request.messages == request.messages
+    assert harmony_request.tools == request.tools
+    assert serving.online_renderer.render_chat.call_args.kwargs["skip_mm_cache"] is True
 
 
 @pytest.mark.asyncio
