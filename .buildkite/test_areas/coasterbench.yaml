@@ -25,4 +25,6 @@ steps:
   - docker rm cbgame
   - export COASTERBENCH_REPO=/coasterbench
   - export COASTERBENCH_CLI=/usr/local/bin/openrct2-cli
-  - pytest -s -v evals/coasterbench/test_coasterbench_protocol.py
+  # Keep the run directory (per-round program/report/usage JSON) as a build
+  # artifact even when the test fails — it is the debugging trajectory.
+  - pytest -s -v evals/coasterbench/test_coasterbench_protocol.py; status=$$?; buildkite-agent artifact upload "/coasterbench/evals/runs/**/*.json" || true; exit $$status
