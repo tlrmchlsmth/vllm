@@ -32,7 +32,7 @@ from tests.utils import RemoteOpenAIServer
 MODEL = os.environ.get("COASTERBENCH_MODEL", "Qwen/Qwen2.5-7B-Instruct")
 ROUNDS = int(os.environ.get("COASTERBENCH_ROUNDS", "2"))
 SERVER_ARGS = [
-    "--max-model-len", "16384",
+    "--max-model-len", "32768",
     "--enable-auto-tool-choice",
     "--tool-call-parser", os.environ.get("COASTERBENCH_TOOL_PARSER", "hermes"),
 ]
