@@ -1,0 +1,28 @@
+group: CoasterBench
+depends_on:
+  - image-build
+steps:
+- label: CoasterBench Agentic Tool-Calling (1xA100)
+  key: coasterbench-protocol-1xa100
+  device: a100
+  optional: true
+  num_devices: 1
+  timeout_in_minutes: 60
+  dind: true
+  source_file_dependencies:
+  - vllm/entrypoints/openai/tool_parsers/
+  - vllm/entrypoints/openai/serving_chat.py
+  - vllm/v1/structured_output/
+  - tests/evals/coasterbench/
+  commands:
+  # The game is CPU-only and asset-free; binary + data come from the pinned
+  # CoasterBench image, the driver from a pinned checkout of the repo.
+  - export COASTERBENCH_IMAGE=quay.io/tms/coasterbench-game:linux-support
+  - git clone --depth 1 -b linux-support https://github.com/tlrmchlsmth/CoasterBench /coasterbench
+  - docker create --name cbgame $$COASTERBENCH_IMAGE
+  - docker cp cbgame:/usr/bin/openrct2-cli /usr/local/bin/openrct2-cli
+  - docker cp cbgame:/usr/share/openrct2 /usr/share/openrct2
+  - docker rm cbgame
+  - export COASTERBENCH_REPO=/coasterbench
+  - export COASTERBENCH_CLI=/usr/local/bin/openrct2-cli
+  - pytest -s -v evals/coasterbench/test_coasterbench_protocol.py
