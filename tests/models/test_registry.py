@@ -6,6 +6,8 @@ import warnings
 import pytest
 import torch.cuda
 
+from vllm.compilation.wrapper import TorchCompileWithNoGuardsWrapper
+
 from vllm.model_executor.models import (
     is_pooling_model,
     is_text_generation_model,
@@ -164,6 +166,16 @@ def test_lazy_modelinfo_package_hash_includes_submodules(tmp_path):
     second_hash = _LazyRegisteredModel._get_modelinfo_module_hash(init_file)
 
     assert first_hash != second_hash
+
+
+def test_gpt_oss_uses_flat_model_without_fullgraph_compile():
+    from vllm.models.gpt_oss.model import GptOssModel
+
+    model_cls = ModelRegistry._try_load_model_cls("GptOssForCausalLM")
+
+    assert model_cls is not None
+    assert model_cls.__module__ == "vllm.models.gpt_oss.model"
+    assert TorchCompileWithNoGuardsWrapper not in GptOssModel.__mro__
 
 
 def test_hf_registry_coverage():

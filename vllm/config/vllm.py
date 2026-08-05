@@ -1234,6 +1234,7 @@ class VllmConfig:
                 in (
                     "DeepseekV4ForCausalLM",
                     "DeepSeekV4MTPModel",
+                    "GptOssForCausalLM",
                     "InklingForCausalLM",
                     "InklingForConditionalGeneration",
                     "KimiK3ForConditionalGeneration",
