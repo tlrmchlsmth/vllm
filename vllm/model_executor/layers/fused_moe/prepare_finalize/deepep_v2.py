@@ -63,9 +63,12 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         num_experts: int,
         num_topk: int,
         use_fp8_dispatch: bool = False,
+        use_nvfp4_dispatch: bool = False,
         use_cudagraph: bool = False,
     ):
         super().__init__()
+        assert not (use_fp8_dispatch and use_nvfp4_dispatch), \
+            "Cannot use both FP8 and NVFP4 dispatch simultaneously"
         self.buffer = buffer
         self.num_dispatchers_ = num_dispatchers
         self.dp_size = dp_size
@@ -73,6 +76,7 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         self.num_experts = num_experts
         self.num_topk = num_topk
         self.use_fp8_dispatch = use_fp8_dispatch
+        self.use_nvfp4_dispatch = use_nvfp4_dispatch
         self.use_cudagraph = use_cudagraph
 
         # DBO microbatching: one handle slot per micro-batch.
@@ -105,6 +109,18 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         quant_config: FusedMoEQuantConfig,
         defer_input_quant: bool,
     ) -> Callable:
+        if self.use_nvfp4_dispatch and token_scales is None:
+            tokens, token_scales = moe_kernel_quantize_input(
+                tokens,
+                a1_scale,
+                quant_dtype=quant_config.quant_dtype,
+                per_act_token_quant=False,
+                block_shape=quant_config.block_shape,
+                is_scale_swizzled=False,
+            )
+            # uint8 [M, H/16] → int32 [M, H/64] for DeepEP fp8_sf transport
+            token_scales = token_scales.view(torch.int32)
+
         has_scales = token_scales is not None
 
         token_data = tokens
@@ -218,7 +234,14 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             device=expert_x.device,
         )
 
-        if not quant_config.is_block_quantized and not defer_input_quant:
+        if self.use_nvfp4_dispatch and expert_x_scale is not None:
+            # int32 [M, H/64] → fp8 [M, H/16]
+            expert_x_scale = expert_x_scale.view(torch.uint8).view(
+                torch.float8_e4m3fn)
+
+        if (not quant_config.is_block_quantized
+                and not defer_input_quant
+                and not self.use_nvfp4_dispatch):
             expert_x_scale = None
             if expert_x.numel() != 0:
                 expert_x, expert_x_scale = moe_kernel_quantize_input(
@@ -227,7 +250,7 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
                     quant_dtype=quant_config.quant_dtype,
                     per_act_token_quant=False,
                     block_shape=quant_config.block_shape,
-                    is_scale_swizzled=quant_config.is_scale_swizzled,
+                    is_scale_swizzled=getattr(quant_config, 'is_scale_swizzled', quant_config.is_nvfp4_scale_swizzled),
                 )
 
         return (
