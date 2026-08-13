@@ -8,6 +8,7 @@ import pytest
 
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
+from vllm.v1.core.sched.synthetic_scheduler import SyntheticScheduler
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import RequestStatus
 from vllm.v1.structured_output import StructuredOutputGrammar
@@ -16,6 +17,75 @@ from vllm.v1.utils import ConstantList
 from .utils import create_requests, create_scheduler
 
 pytestmark = pytest.mark.cpu_test
+
+
+def _make_synthetic_scheduler() -> SyntheticScheduler:
+    scheduler = object.__new__(SyntheticScheduler)
+    scheduler._submitted_outputs = deque()
+    scheduler._retained_kv_blocks = {}
+    scheduler.submitted_steps = 0
+    scheduler.completed_steps = 0
+    scheduler.kv_cache_manager = Mock()
+    return scheduler
+
+
+def test_synthetic_scheduler_replays_submitted_outputs_in_order():
+    scheduler = _make_synthetic_scheduler()
+    first = SchedulerOutput.make_empty()
+    second = SchedulerOutput.make_empty()
+
+    assert scheduler.submit(first) == 1
+    assert scheduler.submit(second) == 2
+    assert scheduler.get_num_unfinished_requests() == 2
+    assert scheduler.schedule() is first
+    assert scheduler.schedule() is second
+    assert scheduler.get_num_unfinished_requests() == 0
+    assert not scheduler.has_finished_requests()
+
+
+def test_synthetic_scheduler_rejects_an_empty_queue():
+    with pytest.raises(RuntimeError, match="no submitted batch"):
+        _make_synthetic_scheduler().schedule()
+
+
+def test_synthetic_scheduler_releases_cow_blocks_after_completion():
+    scheduler = _make_synthetic_scheduler()
+    scheduler_output = SchedulerOutput.make_empty()
+    blocks = [Mock(), Mock()]
+
+    scheduler.retain_kv_blocks_until_complete(scheduler_output, blocks)
+    scheduler.kv_cache_manager.block_pool.free_blocks.assert_not_called()
+
+    outputs = scheduler.update_from_output(scheduler_output, Mock())
+
+    scheduler.kv_cache_manager.block_pool.free_blocks.assert_called_once_with(blocks)
+    assert scheduler.completed_steps == 1
+    assert set(outputs) == {0}
+
+
+def test_synthetic_scheduler_releases_cow_blocks_at_shutdown():
+    scheduler = _make_synthetic_scheduler()
+    scheduler_output = SchedulerOutput.make_empty()
+    blocks = [Mock(), Mock()]
+    scheduler.submit(scheduler_output)
+    scheduler.retain_kv_blocks_until_complete(scheduler_output, blocks)
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        shutdown = Mock()
+        monkeypatch.setattr(AsyncScheduler, "shutdown", shutdown)
+        scheduler.shutdown()
+
+    scheduler.kv_cache_manager.block_pool.free_blocks.assert_called_once_with(blocks)
+    assert scheduler.get_num_unfinished_requests() == 0
+    shutdown.assert_called_once_with()
+
+
+def test_synthetic_scheduler_rejects_frontend_requests():
+    scheduler = _make_synthetic_scheduler()
+    request = Mock(request_id="request")
+
+    with pytest.raises(RuntimeError, match="prebuilt SchedulerOutput"):
+        scheduler.add_request(request)
 
 
 def _make_model_runner_output(
