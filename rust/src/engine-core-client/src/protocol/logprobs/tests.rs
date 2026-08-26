@@ -87,6 +87,7 @@ fn inline_prompt_logprobs_value() -> Value {
         ndarray_value("float32", &[2, 3], probs),
         ndarray_value("int64", &[2], ranks),
         Value::Nil,
+        Value::Nil,
     ])
 }
 

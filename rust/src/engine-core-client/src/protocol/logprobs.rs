@@ -222,6 +222,7 @@ impl WireLogprobs {
                 data: WireArrayData::RawView(token_ranks.into()),
             },
             cu_num_generated_tokens: None,
+            cu_num_generated_tokens_tensor: None,
         })
     }
 

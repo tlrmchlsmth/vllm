@@ -31,4 +31,7 @@ pub struct WireLogprobs {
     /// the semantic Rust decoder rejects any other value.
     #[serde(default)]
     pub cu_num_generated_tokens: Option<Vec<usize>>,
+    /// Device form of `cu_num_generated_tokens`, preserved for wire compatibility.
+    #[serde(default)]
+    pub cu_num_generated_tokens_tensor: Option<WireNdArray>,
 }
