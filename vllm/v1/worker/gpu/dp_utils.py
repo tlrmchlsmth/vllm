@@ -75,6 +75,7 @@ def sync_cudagraph_and_dp_padding(
     else:
         dist.all_reduce(tensor, group=group)
 
+    live_cols = list(range(dp_size))
     if parallel_config.enable_fault_tolerance:
         # Per-step barrier over the TP cpu group: a faulted sibling stops
         # arriving, so survivors fail here on the host instead of leaving
@@ -83,11 +84,10 @@ def sync_cudagraph_and_dp_padding(
             dist.barrier(group=get_tp_group().cpu_group)
 
         if dead_dp_ranks := get_dp_group().dead_dp_ranks:
-            # A dead rank's column stays 0 after the SUM allreduce; rewrite
-            # it with aggregate-neutral values: INT32_MAX for the min-
-            # aggregated cg_mode row, and the row max for the uniform-token
-            # row.
+            # Dead columns remain 0 after the SUM allreduce. Exclude them from
+            # microbatch votes and neutralize the other cross-rank decisions.
             dead_cols = sorted(dead_dp_ranks)
+            live_cols = sorted(set(range(dp_size)) - dead_dp_ranks)
             tensor[1, dead_cols] = torch.iinfo(torch.int32).max
             tensor[2, dead_cols] = tensor[2].max()
 
@@ -111,7 +111,7 @@ def sync_cudagraph_and_dp_padding(
         )
         return synced_desc, None
 
-    if torch.all(allow_ubatching_across_dp == 1):
+    if torch.all(allow_ubatching_across_dp[live_cols] == 1):
         # This rank voted too, so its caller passed a config.
         assert parallel_config is not None
         # A uniform decode only if every rank runs the same uniform query
@@ -123,7 +123,7 @@ def sync_cudagraph_and_dp_padding(
             parallel_config,
             # Thresholds only grow with the token count, so holding the smallest
             # rank to them holds every rank to them.
-            int(num_tokens_across_dp.min()),
+            int(num_tokens_across_dp[live_cols].min()),
             uniform_decode=uniform_decode_across_dp,
         ):
             # Microbatching is all-or-nothing: the expert all-to-all is

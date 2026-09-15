@@ -272,6 +272,7 @@ def _sync_dp(
     num_tokens_per_rank: list[int],
     uniform_token_count_per_rank: list[int] | None = None,
     allow_ubatching: bool = True,
+    dead_dp_ranks: set[int] | None = None,
 ) -> tuple[BatchExecutionDescriptor, dp_utils.DPSyncState | None]:
     """Run the DP handshake with the all-reduce stubbed out.
 
@@ -289,10 +290,16 @@ def _sync_dp(
     reduced[3] = -1  # max_query_len, -1 means None
     reduced[4] = int(allow_ubatching)
     reduced[5] = 8  # num_reqs
+    dead_dp_ranks = dead_dp_ranks or set()
+    reduced[:, sorted(dead_dp_ranks)] = 0
 
     with (
         patch.object(dp_utils.dist, "all_reduce", lambda t, group: t.copy_(reduced)),
-        patch.object(dp_utils, "get_dp_group", lambda: SimpleNamespace(cpu_group=None)),
+        patch.object(
+            dp_utils,
+            "get_dp_group",
+            lambda: SimpleNamespace(cpu_group=None, dead_dp_ranks=dead_dp_ranks),
+        ),
     ):
         return dp_utils.sync_cudagraph_and_dp_padding(
             cudagraph_manager=None,
@@ -308,6 +315,7 @@ def _sync_dp(
             dp_rank=0,
             parallel_config=ParallelConfig(
                 enable_dbo=True,
+                enable_fault_tolerance=bool(dead_dp_ranks),
                 dbo_decode_token_threshold=DECODE_THRESHOLD,
                 dbo_prefill_token_threshold=PREFILL_THRESHOLD,
             ),
@@ -326,6 +334,18 @@ def test_every_dp_rank_must_agree_to_microbatch():
     assert _sync_dp([256, 256])[0].num_ubatches == 2
     assert _sync_dp([256, 100])[0].num_ubatches == 1
     assert _sync_dp([100, 256])[0].num_ubatches == 1
+
+
+def test_dead_dp_rank_does_not_disable_survivors_microbatching():
+    """Dead columns cannot veto the vote or lower the token threshold."""
+    desc, sync = _sync_dp([256, 0, 256], dead_dp_ranks={1})
+    assert desc.num_ubatches == 2
+    assert sync is not None
+    assert sync.num_tokens_across_dp.tolist() == [256, 256, 256]
+    desc, sync = _sync_dp([256, 0, 100], dead_dp_ranks={1})
+    assert desc.num_ubatches == 1
+    assert sync is not None
+    assert sync.num_tokens_across_dp.tolist() == [256, 0, 100]
 
 
 def test_decode_threshold_only_applies_when_every_rank_is_a_uniform_decode():
