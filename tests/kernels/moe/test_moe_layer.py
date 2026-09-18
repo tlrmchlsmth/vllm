@@ -67,8 +67,8 @@ from vllm.utils.flashinfer import (
     has_flashinfer_nvlink_one_sided,
     has_flashinfer_nvlink_two_sided,
 )
-from vllm.utils.import_utils import has_deep_ep, has_mori, has_nixl_ep
-from vllm.utils.math_utils import cdiv, next_power_of_2
+from vllm.utils.import_utils import has_deep_ep, has_deep_ep_v2, has_mori, has_nixl_ep
+from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.worker.workspace import (
     init_workspace_manager,
@@ -287,8 +287,9 @@ def chunk_by_rank(
     dim: int = 0,
     device: torch.device | None = None,
 ) -> torch.Tensor:
-    chunk = cdiv(t.shape[dim], w)
-    t = t.narrow(dim, r * chunk, chunk)
+    size = t.shape[dim]
+    start = r * (size // w) + min(r, size % w)
+    t = t.narrow(dim, start, rank_chunk(size, r, w))
     if device is not None:
         t = t.to(device)
     return t
@@ -1980,6 +1981,82 @@ def _parallel_worker_rocm_deepep(
             sys.stdout.flush()
             sys.stderr.flush()
             os._exit(exit_code)
+
+
+@pytest.mark.parametrize(
+    "backend",
+    [
+        "deepep_high_throughput",
+        "deepep_low_latency",
+        "deepep_v2",
+        "mori_high_throughput",
+        "mori_low_latency",
+        "nixl_ep",
+        "flashinfer_nvlink_two_sided",
+    ],
+)
+def test_moe_layer_uneven_experts(backend, monkeypatch):
+    """Seven experts on two ranks must match the unsharded numerical reference."""
+    if not current_platform.is_cuda_alike() or current_platform.device_count() < 2:
+        pytest.skip("Requires two CUDA or ROCm GPUs")
+    available = {
+        "deepep_high_throughput": has_deep_ep,
+        "deepep_low_latency": has_deep_ep,
+        "deepep_v2": has_deep_ep_v2,
+        "mori_high_throughput": has_mori,
+        "mori_low_latency": has_mori,
+        "nixl_ep": has_nixl_ep,
+        "flashinfer_nvlink_two_sided": has_flashinfer_nvlink_two_sided,
+    }
+    if not available[backend]():
+        pytest.skip(f"{backend} is not installed")
+    if backend.startswith("deepep") and not visible_devices_have_peer_access(2):
+        pytest.skip("DeepEP requires GPU peer access")
+    if backend.startswith("mori"):
+        if not current_platform.is_rocm():
+            pytest.skip("MoRI requires ROCm")
+        monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+        monkeypatch.setenv("VLLM_ROCM_USE_AITER_MOE", "1")
+        monkeypatch.setenv("VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS", "0")
+
+    config = VllmConfig(
+        parallel_config=ParallelConfig(
+            data_parallel_size=2,
+            enable_expert_parallel=True,
+            all2all_backend=backend,
+        ),
+        scheduler_config=SchedulerConfig.default_factory(max_num_batched_tokens=256),
+    )
+    config.compilation_config.pass_config.fuse_allreduce_rms = False
+    cases = [
+        MoETestConfig(
+            m=m,
+            n=128,
+            k=2048,
+            num_experts=7,
+            top_k=2,
+            in_dtype=torch.bfloat16,
+            quantization=None,
+            use_shared_experts=False,
+            use_gate=False,
+            use_routed_input_transform=False,
+            backend=backend,
+            ep_size=2,
+            dp_size=2,
+        )
+        for m in (1, 32)
+    ]
+    rocm_deepep = current_platform.is_rocm() and backend in DEEPEP_BACKENDS
+    worker = _parallel_worker_rocm_deepep if rocm_deepep else _parallel_worker
+    parallel_launch_with_config(
+        2,
+        worker,
+        config,
+        None,
+        cases,
+        1,
+        deep_ep_handle_keepalive=[] if rocm_deepep else None,
+    )
 
 
 # TODO: add cudagraphs/torch.compile tests

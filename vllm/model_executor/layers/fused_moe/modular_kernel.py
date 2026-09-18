@@ -455,6 +455,7 @@ class FusedMoEExperts(ABC):
     # expert_map. RoutedExperts.expert_map reads this flag to pick which to hand
     # the active experts kernel.
     consumes_expert_mask: bool = False
+    supports_uneven_expert_map: bool = False
 
     def __init__(
         self,
@@ -544,6 +545,13 @@ class FusedMoEExperts(ABC):
             return False, _make_reason(
                 f"parallel config {moe_config.moe_parallel_config}"
             )
+        elif (
+            moe_config.moe_parallel_config.needs_uniform_expert_slots
+            and moe_config.num_experts % moe_config.moe_parallel_config.ep_size
+            and activation_format == FusedMoEActivationFormat.Standard
+            and not cls.supports_uneven_expert_map
+        ):
+            return False, _make_reason("uneven expert ownership with padded transport")
         elif not cls._supports_routing_method(
             moe_config.routing_method, weight_key, activation_key
         ):

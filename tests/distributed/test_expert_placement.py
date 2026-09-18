@@ -2,10 +2,44 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
+import torch
 
 from vllm.model_executor.layers.fused_moe.expert_map_manager import (
     determine_expert_map,
 )
+from vllm.model_executor.layers.fused_moe.prepare_finalize.uneven import (
+    ExpertTransportLayout,
+)
+
+
+@pytest.mark.parametrize("num_experts,ep_size", [(256, 3), (10, 4), (8, 4)])
+@pytest.mark.parametrize("placement", ["linear", "round_robin"])
+@pytest.mark.parametrize("dtype", [torch.int32, torch.int64])
+def test_transport_slots_preserve_expert_ownership(
+    num_experts, ep_size, placement, dtype
+):
+    """Uniform transport blocks must select the checkpoint's existing local slot."""
+    layout = ExpertTransportLayout(num_experts, ep_size, placement == "round_robin")
+    ids = torch.arange(num_experts, dtype=dtype)
+    slots = layout.to_transport(ids)
+    for rank in range(ep_size):
+        count, expert_map, _ = determine_expert_map(
+            ep_size, rank, num_experts, placement
+        )
+        owned = expert_map >= 0
+        torch.testing.assert_close(
+            slots[owned], (rank * layout.experts_per_rank + expert_map[owned]).to(dtype)
+        )
+        assert owned.sum().item() == count
+    torch.testing.assert_close(layout.from_transport(slots), ids)
+
+    all_slots = torch.arange(layout.num_slots, dtype=dtype)
+    unused = torch.ones(layout.num_slots, dtype=torch.bool)
+    unused[slots.long()] = False
+    assert (layout.from_transport(all_slots[unused]) == -1).all()
+    invalid = torch.tensor([-1, num_experts, num_experts + 7], dtype=dtype)
+    assert (layout.to_transport(invalid) == -1).all()
+    assert layout.to_transport(ids[:0]).shape == (0,)
 
 
 def verify_round_robin_pattern(expert_map, ep_rank, ep_size, global_num_experts):

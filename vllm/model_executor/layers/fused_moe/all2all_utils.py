@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 import torch
@@ -19,6 +19,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEPrepareAndFinalize,
+    FusedMoEPrepareAndFinalizeModular,
 )
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     BatchedPrepareAndFinalize,
@@ -30,6 +31,10 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize.flashinfer_nvlink_one
 )
 from vllm.model_executor.layers.fused_moe.prepare_finalize.flashinfer_nvlink_two_sided import (  # noqa: E501
     FlashInferNVLinkTwoSidedPrepareAndFinalize,
+)
+from vllm.model_executor.layers.fused_moe.prepare_finalize.uneven import (
+    ExpertTransportLayout,
+    UnevenExpertPrepareAndFinalize,
 )
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import (
@@ -167,6 +172,33 @@ def maybe_make_prepare_finalize(
     use_monolithic: bool = False,
     all2all_manager: Any | None = None,
 ) -> FusedMoEPrepareAndFinalize | None:
+    parallel = moe.moe_parallel_config
+    if parallel.needs_uniform_expert_slots and moe.num_experts % parallel.ep_size:
+        if moe.num_experts < parallel.ep_size:
+            raise ValueError(
+                "Padded expert transport requires at least one expert per rank"
+            )
+        layout = ExpertTransportLayout(
+            moe.num_experts, parallel.ep_size, round_robin=routing_tables is not None
+        )
+        transport_moe = replace(
+            moe,
+            num_experts=layout.num_slots,
+            num_local_experts=layout.experts_per_rank,
+        )
+        inner = maybe_make_prepare_finalize(
+            transport_moe,
+            quant_config,
+            routing_tables=None,
+            allow_new_interface=allow_new_interface,
+            use_monolithic=use_monolithic,
+            all2all_manager=all2all_manager,
+        )
+        assert isinstance(inner, FusedMoEPrepareAndFinalizeModular)
+        return UnevenExpertPrepareAndFinalize(
+            inner, layout, moe.num_local_experts, parallel.ep_rank
+        )
+
     if not moe.moe_parallel_config.use_all2all_kernels:
         if not allow_new_interface:
             return None
