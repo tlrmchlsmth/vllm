@@ -559,6 +559,8 @@ def batched_fused_marlin_moe(
 
 
 class MarlinExpertsBase(mk.FusedMoEExpertsModular):
+    supports_uneven_expert_map = True
+
     def __init__(
         self,
         moe_config: FusedMoEConfig,
@@ -622,10 +624,7 @@ class MarlinExpertsBase(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
-        # One-sided FI-NVL all2all pairs with MarlinExperts fine (the
-        # compressed-tensors MXFP4 path runs this exact combo); only the
-        # two-sided kernels are unsupported here.
-        return not moe_parallel_config.use_fi_nvl_two_sided_kernels
+        return True
 
     @property
     def quant_type_id(self) -> int:

@@ -31,10 +31,14 @@ class FlashInferNVLinkTwoSidedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeMo
     ):
         super().__init__()
         self.num_dispatchers_ = num_dispatchers
+        self.normalize_expert_ids = False
         device_communicator = get_ep_group().device_communicator
         assert device_communicator is not None
         assert device_communicator.all2all_manager is not None
         self.all2all_manager = device_communicator.all2all_manager
+
+    def post_init_setup(self, fused_experts: mk.FusedMoEExperts):
+        self.normalize_expert_ids = fused_experts.supports_uneven_expert_map
 
     @property
     def activation_format(self) -> mk.FusedMoEActivationFormat:
@@ -99,6 +103,13 @@ class FlashInferNVLinkTwoSidedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeMo
             )
         )
 
+        if self.normalize_expert_ids:
+            # FlashInfer uses num_experts for non-local slots and padded rows.
+            # Expert-map kernels need an in-range ID owned by another rank.
+            remote_expert = num_experts - 1 if self.all2all_manager.rank == 0 else 0
+            topk_ids = torch.where(
+                (topk_ids >= 0) & (topk_ids < num_experts), topk_ids, remote_expert
+            )
         return a1q, a1q_scale, None, topk_ids, topk_weights
 
     def finalize(

@@ -139,6 +139,8 @@ def _valid_deep_gemm(
 class DeepGemmExperts(mk.FusedMoEExpertsModular):
     """DeepGemm-based fused MoE expert implementation."""
 
+    supports_uneven_expert_map = True
+
     def __init__(self, moe_config: FusedMoEConfig, quant_config: FusedMoEQuantConfig):
         super().__init__(moe_config=moe_config, quant_config=quant_config)
         # MXFP8: FP8 e4m3 values + UE8M0 1x32 block scales (Blackwell). Reuses
@@ -421,6 +423,8 @@ class DeepGemmFP4Experts(mk.FusedMoEExpertsModular):
     MXFP4 (FP4 E2M1 packed as uint8) weights. Requires Blackwell-family
     GPUs (SM100 datacenter or SM120 consumer).
     """
+
+    supports_uneven_expert_map = True
 
     # FP8 activation block size (hardcoded since mxfp4_w4a8 quant config
     # does not set a block_shape on the activation descriptor).

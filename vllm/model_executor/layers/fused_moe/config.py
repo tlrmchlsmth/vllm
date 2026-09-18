@@ -1064,6 +1064,19 @@ class FusedMoEParallelConfig:
         return self.use_deepep_ll_kernels or self.use_nixl_ep_kernels
 
     @property
+    def needs_uniform_expert_slots(self) -> bool:
+        return self.use_all2all_kernels and self.all2all_backend in (
+            "deepep_high_throughput",
+            "deepep_low_latency",
+            "deepep_v2",
+            "mori_high_throughput",
+            "mori_low_latency",
+            "nixl_ep",
+            "flashinfer_nvlink_two_sided",
+            "flashinfer_all2allv",
+        )
+
+    @property
     def use_ag_rs_all2all_kernels(self):
         return (
             self.use_all2all_kernels

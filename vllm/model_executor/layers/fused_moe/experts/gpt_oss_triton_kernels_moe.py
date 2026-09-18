@@ -1005,6 +1005,8 @@ def remap_topk_to_local(
 
 
 class BaseOAITritonExperts(mk.FusedMoEExpertsModular):
+    supports_uneven_expert_map = True
+
     @property
     def expects_unquantized_inputs(self) -> bool:
         return True

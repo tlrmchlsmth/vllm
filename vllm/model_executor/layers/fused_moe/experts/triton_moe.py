@@ -65,6 +65,8 @@ from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
 class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
     """Triton-based fused MoE expert implementation."""
 
+    supports_uneven_expert_map = True
+
     @staticmethod
     def is_supported_config(
         cls: type[mk.FusedMoEExperts],
@@ -175,10 +177,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
-        return not (
-            moe_parallel_config.use_fi_nvl_two_sided_kernels
-            or moe_parallel_config.use_fi_nvl_one_sided_kernels
-        )
+        return not moe_parallel_config.use_fi_nvl_one_sided_kernels
 
     @staticmethod
     def _supports_batch_invariance():
@@ -621,10 +620,7 @@ class TritonWNA16Experts(TritonExperts):
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
-        return not (
-            moe_parallel_config.use_fi_nvl_two_sided_kernels
-            or moe_parallel_config.use_fi_nvl_one_sided_kernels
-        )
+        return not moe_parallel_config.use_fi_nvl_one_sided_kernels
 
     def apply(
         self,

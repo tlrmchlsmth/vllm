@@ -437,6 +437,7 @@ def rocm_aiter_fused_experts(
 
 class AiterExperts(mk.FusedMoEExpertsModular):
     consumes_expert_mask = True
+    supports_uneven_expert_map = True
 
     @property
     def expects_unquantized_inputs(self) -> bool:

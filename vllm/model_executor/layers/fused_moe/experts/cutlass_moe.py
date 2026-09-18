@@ -276,6 +276,8 @@ def run_cutlass_moe_fp8(
 
 
 class CutlassExpertsFp8Base(mk.FusedMoEExpertsModular):
+    supports_uneven_expert_map = True
+
     def __init__(
         self,
         moe_config: FusedMoEConfig,
