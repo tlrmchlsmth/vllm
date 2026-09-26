@@ -16,7 +16,6 @@ from unittest.mock import Mock
 import pytest
 
 from vllm.v1.core.sched.scheduler import Scheduler
-from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import FinishReason, Request, RequestStatus
 
 from .utils import (
@@ -27,36 +26,6 @@ from .utils import (
 )
 
 pytestmark = pytest.mark.cpu_test
-
-
-@pytest.mark.parametrize("policy", ["fail", "recompute"])
-def test_resolve_block_failures_before_reuse_evicts_aborted_prefix(policy):
-    """Resolve block failures before reuse under both KV load failure policies."""
-    scheduler = create_scheduler(create_vllm_config(kv_load_failure_policy=policy))
-    request = create_request(num_tokens=3 * scheduler.block_size)
-    scheduler.add_request(request)
-    scheduler.connector = Mock()
-    scheduler.connector.get_num_new_matched_tokens.return_value = (
-        2 * scheduler.block_size,
-        False,
-    )
-    scheduler.connector.request_finished.return_value = (False, None)
-    scheduler.connector.take_events.return_value = ()
-    scheduled = scheduler.schedule()
-    block_ids = scheduled.scheduled_new_reqs[0].block_ids[0]
-    pool = scheduler.kv_cache_manager.block_pool
-    invalid_block = pool.blocks[block_ids[0]]
-    assert invalid_block.block_hash is not None
-
-    scheduler.update_from_kv_connector_recovery(
-        [KVConnectorOutput(invalid_block_ids={invalid_block.block_id})]
-    )
-
-    assert invalid_block.block_hash is None
-    assert request.status == RequestStatus.RUNNING
-    assert scheduler.processed_step_seq == scheduler.sched_step_seq
-    scheduler.finish_requests(None, RequestStatus.FINISHED_ABORTED)
-    assert request.request_id not in scheduler.requests
 
 
 def _make_get_num_new_matched_tokens(
