@@ -8,6 +8,9 @@ from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorWorkerMetadata,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_connector import (
+    LMCacheKVEvents,
+)
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 
 pytestmark = pytest.mark.cpu_test
@@ -166,88 +169,77 @@ def test_aggregate_workers_output_with_expected_finished_count():
     assert aggregator._send_remaining_count["req1"] == 2
 
 
-def test_merge_preserves_get_and_clear_fields():
-    """merge must preserve get-and-clear fields and surface them later."""
-    aggregator = KVOutputAggregator(expected_finished_count=4)
-
-    # Failed step: worker 0's output is salvaged, worker 1 is lost.
-    salvaged = KVConnectorOutput(
-        finished_sending={"req1"},
-        finished_recving={"req2"},
-        failed_recving={"req3"},
-        invalid_block_ids={7},
-        kv_connector_worker_meta=DummyWorkerMeta({"salvaged"}),
-        kv_cache_events=make_events(1, 2, 3, 4),
-        expected_finished_count=2,
-    )
-    aggregator.merge_kv_connector_output([salvaged, None])
-    assert aggregator._expected_finished_count == 2
-
-    # Recovered step: both workers succeed.
-    output0 = DummyModelRunnerOutput(
-        finished_recving={"req3"},
-        kv_connector_worker_meta=DummyWorkerMeta({"recovered"}),
-        kv_cache_events=make_events(9, 10, 11, 12),
-    )
-    output1 = DummyModelRunnerOutput(
-        finished_sending={"req1"},
-        finished_recving={"req2", "req3"},
-    )
-    aggregated = aggregator.aggregate([output0, output1])
-    kv = aggregated.kv_connector_output
-
-    assert kv.finished_sending == {"req1"}
-    assert kv.finished_recving == {"req2", "req3"}
-    assert kv.failed_recving == {"req3"}
-    assert kv.invalid_block_ids == {7}
-    assert kv.kv_connector_worker_meta.tags == {"salvaged", "recovered"}
-    assert kv.kv_cache_events is not None
-    all_token_ids = sorted(
-        tuple(e.token_ids) for e in kv.kv_cache_events.get_all_events()
-    )
-    assert all_token_ids == [(1, 2, 3, 4), (9, 10, 11, 12)]
-
-
-def test_merge_seeds_pending_finished_recving():
-    """Pending finished_recving must be seeded before the failed_recving
-    intersection, or the request waits on WAITING_FOR_REMOTE_KVS forever."""
-    aggregator = KVOutputAggregator(expected_finished_count=2)
-
-    # Failed step: req1's recv votes completed (2/2), flagged as failed.
-    aggregator.merge_kv_connector_output(
+def test_recovery_consumes_notifications_without_another_model_step():
+    """Explicit KV recovery returns failures and completions exactly once."""
+    aggregator = KVOutputAggregator(2, defer_outputs=True)
+    output = aggregator.aggregate_kv_outputs(
         [
-            KVConnectorOutput(finished_recving={"req1"}),
-            KVConnectorOutput(finished_recving={"req1"}, failed_recving={"req1"}),
+            KVConnectorOutput(finished_recving={"req"}, invalid_block_ids={7}),
+            KVConnectorOutput(finished_recving={"req"}, failed_recving={"req"}),
         ]
     )
-    assert aggregator._pending_finished_recving == {"req1"}
+    assert output.finished_recving == {"req"}
+    assert output.failed_recving == {"req"}
+    assert output.invalid_block_ids == {7}
+    assert aggregator.aggregate_kv_outputs([None, None]).is_empty()
 
-    # Recovered step: nobody reports req1 anymore.
-    aggregated = aggregator.aggregate(
-        [DummyModelRunnerOutput(), DummyModelRunnerOutput()]
+
+def test_recovery_retains_partial_transfer_completions():
+    """Preserve consumed notifications until every transfer worker finishes."""
+    aggregator = KVOutputAggregator(2, defer_outputs=True)
+    output = aggregator.aggregate_kv_outputs(
+        [
+            KVConnectorOutput(
+                finished_sending={"req"},
+                kv_connector_worker_meta=DummyWorkerMeta({"old"}),
+            ),
+            None,
+        ]
     )
-    kv = aggregated.kv_connector_output
-    assert kv.finished_recving == {"req1"}
-    assert kv.failed_recving == {"req1"}
-
-
-def test_merge_kv_cache_events_do_not_raise_quorum():
-    """Pending events are extra votes only; quorum stays at current workers."""
-    aggregator = KVOutputAggregator(expected_finished_count=2)
-
-    # Failed step: only worker 0 reported event E0.
-    aggregator.merge_kv_connector_output(
-        [KVConnectorOutput(kv_cache_events=make_events(1, 2, 3, 4)), None]
+    assert output.finished_sending is None
+    assert output.kv_connector_worker_meta.tags == {"old"}
+    output = aggregator.aggregate_kv_outputs(
+        [None, KVConnectorOutput(finished_sending={"req"})]
     )
+    assert output.finished_sending == {"req"}
+    assert output.kv_connector_worker_meta is None
 
-    # Recovered step: both workers report event E1.
-    output0 = DummyModelRunnerOutput(kv_cache_events=make_events(5, 6, 7, 8))
-    output1 = DummyModelRunnerOutput(kv_cache_events=make_events(5, 6, 7, 8))
-    aggregated = aggregator.aggregate([output0, output1])
 
-    events = aggregated.kv_connector_output.kv_cache_events
-    assert events is not None
-    assert events.get_number_of_workers() == 2
-    common = events.get_common_events()
-    assert len(common) == 1
-    assert common[0].token_ids == [5, 6, 7, 8]
+def _lmcache_events(*token_ids: int) -> LMCacheKVEvents:
+    events = LMCacheKVEvents(1)
+    events.add_events(make_events(*token_ids).get_all_events())
+    return events
+
+
+def test_recovery_preserves_worker_quorum_across_sparse_steps():
+    """Preserve worker quorum when only the missing rank reports after recovery."""
+    aggregator = KVOutputAggregator(2, defer_outputs=True)
+    first = KVConnectorOutput(kv_cache_events=_lmcache_events(1, 2))
+    assert aggregator.aggregate_kv_outputs([first, None]).kv_cache_events is None
+    # Repeated votes from one rank cannot satisfy the quorum.
+    assert aggregator.aggregate_kv_outputs([first, None]).kv_cache_events is None
+    second = KVConnectorOutput(kv_cache_events=_lmcache_events(1, 2))
+    output = aggregator.aggregate_kv_outputs([None, second])
+    assert output.kv_cache_events is not None
+    common = output.kv_cache_events.aggregate().get_all_events()
+    assert [event.token_ids for event in common] == [[1, 2]]
+    assert aggregator.aggregate_kv_outputs([None, None]).kv_cache_events is None
+
+
+def test_recovery_pending_event_does_not_block_new_event_quorum():
+    """Preserve worker quorum separately for old and new cache events."""
+    aggregator = KVOutputAggregator(2, defer_outputs=True)
+    aggregator.aggregate_kv_outputs(
+        [KVConnectorOutput(kv_cache_events=_lmcache_events(1)), None]
+    )
+    output = aggregator.aggregate_kv_outputs(
+        [
+            KVConnectorOutput(kv_cache_events=_lmcache_events(2)),
+            KVConnectorOutput(kv_cache_events=_lmcache_events(2)),
+        ]
+    )
+    assert [e.token_ids for e in output.kv_cache_events.get_all_events()] == [[2]]
+    output = aggregator.aggregate_kv_outputs(
+        [None, KVConnectorOutput(kv_cache_events=_lmcache_events(1))]
+    )
+    assert [e.token_ids for e in output.kv_cache_events.get_all_events()] == [[1]]

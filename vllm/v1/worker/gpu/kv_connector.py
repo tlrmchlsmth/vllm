@@ -21,6 +21,7 @@ from vllm.v1.outputs import (
     KVConnectorOutput,
     ModelRunnerOutput,
 )
+from vllm.v1.worker.kv_connector_output import kv_connector_output_buffer
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -47,6 +48,9 @@ class KVConnector:
     def reset_capture_state(self) -> None:
         pass
 
+    def recover(self) -> None:
+        pass
+
 
 class ActiveKVConnector(KVConnector):
     def __init__(
@@ -60,11 +64,17 @@ class ActiveKVConnector(KVConnector):
 
         self._pending_load_kwargs: dict[str, Any] | None = None
         self._disabled = False
+        self._recovery_step_id: int | None = None
+        self._recovery_finished_req_ids: set[str] = set()
 
     def pre_forward(self, scheduler_output: "SchedulerOutput", **kwargs: Any) -> None:
         if self._disabled:
             return
 
+        if self._recovery_step_id is not None:
+            self.recover()
+        self._recovery_step_id = scheduler_output.kv_connector_step_id
+        self._recovery_finished_req_ids = scheduler_output.finished_req_ids
         kv_connector_metadata = scheduler_output.kv_connector_metadata
         assert kv_connector_metadata is not None
         self.kv_connector.handle_preemptions(kv_connector_metadata)
@@ -99,10 +109,32 @@ class ActiveKVConnector(KVConnector):
         if self._disabled:
             return None
 
+        output = KVConnectorOutput()
+        collection_failed = True
+        try:
+            self._collect_output(finished_req_ids, output)
+            collection_failed = False
+        finally:
+            # Preserve consumed notifications even if sampling or a later
+            # get-and-clear operation fails.
+            if (step_id := self._recovery_step_id) is not None:
+                kv_connector_output_buffer.put(
+                    step_id, output, collection_failed=collection_failed
+                )
+                self._recovery_step_id = None
+        return output if step_id is None else None
+
+    def recover(self) -> None:
+        # Explicit KV recovery: a failed forward may never reach post_forward.
+        if self._recovery_step_id is not None:
+            self.post_forward(self._recovery_finished_req_ids)
+
+    def _collect_output(
+        self, finished_req_ids: set[str], output: KVConnectorOutput
+    ) -> None:
         if self._pending_load_kwargs is not None:
             self._start_load_kv()
 
-        output = KVConnectorOutput()
         self.kv_connector.wait_for_save()
         transfer_results = self.kv_connector.get_transfer_results(finished_req_ids)
         output.finished_sending = transfer_results.finished_sending or None
@@ -115,7 +147,6 @@ class ActiveKVConnector(KVConnector):
             self.kv_connector.build_connector_worker_meta()
         )
         self.kv_connector.clear_connector_metadata()
-        return output
 
     def no_forward(self, scheduler_output: "SchedulerOutput") -> ModelRunnerOutput:
         if self._disabled:

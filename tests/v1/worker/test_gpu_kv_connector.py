@@ -8,9 +8,11 @@ import pytest
 import torch
 
 import vllm.v1.worker.gpu.kv_connector as kv_connector_module
+import vllm.v1.worker.kv_connector_model_runner_mixin as mixin_module
 from vllm.config import KVTransferConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorTransferResults
 from vllm.v1.worker.gpu.kv_connector import ActiveKVConnector
+from vllm.v1.worker.kv_connector_output import KVConnectorOutputBuffer
 
 
 def _make_connector(
@@ -51,6 +53,7 @@ def _scheduler_output(has_sync_kv_loads: bool) -> SimpleNamespace:
         kv_connector_metadata=object(),
         finished_req_ids=set(),
         has_sync_kv_loads=has_sync_kv_loads,
+        kv_connector_step_id=None,
     )
 
 
@@ -97,3 +100,61 @@ def test_no_forward_starts_deferred_load_once(monkeypatch: pytest.MonkeyPatch):
     connector.no_forward(_scheduler_output(False))  # type: ignore[arg-type]
 
     assert events == ["handle", "bind", "start", "wait", "clear"]
+
+
+@pytest.mark.parametrize("runner", ["v1", "v2"])
+@pytest.mark.parametrize("sync_load", [False, True])
+def test_preserve_consumed_notifications_after_forward_failure(
+    monkeypatch, runner, sync_load
+):
+    """Preserve consumed notifications without requiring an async output API."""
+    connector = _make_connector(monkeypatch, [])
+    backend = connector.kv_connector
+    backend.get_transfer_results.return_value = KVConnectorTransferResults(
+        finished_sending={"old"}, finished_recving={"load"}, failed_recving={"load"}
+    )
+    backend.get_block_ids_with_load_errors.return_value = {7}
+    buffer = KVConnectorOutputBuffer()
+    monkeypatch.setattr(kv_connector_module, "kv_connector_output_buffer", buffer)
+    monkeypatch.setattr(mixin_module, "kv_connector_output_buffer", buffer)
+    step = _scheduler_output(sync_load)
+    step.kv_connector_step_id = 0
+    if runner == "v1":
+        monkeypatch.setattr(mixin_module, "get_kv_transfer_group", lambda: backend)
+        monkeypatch.setattr(mixin_module, "KVConnectorBase", type(backend))
+        monkeypatch.setattr(mixin_module, "get_forward_context", object)
+        with (
+            pytest.raises(RuntimeError, match="forward failed"),
+            mixin_module.KVConnectorModelRunnerMixin._get_kv_connector_output(
+                step
+            ) as output,
+        ):
+            assert output is None
+            raise RuntimeError("forward failed")
+    else:
+        connector.pre_forward(step)
+        # Failed forward never reached post_forward.
+        connector.recover()
+        connector.recover()
+    recovered = buffer.take(None)
+    assert set(recovered) == {0}
+    assert recovered[0].finished_sending == {"old"}
+    assert recovered[0].finished_recving == {"load"}
+    assert recovered[0].failed_recving == {"load"}
+    assert recovered[0].invalid_block_ids == {7}
+    assert buffer.take(None) == {}
+
+
+def test_explicit_recovery_rejects_incomplete_notification_collection(monkeypatch):
+    """Explicit KV recovery cannot reuse blocks when collection itself failed."""
+    connector = _make_connector(monkeypatch, [])
+    buffer = KVConnectorOutputBuffer()
+    monkeypatch.setattr(kv_connector_module, "kv_connector_output_buffer", buffer)
+    step = _scheduler_output(True)
+    step.kv_connector_step_id = 0
+    connector.pre_forward(step)
+    connector.kv_connector.wait_for_save.side_effect = RuntimeError("save failed")
+    with pytest.raises(RuntimeError, match="save failed"):
+        connector.post_forward(set())
+    with pytest.raises(RuntimeError, match="restart required"):
+        buffer.take(None)

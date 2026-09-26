@@ -3,6 +3,7 @@
 """KV cache helper for store."""
 
 from collections.abc import Iterator
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, cast
 
@@ -14,6 +15,7 @@ from vllm.config import (
     get_layers_from_vllm_config,
     set_current_vllm_config,
 )
+from vllm.distributed.kv_events import KVCacheEvent, KVConnectorKVEvents
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -53,30 +55,42 @@ class KVOutputAggregator:
     """Utility class to aggregate the output of all workers into a single
     output corresponding to Rank 0 for scheduler."""
 
-    def __init__(self, expected_finished_count: int):
+    def __init__(self, expected_finished_count: int, defer_outputs: bool = False):
         # Complete transfer tracker. Used to track finished requests
         # [req_id -> n_remaining_workers]
         self._recv_remaining_count = dict[str, int]()
         self._send_remaining_count = dict[str, int]()
         self._failed_recving_pending = set[str]()
         self._expected_finished_count = expected_finished_count
-        
-        # Pending invalid block ids from failed workers
-        self._pending_invalid_block_ids = set[int]()
-        # Pending finished sending/recving from failed workers
-        self._pending_finished_sending = set[str]()
-        self._pending_finished_recving = set[str]()
-        # Pending worker meta / kv cache events from failed workers
-        # (get-and-clear APIs, so they must be preserved until the next
-        # aggregate() surfaces them)
-        self._pending_kv_connector_worker_meta = None
-        self._pending_kv_cache_events = None
+        self.defer_outputs = defer_outputs
+        self._event_votes: dict[KVCacheEvent, set[int]] = {}
+        self._event_template: KVConnectorKVEvents | None = None
 
     @classmethod
     def from_connector(cls, connector: "KVConnectorBase", world_size: int):
         return cls(connector.get_finished_count() or world_size)
 
     def aggregate(
+        self, outputs: list[ModelRunnerOutput | None], output_rank: int = 0
+    ) -> ModelRunnerOutput | None:
+        if self.defer_outputs:
+            return outputs[output_rank]
+        return self._aggregate(outputs, output_rank)
+
+    def aggregate_kv_outputs(
+        self, outputs: list[KVConnectorOutput | None]
+    ) -> KVConnectorOutput:
+        """Consume one worker-buffer batch, retaining its rank ordering."""
+        result = self._aggregate(
+            [
+                ModelRunnerOutput(req_ids=[], req_id_to_index={}, kv_connector_output=o)
+                for o in outputs
+            ]
+        )
+        assert result is not None and result.kv_connector_output is not None
+        return result.kv_connector_output
+
+    def _aggregate(
         self, outputs: list[ModelRunnerOutput | None], output_rank: int = 0
     ) -> ModelRunnerOutput | None:
         if not outputs[output_rank]:
@@ -98,15 +112,12 @@ class KVOutputAggregator:
                     finished_set.add(req_id)
                     del remaining_count_dict[req_id]
 
-        # Seed with pending state from failed workers (fault tolerance
-        # scenario) so it is surfaced in this step's output. Note the copy:
-        # the pending sets are cleared at the end of this method.
-        finished_sending = set(self._pending_finished_sending)
-        finished_recving = set(self._pending_finished_recving)
+        finished_sending = set[str]()
+        finished_recving = set[str]()
         aggregated_kv_connector_stats = None
-        aggregated_kv_connector_worker_meta = self._pending_kv_connector_worker_meta
+        aggregated_kv_connector_worker_meta = None
         combined_kv_cache_events = None
-        invalid_block_ids = set(self._pending_invalid_block_ids)
+        invalid_block_ids = set[int]()
         for model_runner_output in outputs:
             assert model_runner_output is not None
             kv_output = model_runner_output.kv_connector_output
@@ -156,7 +167,9 @@ class KVOutputAggregator:
                 )
 
             # Combine kv_cache_events from all workers.
-            if combined_kv_cache_events is None:
+            if self.defer_outputs:
+                pass  # Rank-aware event reconciliation runs below.
+            elif combined_kv_cache_events is None:
                 # Use the first worker's kv_cache events as start event list.
                 combined_kv_cache_events = kv_output.kv_cache_events
             elif kv_cache_events := kv_output.kv_cache_events:
@@ -174,25 +187,8 @@ class KVOutputAggregator:
         failed_recving = self._failed_recving_pending & finished_recving
         self._failed_recving_pending -= failed_recving
 
-        if (
-            self._pending_kv_cache_events is not None
-            and combined_kv_cache_events is not None
-        ):
-            assert isinstance(
-                combined_kv_cache_events,
-                type(self._pending_kv_cache_events),
-            )
-            combined_kv_cache_events.add_events(
-                self._pending_kv_cache_events.get_all_events()
-            )
-            self._pending_kv_cache_events = None
-
-        # Clear pending state from failed workers (fault tolerance
-        # scenario); it has already been surfaced in this step's output.
-        self._pending_finished_sending.clear()
-        self._pending_finished_recving.clear()
-        self._pending_invalid_block_ids.clear()
-        self._pending_kv_connector_worker_meta = None
+        if self.defer_outputs:
+            combined_kv_cache_events = self._aggregate_recovery_events(outputs)
 
         # select output of the worker specified by output_rank
         output = outputs[output_rank]
@@ -211,89 +207,37 @@ class KVOutputAggregator:
 
         return output
 
-    def merge_kv_connector_output(
-        self, kv_connector_outputs: list[KVConnectorOutput | None]
-    ) -> None:
-        """Merge KV connector outputs from failed workers into the aggregator.
-
-        Unlike aggregate(), this method does NOT return the merged result.
-        It only updates the internal state (remaining count dictionaries,
-        invalid_block_ids, failed_recving, and the get-and-clear fields
-        kv_connector_worker_meta / kv_cache_events), so that when all
-        workers recover and complete successfully in a future step, the
-        finished requests can be properly identified and returned.
-
-        This is used in fault tolerance scenarios where some workers fail
-        but their KV transfer progress needs to be preserved for later
-        aggregation.
-        """
-
-        def update_remaining_count(
-            req_ids: set[str] | None,
-            remaining_count_dict: dict[str, int],
-            pending_finished_set: set[str],
-        ) -> None:
-            for req_id in req_ids or ():
-                remaining_count = remaining_count_dict.get(
-                    req_id, self._expected_finished_count
-                )
-                remaining_count_dict[req_id] = remaining_count - 1
-                if remaining_count_dict[req_id] == 0:
-                    # All workers have finished this request, add to pending
-                    # finished set so it can be returned in future aggregate()
-                    pending_finished_set.add(req_id)
-                    del remaining_count_dict[req_id]
-
-        for kv_output in kv_connector_outputs:
-            if not kv_output:
+    def _aggregate_recovery_events(
+        self, outputs: list[ModelRunnerOutput | None]
+    ) -> KVConnectorKVEvents | None:
+        # Preserve worker quorum: count each rank once, including votes that
+        # arrived before the fault, until the connector's quorum is satisfied.
+        for rank, output in enumerate(outputs):
+            if output is None or output.kv_connector_output is None:
                 continue
+            events = output.kv_connector_output.kv_cache_events
+            if events is None:
+                continue
+            if self._event_template is None:
+                self._event_template = deepcopy(events)
+                self._event_template.clear_events()
+            assert type(events) is type(self._event_template)
+            for event in events.get_all_events():
+                self._event_votes.setdefault(event, set()).add(rank)
 
-            # Allow the worker to dynamically update the expected number of
-            # finished sending/recving for new requests.
-            if (
-                kv_output.expected_finished_count > 0
-                and kv_output.expected_finished_count != self._expected_finished_count
-            ):
-                self._expected_finished_count = kv_output.expected_finished_count
-
-            # Merge finished sending/recving into remaining count
-            update_remaining_count(
-                kv_output.finished_sending,
-                self._send_remaining_count,
-                self._pending_finished_sending,
-            )
-            update_remaining_count(
-                kv_output.finished_recving,
-                self._recv_remaining_count,
-                self._pending_finished_recving,
-            )
-
-            # Merge invalid block ids
-            self._pending_invalid_block_ids |= kv_output.invalid_block_ids
-
-            # Preserve failed recving; surfaced at the next aggregate()
-            # when the request finishes recving.
-            self._failed_recving_pending |= kv_output.failed_recving
-
-            # Accumulate get-and-clear fields into pending state so they
-            # are surfaced at the next aggregate() instead of being lost.
-            if self._pending_kv_connector_worker_meta is None:
-                self._pending_kv_connector_worker_meta = (
-                    kv_output.kv_connector_worker_meta
-                )
-            elif kv_connector_worker_meta := kv_output.kv_connector_worker_meta:
-                self._pending_kv_connector_worker_meta = (
-                    self._pending_kv_connector_worker_meta.aggregate(
-                        kv_connector_worker_meta
-                    )
-                )
-
-            if self._pending_kv_cache_events is None:
-                self._pending_kv_cache_events = kv_output.kv_cache_events
-            elif kv_cache_events := kv_output.kv_cache_events:
-                self._pending_kv_cache_events.add_events(
-                    kv_cache_events.get_all_events()
-                )
+        if not self._event_votes:
+            return None
+        assert self._event_template is not None
+        events = deepcopy(self._event_template)
+        if len(outputs) > 1:
+            events.increment_workers(len(outputs) - 1)
+        for event, ranks in self._event_votes.items():
+            events.add_events([event] * len(ranks))
+        events.aggregate()
+        completed = events.get_all_events()
+        for event in completed:
+            del self._event_votes[event]
+        return events if completed else None
 
 
 def _make_src_and_dst_indices(

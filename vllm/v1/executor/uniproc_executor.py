@@ -49,6 +49,8 @@ class AsyncOutputFuture(Future):
 
 
 class UniProcExecutor(Executor):
+    supports_kv_recovery: bool = True
+
     def _init_executor(self) -> None:
         """Initialize the worker and load the model."""
         self.driver_worker = WorkerWrapperBase(rpc_rank=0)
@@ -174,6 +176,9 @@ class ExecutorWithExternalLauncher(UniProcExecutor):
     deterministic, all the engines will generate the same outputs,
     and they don't need to synchronize the states with each other.
     """
+
+    # Explicit KV recovery needs a single executor to collect every rank's state.
+    supports_kv_recovery: bool = False
 
     def _init_executor(self) -> None:
         """Initialize the worker and load the model."""

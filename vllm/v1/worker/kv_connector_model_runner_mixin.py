@@ -4,7 +4,7 @@
 
 from collections.abc import Generator
 from contextlib import AbstractContextManager, contextmanager, nullcontext
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
@@ -14,6 +14,7 @@ from vllm.v1.outputs import (
     KVConnectorOutput,
     ModelRunnerOutput,
 )
+from vllm.v1.worker.kv_connector_output import kv_connector_output_buffer
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -40,13 +41,10 @@ class KVConnectorModelRunnerMixin:
     def maybe_get_kv_connector_output(
         scheduler_output: "SchedulerOutput",
         defer_finalize: bool = False,
-        model_runner: Any = None,
     ) -> AbstractContextManager[KVConnectorOutput | None]:
         return (
             KVConnectorModelRunnerMixin._get_kv_connector_output(
-                scheduler_output,
-                defer_finalize=defer_finalize,
-                model_runner=model_runner,
+                scheduler_output, defer_finalize=defer_finalize
             )
             if has_kv_transfer_group()
             else nullcontext()
@@ -70,8 +68,7 @@ class KVConnectorModelRunnerMixin:
     def _get_kv_connector_output(
         scheduler_output: "SchedulerOutput",
         defer_finalize: bool = False,
-        model_runner: Any = None,
-    ) -> Generator[KVConnectorOutput, None, None]:
+    ) -> Generator[KVConnectorOutput | None, None, None]:
         output = KVConnectorOutput()
 
         # Update KVConnector with the KVConnector metadata forward().
@@ -85,34 +82,39 @@ class KVConnectorModelRunnerMixin:
         # otherwise start (async) loads after the forward launch, keeping
         # their host-side submission cost off the critical path.
         start_after_forward = not scheduler_output.has_sync_kv_loads
-        if not start_after_forward:
-            kv_connector.start_load_kv(get_forward_context())
         try:
-            yield output
-        finally:
-            if start_after_forward:
+            if not start_after_forward:
                 kv_connector.start_load_kv(get_forward_context())
-            if not defer_finalize:
-                kv_connector.wait_for_save()
+            # Explicit KV recovery: FT notifications use the worker buffer,
+            # so an async output failure cannot discard or duplicate them.
+            yield output if scheduler_output.kv_connector_step_id is None else None
+        finally:
+            collection_failed = True
+            try:
+                if start_after_forward:
+                    kv_connector.start_load_kv(get_forward_context())
+                if not defer_finalize:
+                    kv_connector.wait_for_save()
 
-            transfer_results = kv_connector.get_transfer_results(
-                scheduler_output.finished_req_ids
-            )
-            output.finished_sending = transfer_results.finished_sending
-            output.finished_recving = transfer_results.finished_recving
-            output.failed_recving = transfer_results.failed_recving
-            output.invalid_block_ids = kv_connector.get_block_ids_with_load_errors()
+                transfer_results = kv_connector.get_transfer_results(
+                    scheduler_output.finished_req_ids
+                )
+                output.finished_sending = transfer_results.finished_sending
+                output.finished_recving = transfer_results.finished_recving
+                output.failed_recving = transfer_results.failed_recving
+                output.invalid_block_ids = kv_connector.get_block_ids_with_load_errors()
 
-            output.kv_connector_stats = kv_connector.get_kv_connector_stats()
-            output.kv_cache_events = kv_connector.get_kv_connector_kv_cache_events()
-            output.kv_connector_worker_meta = kv_connector.build_connector_worker_meta()
+                output.kv_connector_stats = kv_connector.get_kv_connector_stats()
+                output.kv_cache_events = kv_connector.get_kv_connector_kv_cache_events()
+                output.kv_connector_worker_meta = (
+                    kv_connector.build_connector_worker_meta()
+                )
 
-            if not defer_finalize:
-                kv_connector.clear_connector_metadata()
-
-            # Stash so the collected state survives a forward failure and can
-            # be extracted for fault tolerance.
-            if model_runner is not None and hasattr(
-                model_runner, "kv_connector_output"
-            ):
-                model_runner.kv_connector_output = output
+                if not defer_finalize:
+                    kv_connector.clear_connector_metadata()
+                collection_failed = False
+            finally:
+                if (step_id := scheduler_output.kv_connector_step_id) is not None:
+                    kv_connector_output_buffer.put(
+                        step_id, output, collection_failed=collection_failed
+                    )

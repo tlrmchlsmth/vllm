@@ -4,6 +4,7 @@ import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from concurrent.futures import Future
+from copy import copy
 from functools import cached_property
 from typing import TYPE_CHECKING, Literal, TypeVar, overload
 
@@ -22,7 +23,7 @@ from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.engine import ReconfigureDistributedRequest
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
-from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
+from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 
 if TYPE_CHECKING:
@@ -47,6 +48,7 @@ class Executor(ABC):
 
     uses_ray: bool = False  # whether the executor uses Ray for orchestration.
     supports_pp: bool = False  # whether the executor supports PP
+    supports_kv_recovery: bool = False
 
     @staticmethod
     def get_class(vllm_config: VllmConfig) -> type["Executor"]:
@@ -110,6 +112,19 @@ class Executor(ABC):
         self.device_config = vllm_config.device_config
         self.speculative_config = vllm_config.speculative_config
         self.observability_config = vllm_config.observability_config
+        self._use_kv_recovery = bool(
+            self.parallel_config.enable_fault_tolerance
+            and vllm_config.kv_transfer_config is not None
+        )
+        # Explicit KV recovery: an executor must drain all submitted work
+        # before the recovery RPC can safely return worker notifications.
+        if self._use_kv_recovery and not self.supports_kv_recovery:
+            raise ValueError(
+                f"{type(self).__name__} does not support fault tolerance with "
+                "KV transfer. Use the mp, uni, or Ray V2 executor."
+            )
+        self._kv_connector_step_id = 0
+        self._kv_recovery_failed = False
         self._init_executor()
         self.sleeping_tags: set[str] = set()
         self.kv_output_aggregator: KVOutputAggregator | None = None
@@ -298,6 +313,61 @@ class Executor(ABC):
         self.kv_output_aggregator = KVOutputAggregator.from_connector(
             connector, self.parallel_config.world_size
         )
+        self.kv_output_aggregator.defer_outputs = self._use_kv_recovery
+
+    def prepare_kv_connector_step(self, scheduler_output: SchedulerOutput) -> None:
+        if self._use_kv_recovery:
+            scheduler_output.kv_connector_step_id = self._kv_connector_step_id
+            self._kv_connector_step_id += 1
+
+    def collect_kv_connector_output(
+        self, scheduler_output: SchedulerOutput, model_output: ModelRunnerOutput
+    ) -> ModelRunnerOutput:
+        """Attach this step's notifications after model execution succeeds."""
+        if (step_id := scheduler_output.kv_connector_step_id) is None:
+            return model_output
+        outputs = self._collect_kv_connector_outputs(step_id)
+        assert len(outputs) <= 1
+        # Empty model outputs can be shared singletons.
+        model_output = copy(model_output)
+        model_output.kv_connector_output = outputs[0] if outputs else None
+        return model_output
+
+    def recover_kv_connector_outputs(self) -> list[KVConnectorOutput]:
+        """Drain old worker notifications before the scheduler releases blocks.
+
+        Implementations must fence submitted model work, preserve rank order,
+        and raise if any worker's buffer cannot be retrieved. No model tokens
+        from these steps are applied to the scheduler.
+        """
+        if not self._use_kv_recovery:
+            return []
+        return self._collect_kv_connector_outputs(None)
+
+    def _collect_kv_connector_outputs(
+        self, step_id: int | None
+    ) -> list[KVConnectorOutput]:
+        if self._kv_recovery_failed:
+            raise RuntimeError("KV output retrieval failed; restart required")
+        try:
+            worker_outputs: list[dict[int, KVConnectorOutput]] = self.collective_rpc(
+                "take_kv_connector_outputs",
+                args=(step_id,),
+                timeout=self.parallel_config.fault_tolerance_config.engine_recovery_timeout_sec,
+            )
+            assert len(worker_outputs) == self.parallel_config.world_size
+            assert self.kv_output_aggregator is not None
+            step_ids = sorted({s for outputs in worker_outputs for s in outputs})
+            return [
+                self.kv_output_aggregator.aggregate_kv_outputs(
+                    [outputs.get(s) for outputs in worker_outputs]
+                )
+                for s in step_ids
+            ]
+        except Exception:
+            # Explicit KV recovery cannot retry a partially consumed RPC.
+            self._kv_recovery_failed = True
+            raise
 
     def init_ec_output_aggregator(self) -> None:
         self.ec_output_aggregator = ECOutputAggregator()

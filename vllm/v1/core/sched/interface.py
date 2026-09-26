@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     from vllm.v1.engine import EngineCoreOutputs
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.metrics.stats import SchedulerStats
-    from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
+    from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
     from vllm.v1.request import Request, RequestStatus
     from vllm.v1.structured_output import StructuredOutputManager
 
@@ -36,6 +36,12 @@ class PauseState(enum.IntEnum):
 
 
 class SchedulerInterface(ABC):
+    def update_from_kv_connector_recovery(
+        self, outputs: list["KVConnectorOutput"]
+    ) -> None:
+        """Consume old transfer state before faulted requests are aborted."""
+        raise NotImplementedError("This scheduler does not support KV recovery")
+
     @abstractmethod
     def __init__(
         self,

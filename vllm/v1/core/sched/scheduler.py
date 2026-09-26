@@ -2300,22 +2300,7 @@ class Scheduler(SchedulerInterface):
                     else scheduler_ec_connector_stats
                 )
 
-        # collect KV cache events from KV cache manager
-        events = self.kv_cache_manager.take_events()
-
-        # collect KV cache events from connector
-        if self.connector is not None:
-            connector_events = self.connector.take_events()
-            if connector_events:
-                if events is None:
-                    events = list(connector_events)
-                else:
-                    events.extend(connector_events)
-
-        # publish collected KV cache events
-        if events:
-            batch = KVEventBatch(ts=time.time(), events=events)
-            self.kv_event_publisher.publish(batch)
+        self._publish_kv_events()
 
         # Create EngineCoreOutputs for all clients that have requests with
         # outputs in this step.
@@ -2355,6 +2340,23 @@ class Scheduler(SchedulerInterface):
             eco.scheduler_stats = stats
 
         return engine_core_outputs
+
+    def _publish_kv_events(self) -> None:
+        events = self.kv_cache_manager.take_events()
+
+        # collect KV cache events from connector
+        if self.connector is not None:
+            connector_events = self.connector.take_events()
+            if connector_events:
+                if events is None:
+                    events = list(connector_events)
+                else:
+                    events.extend(connector_events)
+
+        # publish collected KV cache events
+        if events:
+            batch = KVEventBatch(ts=time.time(), events=events)
+            self.kv_event_publisher.publish(batch)
 
     def _ec_transfer_pending(self, request: Request, num_computed_tokens: int) -> bool:
         """Whether an encoder input this request needs is still in transit."""
@@ -3136,6 +3138,28 @@ class Scheduler(SchedulerInterface):
             logger.debug("Finished sending KV transfer for request %s", req_id)
             assert req_id in self.requests
             self._free_blocks(self.requests[req_id])
+
+    def update_from_kv_connector_recovery(
+        self, outputs: list[KVConnectorOutput]
+    ) -> None:
+        # Resolve block failures before reuse: all faulted requests will be
+        # aborted, so even the recompute policy must evict their cached prefixes.
+        for output in outputs:
+            if output.invalid_block_ids:
+                if len(self.kv_cache_config.kv_cache_groups) != 1:
+                    raise RuntimeError("KV recovery requires request-level load errors")
+                _, _, blocks_to_evict = self._update_requests_with_invalid_blocks(
+                    self.running, output.invalid_block_ids, {}, evict_blocks=True
+                )
+                self.kv_cache_manager.evict_blocks(
+                    blocks_to_evict | output.invalid_block_ids
+                )
+            self._update_from_kv_xfer_finished(output)
+        # The recovery RPC fenced all submitted GPU work, including steps
+        # whose token outputs were discarded rather than applied here.
+        self.processed_step_seq = self.sched_step_seq
+        self._drain_deferred_frees()
+        self._publish_kv_events()
 
     def _update_requests_with_invalid_blocks(
         self,

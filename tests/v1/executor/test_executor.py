@@ -8,6 +8,7 @@ from collections.abc import Callable
 from concurrent.futures import Future
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -223,57 +224,85 @@ class _FakeResponseMQ:
         return self._responses.pop(0)
 
 
-def _make_failed_step_executor(enable_ft: bool) -> MultiprocExecutor:
+@pytest.mark.parametrize("enable_ft", [True, False])
+@pytest.mark.parametrize("has_kv", [True, False])
+def test_drain_worker_replies_before_raising(enable_ft, has_kv):
+    """Drain worker replies so the next RPC cannot consume an old response."""
     executor = MultiprocExecutor.__new__(MultiprocExecutor)
     executor.vllm_config = SimpleNamespace(
         parallel_config=SimpleNamespace(enable_fault_tolerance=enable_ft)
     )
     executor.is_failed = False
     executor.rpc_broadcast_mq = SimpleNamespace(enqueue=lambda *_: None)
+    success = WorkerProc.ResponseStatus.SUCCESS
     executor.response_mqs = [
         _FakeResponseMQ(
-            [
-                (
-                    WorkerProc.ResponseStatus.FAILURE_WITH_KV_OUTPUT,
-                    KVConnectorOutput(finished_recving={"req1"}, invalid_block_ids={7}),
-                )
-            ]
+            [(WorkerProc.ResponseStatus.FAILURE, "forward failed"), (success, "new-0")]
         ),
-        _FakeResponseMQ(
-            [
-                (
-                    WorkerProc.ResponseStatus.SUCCESS,
-                    ModelRunnerOutput(
-                        req_ids=[],
-                        req_id_to_index={},
-                        kv_connector_output=KVConnectorOutput(
-                            finished_recving={"req1"}
-                        ),
-                    ),
-                )
-            ]
-        ),
+        _FakeResponseMQ([(success, "old-1"), (success, "new-1")]),
     ]
     executor.futures_queue = deque()
-    return executor
+    aggregator = KVOutputAggregator(2, defer_outputs=True) if has_kv else None
+    with pytest.raises(RuntimeError, match="forward failed"):
+        executor.collective_rpc("execute_model", kv_output_aggregator=aggregator)
+    assert executor.collective_rpc("next") == ["new-0", "new-1"]
 
 
-@pytest.mark.parametrize("enable_ft", [True, False])
-def test_collective_rpc_worker_failure_merges_kv_output(enable_ft):
-    """A worker failing with KV output must not lose KV progress (FT only)."""
-    executor = _make_failed_step_executor(enable_ft)
-    aggregator = KVOutputAggregator(expected_finished_count=2)
+@pytest.mark.parametrize("executor_cls", [MultiprocExecutor, UniProcExecutor])
+def test_explicit_kv_recovery_keeps_later_steps_in_worker_buffers(executor_cls):
+    """Explicit KV recovery drains old steps once without needing model outputs."""
+    from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.worker.kv_connector_output import KVConnectorOutputBuffer
 
-    future = executor.collective_rpc(
-        "sample_tokens", non_block=True, kv_output_aggregator=aggregator
+    executor = executor_cls.__new__(executor_cls)
+    executor._use_kv_recovery = True
+    executor._kv_connector_step_id = 0
+    executor._kv_recovery_failed = False
+    executor.parallel_config = SimpleNamespace(
+        world_size=2,
+        fault_tolerance_config=SimpleNamespace(engine_recovery_timeout_sec=120),
     )
-    with pytest.raises(RuntimeError, match="[Ww]orker"):
-        future.result()
+    executor.kv_output_aggregator = KVOutputAggregator(2, defer_outputs=True)
+    buffers = [KVConnectorOutputBuffer(), KVConnectorOutputBuffer()]
+    for buffer in buffers:
+        buffer.put(0, KVConnectorOutput(finished_sending={"first"}))
+        buffer.put(1, KVConnectorOutput(finished_recving={"failed-step"}))
+    executor.collective_rpc = lambda method, args, timeout: [
+        b.take(args[0]) for b in buffers
+    ]
+    step = SchedulerOutput.make_empty()
+    executor.prepare_kv_connector_step(step)
+    model_output = ModelRunnerOutput(req_ids=[], req_id_to_index={})
+    output = executor.collect_kv_connector_output(step, model_output)
+    assert model_output.kv_connector_output is None
+    assert output.kv_connector_output.finished_sending == {"first"}
+    recovered = executor.recover_kv_connector_outputs()
+    assert len(recovered) == 1
+    assert recovered[0].finished_recving == {"failed-step"}
+    assert executor.recover_kv_connector_outputs() == []
 
-    if enable_ft:
-        # req1's recv votes are complete; surfaced at the next aggregate().
-        assert aggregator._pending_finished_recving == {"req1"}
-        assert aggregator._pending_invalid_block_ids == {7}
-    else:
-        assert aggregator._recv_remaining_count == {}
-        assert aggregator._pending_invalid_block_ids == set()
+
+def test_explicit_kv_recovery_rejects_unsupported_executor_before_startup():
+    """Explicit KV recovery requires an executor that implements the contract."""
+    executor = SimpleNamespace(supports_kv_recovery=False, _init_executor=MagicMock())
+    config = MagicMock()
+    config.parallel_config.enable_fault_tolerance = True
+    with pytest.raises(ValueError, match="does not support fault tolerance"):
+        Executor.__init__(executor, config)
+    executor._init_executor.assert_not_called()
+
+
+def test_explicit_kv_recovery_does_not_retry_partially_consumed_rpc():
+    """Preserve consumed notifications by refusing recovery after partial retrieval."""
+    executor = UniProcExecutor.__new__(UniProcExecutor)
+    executor._use_kv_recovery = True
+    executor._kv_recovery_failed = False
+    executor.parallel_config = SimpleNamespace(
+        fault_tolerance_config=SimpleNamespace(engine_recovery_timeout_sec=120),
+    )
+    executor.collective_rpc = MagicMock(side_effect=RuntimeError("worker failed"))
+    with pytest.raises(RuntimeError, match="worker failed"):
+        executor.recover_kv_connector_outputs()
+    with pytest.raises(RuntimeError, match="restart required"):
+        executor.recover_kv_connector_outputs()
+    executor.collective_rpc.assert_called_once()

@@ -641,6 +641,7 @@ class EngineCore:
         if not self.scheduler.has_requests():
             return {}, False
         scheduler_output = self.scheduler.schedule(self._should_throttle_prefills())
+        self.model_executor.prepare_kv_connector_step(scheduler_output)
         future = self.model_executor.execute_model(scheduler_output, non_block=True)
         grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
         with (
@@ -651,6 +652,11 @@ class EngineCore:
             if model_output is None:
                 model_output = self.model_executor.sample_tokens(grammar_output)
 
+        # Explicit KV recovery: retrieve notifications without materializing
+        # another model output or consuming notifications from a later step.
+        model_output = self.model_executor.collect_kv_connector_output(
+            scheduler_output, model_output
+        )
         # Before processing the model output, process any aborts that happened
         # during the model execution.
         self._process_aborts_queue()
@@ -698,6 +704,7 @@ class EngineCore:
         deferred_scheduler_output = None
         if self.scheduler.has_requests():
             scheduler_output = self.scheduler.schedule(self._should_throttle_prefills())
+            self.model_executor.prepare_kv_connector_step(scheduler_output)
             with self.log_error_detail(scheduler_output):
                 exec_future = self.model_executor.execute_model(
                     scheduler_output, non_block=True
@@ -752,6 +759,9 @@ class EngineCore:
                 exec_model_fut.result()
                 raise RuntimeError("unexpected error")
 
+        model_output = self.model_executor.collect_kv_connector_output(
+            scheduler_output, model_output
+        )
         # Before processing the model output, process any aborts that happened
         # during the model execution.
         self._process_aborts_queue()

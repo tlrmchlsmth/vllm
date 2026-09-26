@@ -533,6 +533,18 @@ class Worker(WorkerBase):
         assert self.worker_sentinel is not None
         return self.worker_sentinel.handle_command(ft_request)
 
+    def take_kv_connector_outputs(self, step_id: int | None):
+        from vllm.v1.worker.kv_connector_output import kv_connector_output_buffer
+
+        if step_id is None:
+            # Resolve block failures before reuse: fence old GPU writes before
+            # the scheduler aborts requests and releases their allocations.
+            torch.accelerator.synchronize()
+            if self.use_v2_model_runner:
+                runner = cast("GPUModelRunnerV2", self.model_runner)
+                runner.kv_connector.recover()
+        return kv_connector_output_buffer.take(step_id)
+
     # FIXME(youkaichao & ywang96): Use TorchDispatchMode instead of memory pool
     # to hijack tensor allocation.
     def load_model(self, *, load_dummy_weights: bool = False) -> None:
