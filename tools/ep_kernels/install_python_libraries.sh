@@ -177,6 +177,30 @@ do_build() {
     clone_repo "$repo" "$name" "$key" "$commit"
     cd "$name"
 
+    if [[ "$name" == "MoonEP" ]]; then
+        # Reconcile MoonEP CUTLASS: wheel metadata must match vLLM's pin so
+        # installing EP wheels cannot downgrade the shared CUDA runtime.
+        local cutlass_version=4.7.1
+        if [[ "${INSTALL_RUBIN_PRERELEASE:-false}" == "true" ]]; then
+            local -a uv_environment=()
+            if [[ -z "$VIRTUAL_ENV" ]]; then
+                uv_environment=(--system)
+            fi
+            cutlass_version=$(uv pip show "${uv_environment[@]}" nvidia-cutlass-dsl |
+                sed -n 's/^Version: //p')
+            if [[ -z "$cutlass_version" ]]; then
+                echo "Rubin's CUTLASS DSL must be installed before building MoonEP" >&2
+                exit 1
+            fi
+        fi
+        sed -i.bak "s/nvidia-cutlass-dsl==4.6.2/nvidia-cutlass-dsl==${cutlass_version}/" setup.py
+        rm setup.py.bak
+        if ! grep -Fq "nvidia-cutlass-dsl==${cutlass_version}" setup.py; then
+            echo "Unsupported MoonEP CUTLASS dependency in setup.py" >&2
+            exit 1
+        fi
+    fi
+
     # DeepEP CUDA 13 patch
     if [[ "$name" == "DeepEP" && "${CUDA_VERSION_MAJOR}" -ge 13 ]]; then
         sed -i "s|f'{nvshmem_dir}/include']|f'{nvshmem_dir}/include', '${CUDA_HOME}/include/cccl']|" "setup.py"

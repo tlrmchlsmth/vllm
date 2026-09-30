@@ -14,6 +14,11 @@ pinned commit (`MOONEP_COMMIT_HASH` / `--moonep-ref`), the same way DeepEP is
 handled. It has no NVSHMEM dependency; at runtime it requires NVSwitch
 multicast capable GPUs (single-node NVLink symmetric memory).
 
+The installer patches MoonEP's CUTLASS DSL dependency to vLLM's 4.7.1 pin.
+Rubin prerelease builds instead use the CUTLASS version already installed in
+the build environment. Validate MoonEP kernels with the selected CUTLASS
+version before deployment. MoonEP does not support `--enable-sleep-mode`.
+
 All scripts accept a positional argument as workspace path for staging the build, defaulting to `$(pwd)/ep_kernels_workspace`.
 
 ## NCCL version requirement (CUDA 13+)

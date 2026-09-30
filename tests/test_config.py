@@ -57,6 +57,17 @@ from vllm.v1.attention.backend import AttentionCGSupport
 DEVICE_TYPE = current_platform.device_type
 
 
+def test_preserve_moonep_sleep_handling_rejects_sleep_mode(monkeypatch):
+    """Preserve MoonEP sleep handling by rejecting untracked expert weights."""
+    monkeypatch.setattr(ModelConfig, "__post_init__", lambda self, *args: None)
+    model_config = ModelConfig(enable_sleep_mode=True)
+    with pytest.raises(ValueError, match="moonep.*does not support sleep mode"):
+        VllmConfig(
+            model_config=model_config,
+            parallel_config=ParallelConfig(all2all_backend="moonep"),
+        )
+
+
 def test_nested_rope_validation_patch_preserves_flat_rope_parameters(monkeypatch):
     calls = []
 

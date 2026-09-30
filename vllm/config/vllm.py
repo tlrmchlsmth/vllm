@@ -1409,6 +1409,20 @@ class VllmConfig:
             # below unsafe (e.g. use_mla resolves the architecture registry).
             return
 
+        # Preserve MoonEP sleep handling: VMM expert weights bypass the
+        # allocator that offloads and releases weights during sleep.
+        if (
+            self.parallel_config.all2all_backend == "moonep"
+            and self.model_config is not None
+            and self.model_config.enable_sleep_mode
+        ):
+            raise ValueError(
+                "The moonep all2all backend does not support sleep mode: "
+                "its symmetric-memory expert weights cannot be offloaded or "
+                "released during sleep. Disable --enable-sleep-mode or use "
+                "a different --all2all-backend."
+            )
+
         self._resolve_mm_encoder_only()
 
         if self.is_mm_encoder_only and self.cache_config.enable_prefix_caching:

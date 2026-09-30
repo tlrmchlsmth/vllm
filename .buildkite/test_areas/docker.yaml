@@ -13,8 +13,12 @@ steps:
     - docker/Dockerfile.cpu
     - docker/docker-bake.hcl
     - tests/tools/test_docker_build_metadata_args.py
+    - tests/tools/test_ep_kernels_installer.py
+    - tools/ep_kernels/install_python_libraries.sh
   commands:
     - pytest -v -s tools/test_docker_build_metadata_args.py
+    # Reconcile MoonEP CUTLASS: check wheel metadata without requiring a GPU.
+    - pytest -v -s tools/test_ep_kernels_installer.py
   mirror:
     amd:
       label: ":amd: (MI250) Docker Build Metadata"
@@ -32,3 +36,5 @@ steps:
       - docker/ci-rocm.hcl
       - docker/docker-bake-rocm.hcl
       - tests/tools/test_docker_build_metadata_args.py
+      - tests/tools/test_ep_kernels_installer.py
+      - tools/ep_kernels/install_python_libraries.sh
