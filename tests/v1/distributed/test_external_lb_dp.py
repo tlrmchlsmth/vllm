@@ -8,6 +8,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import AsyncExitStack
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
+from unittest.mock import AsyncMock
 
 import msgspec
 import openai  # use the official client for correctness check
@@ -18,8 +19,10 @@ import requests
 from tests.utils import RemoteOpenAIServer
 from vllm.distributed.elastic_ep.external_elastic_ep import (
     ExternalElasticEPScaleCoordinator,
+    _PreparedExternalElasticEPScale,
 )
 from vllm.platforms import current_platform
+from vllm.v1.engine import ReconfigureDistributedRequest
 
 if TYPE_CHECKING:
     from vllm.v1.engine.core_client import DPAsyncMPClient
@@ -122,6 +125,130 @@ async def test_external_elastic_ep_late_rank_observes_epoch_error():
 
     with pytest.raises(RuntimeError, match="scale failed"):
         await coordinator._wait_for_bootstrap(store, requested_new_dp_size=3)
+
+
+@pytest.mark.asyncio
+async def test_preserve_control_store_address_after_handshake_failure(monkeypatch):
+    from vllm.distributed import utils as distributed_utils
+    from vllm.v1.engine.core_client import DPAsyncMPClient
+
+    original_store = DictStore({})
+    next_store = DictStore({})
+    monkeypatch.setattr(next_store, "port", 23456, raising=False)
+    config = SimpleNamespace(
+        data_parallel_rank=0,
+        data_parallel_size=2,
+        data_parallel_master_ip="127.0.0.1",
+        _coord_store_port=12345,
+        elastic_ep_max_dp_size=3,
+        eplb_config=SimpleNamespace(num_redundant_experts=0),
+    )
+    client = SimpleNamespace(
+        vllm_config=SimpleNamespace(
+            parallel_config=config,
+            model_config=SimpleNamespace(get_num_experts=lambda: 128),
+        ),
+        _coord_store=original_store,
+    )
+    client._setup_elastic_ep_reconfig_bootstrap = lambda: (
+        DPAsyncMPClient._setup_elastic_ep_reconfig_bootstrap(client)
+    )
+    monkeypatch.setattr(
+        distributed_utils, "create_tcp_store", lambda *a, **k: next_store
+    )
+    monkeypatch.setattr(
+        distributed_utils, "get_cached_tcp_store_client", lambda *a: original_store
+    )
+    coordinator = ExternalElasticEPScaleCoordinator(cast("DPAsyncMPClient", client))
+
+    def fail_handshake(*args):
+        raise RuntimeError("listener cannot bind")
+
+    monkeypatch.setattr(coordinator, "_start_scale_up_handshake_server", fail_handshake)
+    epochs = []
+    for _ in range(2):
+        with pytest.raises(RuntimeError, match="listener cannot bind"):
+            await coordinator.prepare(2, 3)
+        assert config._coord_store_port == 12345
+        assert client._coord_store is original_store
+        epochs.append(original_store.get(coordinator.key("current_epoch")))
+    assert epochs[0] != epochs[1]
+
+
+@pytest.mark.parametrize(
+    ("mrv2", "can_reuse", "expected"),
+    [(False, False, "keep"), (True, False, "wait"), (True, True, "keep")],
+)
+def test_drain_mrv2_requests_only_when_recapture_is_required(
+    monkeypatch, mrv2, can_reuse, expected
+):
+    from vllm.distributed.elastic_ep import elastic_execute
+    from vllm.v1.engine.core_client import DPAsyncMPClient
+
+    monkeypatch.setattr(
+        elastic_execute, "can_reuse_fused_moe_kernel", lambda config: can_reuse
+    )
+    client = SimpleNamespace(
+        vllm_config=SimpleNamespace(
+            use_v2_model_runner=mrv2, parallel_config=SimpleNamespace()
+        )
+    )
+    assert DPAsyncMPClient._eep_commit_pause_mode(client) == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("dp_rank", [0, 1])
+async def test_notify_external_topology_and_drain_mrv2_requests(monkeypatch, dp_rank):
+    config = SimpleNamespace(data_parallel_size=2)
+    client = SimpleNamespace(
+        vllm_config=SimpleNamespace(parallel_config=config),
+        _eep_commit_pause_mode=lambda: "wait",
+        pause_scheduler_async=AsyncMock(),
+        call_utility_async=AsyncMock(),
+        resume_scheduler_async=AsyncMock(),
+        _ensure_stats_update_task=lambda: None,
+        first_req_send_socket=SimpleNamespace(send=AsyncMock()),
+    )
+    coordinator = ExternalElasticEPScaleCoordinator(cast("DPAsyncMPClient", client))
+    bootstrap = ReconfigureDistributedRequest(
+        new_data_parallel_size=3,
+        new_data_parallel_rank=-1,
+        new_data_parallel_rank_local=-1,
+        new_data_parallel_master_ip="127.0.0.1",
+        new_data_parallel_master_port=12345,
+        new_data_parallel_master_port_list=[],
+        coord_store_port=12346,
+    )
+    coordinator.prepared_scale = _PreparedExternalElasticEPScale(
+        control_store=DictStore({}),
+        reconfig_store=DictStore({}),
+        epoch="scale-up",
+        bootstrap=bootstrap,
+        dp_rank=dp_rank,
+        cur_data_parallel_size=2,
+        num_redundant_experts=64,
+        scale_up=True,
+        handshake_server=None,
+    )
+    monkeypatch.setattr(coordinator, "_wait_for_local_reconfig_finished", AsyncMock())
+    monkeypatch.setattr(coordinator, "_wait_for_all_old_ranks", AsyncMock())
+    monkeypatch.setattr(
+        coordinator,
+        "_update_parallel_config",
+        lambda *args: setattr(config, "data_parallel_size", 3),
+    )
+    await coordinator.commit()
+
+    client.pause_scheduler_async.assert_awaited_once_with(
+        mode="wait", clear_cache=False
+    )
+    if dp_rank == 0:
+        client.first_req_send_socket.send.assert_awaited_once_with(
+            msgspec.msgpack.encode(("SCALE_ELASTIC_EP", 3))
+        )
+    else:
+        client.first_req_send_socket.send.assert_not_awaited()
+    client.resume_scheduler_async.assert_awaited_once()
 
 
 class ExternalLBServerManager:
@@ -343,6 +470,7 @@ def _wait_for_scale_requests_to_start(
     reason="Elastic EP scaling is not supported by the Rust frontend",
 )
 def test_external_lb_elastic_ep_scale_up(default_server_args) -> None:
+    """Permit scale-up test by reserving capacity above the initial DP size."""
     server_args = [
         *default_server_args,
         "--enable-expert-parallel",
@@ -350,6 +478,9 @@ def test_external_lb_elastic_ep_scale_up(default_server_args) -> None:
         "allgather_reducescatter",
         "--attention-backend",
         "TRITON_MLA",
+        # Permit scale-up test: the default ceiling equals the initial DP size.
+        "--elastic-ep-max-dp-size",
+        "3",
         "--enable-elastic-ep",
         "--enable-eplb",
         "--eplb-config",

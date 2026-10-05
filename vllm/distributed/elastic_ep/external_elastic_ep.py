@@ -300,6 +300,8 @@ class ExternalElasticEPScaleCoordinator:
         self.control_store_ref = getattr(self.client, "_coord_store", None)
         ip, coord_store_port = self.client._setup_elastic_ep_reconfig_bootstrap()
         self.reconfig_store_ref = getattr(self.client, "_coord_store", None)
+        # Preserve control-store address: retain its server across failed retries.
+        self.client._coord_store = self.control_store_ref
         return ip, coord_store_port
 
     def _get_error(self, store: Any, epoch: str) -> str | None:
@@ -771,7 +773,8 @@ class ExternalElasticEPScaleCoordinator:
                     store, prepared.epoch, ExternalElasticEPScalePhase.COMMITTING
                 )
             await self.client.pause_scheduler_async(
-                mode="keep" if remaining else "abort",
+                # Drain MRV2 requests before recapture clears their runner state.
+                mode=self.client._eep_commit_pause_mode() if remaining else "abort",
                 clear_cache=False,
             )
             if remaining:
@@ -816,6 +819,15 @@ class ExternalElasticEPScaleCoordinator:
 
             if remaining:
                 self._update_parallel_config(bootstrap, prepared.num_redundant_experts)
+                if prepared.dp_rank == 0:
+                    self.client._coord_store = self.reconfig_store_ref
+                    # Notify external topology before workers publish new-rank stats.
+                    self.client._ensure_stats_update_task()
+                    await self.client.first_req_send_socket.send(
+                        msgspec.msgpack.encode(
+                            ("SCALE_ELASTIC_EP", bootstrap.new_data_parallel_size)
+                        )
+                    )
                 await self.client.resume_scheduler_async()
             self._stop_handshake_server(
                 prepared.handshake_server, suppress_errors=False

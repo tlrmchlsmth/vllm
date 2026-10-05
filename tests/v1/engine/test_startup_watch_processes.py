@@ -6,7 +6,9 @@ from contextlib import nullcontext
 from multiprocessing import connection
 from threading import Event
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
+import msgspec
 import pytest
 import torch
 import zmq
@@ -281,6 +283,7 @@ class _FinishedProcess:
 
 
 def test_wait_for_engine_startup_reports_watched_process_exit():
+    """Update startup caller: frontend failure remains the observable error."""
     ctx = zmq.Context()
     handshake_socket = ctx.socket(zmq.ROUTER)
     recv, send = connection.Pipe(duplex=False)
@@ -306,6 +309,8 @@ def test_wait_for_engine_startup_reports_watched_process_exit():
                 [CoreEngine()],
                 parallel_config,
                 coordinated_dp=False,
+                # Update startup caller for the new handshake configuration flag.
+                send_parallel_config=True,
                 cache_config=None,
                 launch=launch,
             )
@@ -318,3 +323,50 @@ def test_wait_for_engine_startup_reports_watched_process_exit():
         exc_info.value
     )
     assert "Failed frontend proc(s): {'RustFrontend': 1}" in str(exc_info.value)
+
+
+@pytest.mark.parametrize("local", [True, False])
+def test_sync_inferred_dp_ceiling_before_startup_hash_validation(monkeypatch, local):
+    config = SimpleNamespace(
+        data_parallel_size_local=int(local),
+        data_parallel_hybrid_lb=False,
+        data_parallel_external_lb=True,
+        elastic_ep_max_dp_size=3,
+    )
+    config.compute_hash = lambda: str(config.elastic_ep_max_dp_size)
+    messages = iter(
+        msgspec.msgpack.encode(message)
+        for message in (
+            {"status": "HELLO", "local": local, "headless": False},
+            {
+                "status": "READY",
+                "local": local,
+                "headless": False,
+                "elastic_ep_max_dp_size": 4,
+                "parallel_config_hash": "4" if local else "3",
+            },
+        )
+    )
+    socket = MagicMock()
+    socket.recv_multipart.side_effect = lambda: (b"\x00\x00", next(messages))
+    poller = MagicMock()
+    poller.poll.return_value = [(socket, zmq.POLLIN)]
+    monkeypatch.setattr(zmq, "Poller", lambda: poller)
+    engine = CoreEngine(local=local)
+    launch = CoreEngineLaunch(
+        engine_manager=None,
+        coordinator=None,
+        addresses=EngineZmqAddresses(inputs=[], outputs=[]),
+        tensor_queue=None,
+    )
+    wait_for_engine_startup(
+        socket,
+        [engine],
+        config,
+        coordinated_dp=True,
+        send_parallel_config=False,
+        cache_config=None,
+        launch=launch,
+    )
+    assert engine.state == engine_utils.CoreEngineState.READY
+    assert config.elastic_ep_max_dp_size == (4 if local else 3)

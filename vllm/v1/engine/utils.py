@@ -1486,6 +1486,11 @@ def wait_for_engine_startup(
                     num_redundant_experts
                 )
 
+            # Sync inferred DP ceiling before validating the local frontend hash.
+            elastic_ep_max_dp_size = msg.get("elastic_ep_max_dp_size")
+            if elastic_ep_max_dp_size is not None and local:
+                parallel_config.elastic_ep_max_dp_size = elastic_ep_max_dp_size
+
             # Validate config hash consistency across DP workers for MoE models.
             if coordinated_dp:
                 worker_config_hash = msg.get("parallel_config_hash")
