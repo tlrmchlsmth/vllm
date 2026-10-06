@@ -397,8 +397,8 @@ def _make_experts(
         w1_ep, w2_ep = convert_to_unquantized_kernel_format(
             backend,
             moe_config,
-            w1_bf16[e_start:e_end],
-            w2_bf16[e_start:e_end],
+            w1_bf16[e_start:e_end].clone(),
+            w2_bf16[e_start:e_end].clone(),
         )
         experts_cls = next(
             cls
@@ -481,6 +481,8 @@ def _deep_ep_v2_moe_backends(
     dp_size: int,
     config: TestConfig,
     experts_backend: str,
+    do_expand: bool,
+    do_cpu_sync: bool,
 ):
     import tempfile
 
@@ -576,6 +578,9 @@ def _deep_ep_v2_moe_backends(
             hidden_size=hidden_size,
             max_tokens_per_rank=8192,
             use_fp8_dispatch=False,
+            do_expand=do_expand,
+            do_cpu_sync=do_cpu_sync,
+            expert_alignment=128,
         )
         a2a = make_deepep_v2_a2a(
             pg=pg,
@@ -601,12 +606,13 @@ def _deep_ep_v2_moe_backends(
                 apply_router_weight_on_input=False,
             )
 
-        for mode in (
+        modes = (
             CUDAGraphMode.NONE,
             CUDAGraphMode.FULL,
             CUDAGraphMode.PIECEWISE,
             CUDAGraphMode.NONE,
-        ):
+        )
+        for mode in (CUDAGraphMode.NONE,) if do_cpu_sync else modes:
             with set_forward_context(None, vllm_cfg, cudagraph_runtime_mode=mode):
                 out = apply()
                 if mode == CUDAGraphMode.FULL:
@@ -622,15 +628,38 @@ def _deep_ep_v2_moe_backends(
                     ):
                         out = apply()
                     graph.replay()
+                    torch.testing.assert_close(
+                        torch_combined, out, atol=atol, rtol=rtol
+                    )
+                    original_topk = test_tensors.topk.clone()
+                    test_tensors.topk.copy_((original_topk + 1) % config.num_experts)
+                    changed_reference = _make_experts(
+                        experts_backend,
+                        config,
+                        moe_config,
+                        num_local_experts,
+                        pgi.rank,
+                        w1_bf16,
+                        w2_bf16,
+                        test_tensors,
+                    )[3]
+                    graph.replay()
+                    torch.testing.assert_close(
+                        changed_reference, out, atol=atol, rtol=rtol
+                    )
+                    test_tensors.topk.copy_(original_topk)
+                    graph.replay()
 
             torch.testing.assert_close(torch_combined, out, atol=atol, rtol=rtol)
 
 
-@pytest.mark.parametrize("m,n,k", [(32, 256, 1024)])
+@pytest.mark.parametrize("m,n,k", [(32, 256, 1024), (8192, 256, 1024)])
 @pytest.mark.parametrize("num_experts", [32])
 @pytest.mark.parametrize("topk", [6])
 @pytest.mark.parametrize("world_dp_size", [(2, 1)])
 @pytest.mark.parametrize("experts_backend", EXPERTS_BACKENDS)
+@pytest.mark.parametrize("do_expand", [False, True])
+@pytest.mark.parametrize("do_cpu_sync", [False, True])
 @multi_gpu_test(num_gpus=2)
 @requires_deep_ep_v2
 @pytest.mark.skipif(
@@ -645,6 +674,8 @@ def test_deep_ep_v2_moe_backends(
     topk: int,
     world_dp_size: tuple[int, int],
     experts_backend: str,
+    do_expand: bool,
+    do_cpu_sync: bool,
     workspace_init,
 ):
     set_random_seed(7)
@@ -666,4 +697,6 @@ def test_deep_ep_v2_moe_backends(
         dp_size,
         config,
         experts_backend,
+        do_expand,
+        do_cpu_sync,
     )

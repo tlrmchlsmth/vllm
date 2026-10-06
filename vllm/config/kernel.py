@@ -238,6 +238,15 @@ class KernelConfig:
     enable_jit_warmup: bool = True
     """If True, run JIT compile warmup during kernel warmup."""
 
+    deepep_v2_do_expand: bool = False
+    """Expand DeepEP v2 dispatch into one row per token/expert pair."""
+
+    deepep_v2_do_cpu_sync: bool = False
+    """Wait for DeepEP v2 receive counts to reduce unused capacity.
+
+    Requires eager execution; CPU count polling cannot be CUDA graph captured.
+    """
+
     moe_backend: MoEBackend = "auto"
     """Backend for MoE expert computation kernels. Available options:
 
