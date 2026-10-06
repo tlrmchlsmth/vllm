@@ -1999,12 +1999,18 @@ def make_mxfp4_moe_kernel(
     """Create a FusedMoEKernel for the given MXFP4 backend."""
     is_monolithic = issubclass(experts_cls, mk.FusedMoEExpertsMonolithic)
 
+    expert_input_alignment = 1
+    if mxfp4_backend == Mxfp4MoeBackend.DEEPGEMM_MXFP4:
+        from vllm.utils.deep_gemm import get_mk_alignment_for_contiguous_layout
+
+        expert_input_alignment = get_mk_alignment_for_contiguous_layout()[0]
     prepare_finalize = maybe_make_prepare_finalize(
         moe=moe_config,
         quant_config=moe_quant_config,
         routing_tables=routing_tables,
         allow_new_interface=True,
         use_monolithic=is_monolithic,
+        expert_input_alignment=expert_input_alignment,
     )
     assert prepare_finalize is not None
 

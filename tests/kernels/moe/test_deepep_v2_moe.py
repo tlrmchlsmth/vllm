@@ -361,6 +361,7 @@ EXPERTS_BACKENDS = [
     "flashinfer_cutlass",
     "trtllm_fp8",
     "deep_gemm",
+    "deep_gemm_fp4",
 ]
 
 
@@ -376,6 +377,68 @@ def _make_experts(
 ):
     e_start = num_local_experts * rank
     e_end = e_start + num_local_experts
+
+    if experts_backend == "deep_gemm_fp4":
+        import importlib
+
+        from vllm.utils.deep_gemm import _import_deep_gemm
+
+        deep_gemm = _import_deep_gemm()
+        assert deep_gemm is not None
+        per_token_cast_to_fp4 = importlib.import_module(
+            deep_gemm.__name__ + ".utils.math"
+        ).per_token_cast_to_fp4
+
+        from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantDesc
+        from vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe import (
+            DeepGemmFP4Experts,
+        )
+        from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
+
+        def quantize(weights):
+            packed, scales, references = [], [], []
+            values = torch.tensor(
+                [0, 0.5, 1, 1.5, 2, 3, 4, 6, 0, -0.5, -1, -1.5, -2, -3, -4, -6],
+                device=weights.device,
+            )
+            for weight in weights:
+                q, scale = per_token_cast_to_fp4(
+                    weight.float(), use_ue8m0=True, gran_k=32
+                )
+                unpacked = torch.stack((q & 15, q >> 4), dim=-1).flatten(-2)
+                references.append(
+                    (values[unpacked.long()] * scale.repeat_interleave(32, dim=-1)).to(
+                        torch.bfloat16
+                    )
+                )
+                packed.append(q)
+                scales.append(scale)
+            return torch.stack(packed), torch.stack(scales), torch.stack(references)
+
+        w1, w1_scale, w1_ref = quantize(w1_bf16)
+        w2, w2_scale, w2_ref = quantize(w2_bf16)
+        reference = torch_experts(
+            test_tensors.rank_tokens,
+            w1_ref,
+            w2_ref,
+            test_tensors.topk_weights,
+            test_tensors.topk,
+        )
+        shape = GroupShape(128, 128)
+        quant = FusedMoEQuantConfig(
+            _a1=FusedMoEQuantDesc(torch.float8_e4m3fn, shape),
+            _a2=FusedMoEQuantDesc(torch.float8_e4m3fn, shape),
+            _w1=FusedMoEQuantDesc("mxfp4", scale=w1_scale[e_start:e_end]),
+            _w2=FusedMoEQuantDesc("mxfp4", scale=w2_scale[e_start:e_end]),
+        )
+        return (
+            DeepGemmFP4Experts(moe_config=moe_config, quant_config=quant),
+            w1[e_start:e_end],
+            w2[e_start:e_end],
+            reference,
+            6e-2,
+            6e-2,
+        )
 
     if experts_backend not in ("trtllm_fp8", "deep_gemm"):
         from vllm.model_executor.layers.fused_moe.config import (
@@ -536,7 +599,7 @@ def _deep_ep_v2_moe_backends(
     vllm_cfg = VllmConfig()
     vllm_cfg.kernel_config = KernelConfig(
         moe_backend="deep_gemm"
-        if experts_backend == "deep_gemm"
+        if experts_backend.startswith("deep_gemm")
         else "flashinfer_trtllm"
     )
 
@@ -610,7 +673,7 @@ def _deep_ep_v2_moe_backends(
         )
 
         expert_map = None
-        if experts_backend == "deep_gemm":
+        if experts_backend.startswith("deep_gemm"):
             expert_map = torch.full(
                 (config.num_experts,), -1, device=device, dtype=torch.int32
             )
