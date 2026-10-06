@@ -360,6 +360,7 @@ EXPERTS_BACKENDS = [
     "flashinfer_trtllm",
     "flashinfer_cutlass",
     "trtllm_fp8",
+    "deep_gemm",
 ]
 
 
@@ -376,7 +377,7 @@ def _make_experts(
     e_start = num_local_experts * rank
     e_end = e_start + num_local_experts
 
-    if experts_backend != "trtllm_fp8":
+    if experts_backend not in ("trtllm_fp8", "deep_gemm"):
         from vllm.model_executor.layers.fused_moe.config import (
             FUSED_MOE_UNQUANTIZED_CONFIG,
         )
@@ -454,7 +455,11 @@ def _make_experts(
             is_gated = True
 
     w1_ep, w2_ep, w1_scale_ep, w2_scale_ep = convert_to_fp8_moe_kernel_format(
-        fp8_backend=Fp8MoeBackend.FLASHINFER_TRTLLM,
+        fp8_backend=(
+            Fp8MoeBackend.DEEPGEMM
+            if experts_backend == "deep_gemm"
+            else Fp8MoeBackend.FLASHINFER_TRTLLM
+        ),
         layer=_MockLayer(),
         w13=qw.w13_weight[e_start:e_end],
         w2=qw.w2_weight[e_start:e_end],
@@ -464,7 +469,14 @@ def _make_experts(
         w2_input_scale=None,
     )
 
-    fused_experts = TrtLlmFp8ExpertsModular(
+    experts_cls = TrtLlmFp8ExpertsModular
+    if experts_backend == "deep_gemm":
+        from vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe import (
+            DeepGemmExperts,
+        )
+
+        experts_cls = DeepGemmExperts
+    fused_experts = experts_cls(
         moe_config=moe_config,
         quant_config=FusedMoEQuantConfig.make(
             torch.float8_e4m3fn,
@@ -522,7 +534,11 @@ def _deep_ep_v2_moe_backends(
     torch.distributed.broadcast(w2_bf16, src=0, group=pg)
 
     vllm_cfg = VllmConfig()
-    vllm_cfg.kernel_config = KernelConfig(moe_backend="flashinfer_trtllm")
+    vllm_cfg.kernel_config = KernelConfig(
+        moe_backend="deep_gemm"
+        if experts_backend == "deep_gemm"
+        else "flashinfer_trtllm"
+    )
 
     with set_current_vllm_config(vllm_cfg):
         temp_file = tempfile.mktemp()
@@ -593,6 +609,24 @@ def _deep_ep_v2_moe_backends(
             fused_experts=fused_experts,
         )
 
+        expert_map = None
+        if experts_backend == "deep_gemm":
+            expert_map = torch.full(
+                (config.num_experts,), -1, device=device, dtype=torch.int32
+            )
+            start = pgi.rank * num_local_experts
+            expert_map[start : start + num_local_experts] = torch.arange(
+                num_local_experts, device=device, dtype=torch.int32
+            )
+            if do_expand:
+                import vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe as dg
+
+                def unexpected_permutation(*args, **kwargs):
+                    raise AssertionError("Expanded DeepGEMM must skip permutation")
+
+                dg.deepgemm_moe_permute = unexpected_permutation
+                dg.deepgemm_unpermute_and_reduce = unexpected_permutation
+
         def apply():
             return mk_kernel.apply(
                 hidden_states=test_tensors.rank_tokens,
@@ -602,7 +636,7 @@ def _deep_ep_v2_moe_backends(
                 topk_ids=test_tensors.topk,
                 activation=MoEActivation.SILU,
                 global_num_experts=config.num_experts,
-                expert_map=None,
+                expert_map=expert_map,
                 apply_router_weight_on_input=False,
             )
 

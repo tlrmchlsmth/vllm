@@ -372,6 +372,7 @@ def _fwd_kernel_ep_gather(
     topk_num: tl.constexpr,
     expert_map,
     HAS_EXPERT_MAP: tl.constexpr,
+    HAS_INPUT_INDEX: tl.constexpr,
     BLOCK_D: tl.constexpr,
 ):
     cur_block = tl.program_id(0)
@@ -390,10 +391,12 @@ def _fwd_kernel_ep_gather(
                 expert_id = apply_expert_map(expert_id, expert_map)
 
             if expert_id >= 0:
-                source_token_index = tl.load(
-                    input_index + cur_token * input_index_stride0 + topk_index
-                )
-                source_token_index_i64 = source_token_index.to(tl.int64)
+                source_token_index = cur_token
+                if HAS_INPUT_INDEX:
+                    source_token_index = tl.load(
+                        input_index + cur_token * input_index_stride0 + topk_index
+                    )
+                source_token_index_i64 = tl.cast(source_token_index, tl.int64)
                 acc_weight = tl.load(
                     recv_topk_weight + cur_token * recv_topk_weight_stride0 + topk_index
                 )
@@ -407,7 +410,7 @@ def _fwd_kernel_ep_gather(
 
         tl.store(
             output_tensor
-            + cur_token * output_tensor_stride0
+            + tl.cast(cur_token, tl.int64) * output_tensor_stride0
             + cur_block * BLOCK_D
             + off_d,
             accumulator.to(output_tensor.dtype.element_ty),
@@ -419,10 +422,13 @@ def ep_gather(
     input_tensor: torch.Tensor,
     recv_topk_ids: torch.Tensor,
     recv_topk_weight: torch.Tensor,
-    input_index: torch.Tensor,
+    input_index: torch.Tensor | None,
     expert_map: torch.Tensor | None,
     output_tensor: torch.Tensor,
 ):
+    if input_index is None:
+        assert recv_topk_ids.size(1) == 1
+        assert input_tensor.shape == output_tensor.shape
     num_warps = 2
     num_tokens = output_tensor.shape[0]
     hidden_size = input_tensor.shape[1]
@@ -442,14 +448,15 @@ def ep_gather(
         recv_topk_weight.stride(0),
         recv_topk_weight.stride(1),
         input_index,
-        input_index.stride(0),
-        input_index.stride(1),
+        input_index.stride(0) if input_index is not None else 0,
+        input_index.stride(1) if input_index is not None else 0,
         output_tensor,
         output_tensor.stride(0),
         output_tensor.stride(1),
         topk_num=recv_topk_ids.shape[1],
         expert_map=expert_map,
         HAS_EXPERT_MAP=expert_map is not None,
+        HAS_INPUT_INDEX=input_index is not None,
         num_warps=num_warps,
         BLOCK_D=BLOCK_D,
     )
