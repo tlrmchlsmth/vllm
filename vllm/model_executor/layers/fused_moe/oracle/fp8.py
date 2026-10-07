@@ -826,12 +826,18 @@ def make_fp8_moe_kernel(
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
 ) -> mk.FusedMoEKernel:
     # Create Prepare/Finalize.
+    expert_input_alignment = 1
+    if fp8_backend == Fp8MoeBackend.DEEPGEMM:
+        from vllm.utils.deep_gemm import get_mk_alignment_for_contiguous_layout
+
+        expert_input_alignment = get_mk_alignment_for_contiguous_layout()[0]
     prepare_finalize = maybe_make_prepare_finalize(
         moe=moe_config,
         quant_config=moe_quant_config,
         routing_tables=routing_tables,
         allow_new_interface=True,
         use_monolithic=issubclass(experts_cls, mk.FusedMoEExpertsMonolithic),
+        expert_input_alignment=expert_input_alignment,
     )
     assert prepare_finalize is not None
 

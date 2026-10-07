@@ -15,6 +15,88 @@ from vllm.utils.deep_gemm import get_mk_alignment_for_contiguous_layout
 from vllm.utils.math_utils import round_up
 
 
+@triton.jit(do_not_specialize=["M"])
+def _prepare_expanded_deepgemm_input(
+    ids,
+    scales,
+    counts,
+    expert_map,
+    out_ids,
+    out_scales,
+    expert_ends,
+    M,
+    S: tl.constexpr,
+    E: tl.constexpr,
+    ID_STRIDE: tl.constexpr,
+    SF_STRIDE_M: tl.constexpr,
+    SF_STRIDE_K: tl.constexpr,
+    COUNT_STRIDE: tl.constexpr,
+    ALIGNMENT: tl.constexpr,
+    HAS_EXPERT_MAP: tl.constexpr,
+    BLOCK: tl.constexpr,
+    EXPERT_BLOCK: tl.constexpr,
+):
+    offsets = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
+    rows = offsets // S
+    cols = offsets % S
+    valid = rows < M
+    expert = tl.load(ids + rows * ID_STRIDE, valid, other=-1)
+    if HAS_EXPERT_MAP:
+        expert = tl.load(expert_map + expert, valid & (expert >= 0), other=-1)
+    sf = tl.load(
+        scales + rows.to(tl.int64) * SF_STRIDE_M + cols * SF_STRIDE_K,
+        valid,
+        other=1,
+    )
+    sf = tl.where(expert >= 0, sf, 1)
+    tl.store(out_scales + offsets.to(tl.int64), sf, valid)
+    tl.store(out_ids + rows, expert, valid & (cols == 0))
+    if tl.program_id(0) == 0:
+        experts = tl.arange(0, EXPERT_BLOCK)
+        n = tl.load(counts + experts * COUNT_STRIDE, experts < E, other=0).to(tl.int32)
+        padded = tl.cdiv(n, ALIGNMENT) * ALIGNMENT
+        ends = tl.cumsum(padded) - padded + n
+        tl.store(expert_ends + experts, ends, experts < E)
+
+
+def prepare_expanded_deepgemm_input(
+    topk_ids: torch.Tensor,
+    scales: torch.Tensor,
+    counts: torch.Tensor,
+    expert_map: torch.Tensor | None,
+    alignment: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Prepare safe scales and expert metadata without copying expanded activations."""
+    assert topk_ids.ndim == 2 and topk_ids.shape[1] == 1
+    M, S = scales.shape
+    assert topk_ids.shape[0] == M and M > 0
+    out_ids = torch.empty((M,), dtype=torch.int32, device=topk_ids.device)
+    out_scales = torch.empty((M, S), dtype=scales.dtype, device=scales.device)
+    expert_ends = torch.empty_like(counts, dtype=torch.int32)
+    _prepare_expanded_deepgemm_input[(triton.cdiv(M * S, 1024),)](
+        topk_ids,
+        scales,
+        counts,
+        expert_map,
+        out_ids,
+        out_scales,
+        expert_ends,
+        M,
+        S,
+        counts.numel(),
+        topk_ids.stride(0),
+        scales.stride(0),
+        scales.stride(1),
+        counts.stride(0),
+        alignment,
+        expert_map is not None,
+        1024,
+        triton.next_power_of_2(counts.numel()),
+        num_warps=4,
+    )
+    return out_scales, out_ids, expert_ends
+
+
 def expert_num_tokens_round_up_and_sum(
     expert_num_tokens: torch.Tensor, alignment: int
 ) -> int:
@@ -119,6 +201,7 @@ def _fwd_kernel_ep_scatter_1(
     BLOCK_E: tl.constexpr,
     BLOCK_EXPERT_NUM: tl.constexpr,
     ALIGN_M: tl.constexpr,
+    USE_PSUM_LAYOUT: tl.constexpr,
 ):
     cur_expert = tl.program_id(0)
 
@@ -140,20 +223,22 @@ def _fwd_kernel_ep_scatter_1(
     tl.store(expert_start_loc + cur_expert, cur_expert_start)
     cur_expert_token_num = tl.load(num_recv_tokens_per_expert + cur_expert)
 
-    m_indices_start_ptr = m_indices + cur_expert_start
-    off_expert = tl.arange(0, BLOCK_E)
+    if USE_PSUM_LAYOUT:
+        # Logical ends include preceding experts' alignment gaps.
+        tl.store(m_indices + cur_expert, cur_expert_start + cur_expert_token_num)
+    else:
+        m_indices_start_ptr = m_indices + cur_expert_start
+        off_expert = tl.arange(0, BLOCK_E)
 
-    # any rows in the per-expert aligned region that do not correspond to
-    # real tokens are left untouched here and should remain initialized to
-    # -1 so DeepGEMM can skip them
-    for start_m in tl.range(0, cur_expert_token_num, BLOCK_E):
-        offs = start_m + off_expert
-        mask = offs < cur_expert_token_num
-        tl.store(
-            m_indices_start_ptr + offs,
-            cur_expert,
-            mask=mask,
-        )
+        # Unwritten padding retains the -1 initialization.
+        for start_m in tl.range(0, cur_expert_token_num, BLOCK_E):
+            offs = start_m + off_expert
+            mask = offs < cur_expert_token_num
+            tl.store(
+                m_indices_start_ptr + offs,
+                cur_expert,
+                mask=mask,
+            )
 
 
 @triton.jit
@@ -285,6 +370,7 @@ def ep_scatter(
     align_m: int = 128,
     block_size: int = 128,
     pack_ue8m0: bool = False,
+    use_psum_layout: bool = False,
 ):
     # BLOCK_E is the m_indices fill-loop tile (masked), independent of align_m.
     BLOCK_E = 128
@@ -295,7 +381,10 @@ def ep_scatter(
     # grid = (triton.cdiv(hidden_size, BLOCK_D), num_experts)
     grid = num_experts
 
-    assert m_indices.shape[0] % align_m == 0
+    if use_psum_layout:
+        assert m_indices.shape == (num_experts,)
+    else:
+        assert m_indices.shape[0] % align_m == 0
     assert expert_start_loc.shape[0] == num_experts
 
     # pack_ue8m0: scatter packs 4 UE8M0 bytes per int32; else copies scales as-is.
@@ -311,6 +400,7 @@ def ep_scatter(
         BLOCK_E=BLOCK_E,
         BLOCK_EXPERT_NUM=triton.next_power_of_2(num_experts),
         ALIGN_M=align_m,
+        USE_PSUM_LAYOUT=use_psum_layout,
     )
 
     grid = min(recv_topk.shape[0], 1024 * 8)
@@ -372,6 +462,7 @@ def _fwd_kernel_ep_gather(
     topk_num: tl.constexpr,
     expert_map,
     HAS_EXPERT_MAP: tl.constexpr,
+    HAS_INPUT_INDEX: tl.constexpr,
     BLOCK_D: tl.constexpr,
 ):
     cur_block = tl.program_id(0)
@@ -390,10 +481,12 @@ def _fwd_kernel_ep_gather(
                 expert_id = apply_expert_map(expert_id, expert_map)
 
             if expert_id >= 0:
-                source_token_index = tl.load(
-                    input_index + cur_token * input_index_stride0 + topk_index
-                )
-                source_token_index_i64 = source_token_index.to(tl.int64)
+                source_token_index = cur_token
+                if HAS_INPUT_INDEX:
+                    source_token_index = tl.load(
+                        input_index + cur_token * input_index_stride0 + topk_index
+                    )
+                source_token_index_i64 = tl.cast(source_token_index, tl.int64)
                 acc_weight = tl.load(
                     recv_topk_weight + cur_token * recv_topk_weight_stride0 + topk_index
                 )
@@ -407,7 +500,7 @@ def _fwd_kernel_ep_gather(
 
         tl.store(
             output_tensor
-            + cur_token * output_tensor_stride0
+            + tl.cast(cur_token, tl.int64) * output_tensor_stride0
             + cur_block * BLOCK_D
             + off_d,
             accumulator.to(output_tensor.dtype.element_ty),
@@ -419,10 +512,13 @@ def ep_gather(
     input_tensor: torch.Tensor,
     recv_topk_ids: torch.Tensor,
     recv_topk_weight: torch.Tensor,
-    input_index: torch.Tensor,
+    input_index: torch.Tensor | None,
     expert_map: torch.Tensor | None,
     output_tensor: torch.Tensor,
 ):
+    if input_index is None:
+        assert recv_topk_ids.size(1) == 1
+        assert input_tensor.shape == output_tensor.shape
     num_warps = 2
     num_tokens = output_tensor.shape[0]
     hidden_size = input_tensor.shape[1]
@@ -442,14 +538,15 @@ def ep_gather(
         recv_topk_weight.stride(0),
         recv_topk_weight.stride(1),
         input_index,
-        input_index.stride(0),
-        input_index.stride(1),
+        input_index.stride(0) if input_index is not None else 0,
+        input_index.stride(1) if input_index is not None else 0,
         output_tensor,
         output_tensor.stride(0),
         output_tensor.stride(1),
         topk_num=recv_topk_ids.shape[1],
         expert_map=expert_map,
         HAS_EXPERT_MAP=expert_map is not None,
+        HAS_INPUT_INDEX=input_index is not None,
         num_warps=num_warps,
         BLOCK_D=BLOCK_D,
     )
@@ -465,6 +562,7 @@ def deepgemm_moe_permute(
     expert_tokens_meta: mk.ExpertTokensMetadata | None,
     aq_out: torch.Tensor | None = None,
     block_size: int | None = None,
+    use_psum_layout: bool = False,
 ):
     assert aq.ndim == 2
     assert topk_ids.dtype.is_signed, "The kernel uses -1 to represent invalid topk_ids"
@@ -509,17 +607,15 @@ def deepgemm_moe_permute(
     else:
         aq_scale_out = torch.zeros((M_sum, sf_k), device=device, dtype=torch.float32)
 
-    # DeepGEMM uses negative values in m_indices (here expert_ids) to mark
-    # completely invalid / padded blocks that should be skipped. We always
-    # initialize expert_ids to -1 so any row that is not explicitly written
-    # by the scatter kernel will be treated as invalid and skipped by
-    # DeepGEMM's scheduler.
-    expert_ids = torch.full(
-        (M_sum,),
-        fill_value=-1,
-        device=device,
-        dtype=torch.int32,
-    )
+    if use_psum_layout:
+        grouped_layout = torch.empty(
+            (local_num_experts,), device=device, dtype=torch.int32
+        )
+    else:
+        # Negative expert IDs mark padding for the contiguous scheduler.
+        grouped_layout = torch.full(
+            (M_sum,), fill_value=-1, device=device, dtype=torch.int32
+        )
     inv_perm = torch.empty(topk_ids.shape, device=device, dtype=torch.int32)
 
     expert_num_tokens = None
@@ -541,14 +637,15 @@ def deepgemm_moe_permute(
         expert_map=expert_map,
         output_tensor=aq_out,
         output_tensor_scale=aq_scale_out,
-        m_indices=expert_ids,
+        m_indices=grouped_layout,
         output_index=inv_perm,
         align_m=align_used,
         block_size=block_k,
         pack_ue8m0=pack_ue8m0,
+        use_psum_layout=use_psum_layout,
     )
 
-    return aq_out, aq_scale_out, expert_ids, inv_perm, align_used
+    return aq_out, aq_scale_out, grouped_layout, inv_perm, align_used
 
 
 def deepgemm_unpermute_and_reduce(

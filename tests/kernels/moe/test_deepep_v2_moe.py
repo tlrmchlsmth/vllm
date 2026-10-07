@@ -360,6 +360,8 @@ EXPERTS_BACKENDS = [
     "flashinfer_trtllm",
     "flashinfer_cutlass",
     "trtllm_fp8",
+    "deep_gemm",
+    "deep_gemm_fp4",
 ]
 
 
@@ -376,7 +378,69 @@ def _make_experts(
     e_start = num_local_experts * rank
     e_end = e_start + num_local_experts
 
-    if experts_backend != "trtllm_fp8":
+    if experts_backend == "deep_gemm_fp4":
+        import importlib
+
+        from vllm.utils.deep_gemm import _import_deep_gemm
+
+        deep_gemm = _import_deep_gemm()
+        assert deep_gemm is not None
+        per_token_cast_to_fp4 = importlib.import_module(
+            deep_gemm.__name__ + ".utils.math"
+        ).per_token_cast_to_fp4
+
+        from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantDesc
+        from vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe import (
+            DeepGemmFP4Experts,
+        )
+        from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
+
+        def quantize(weights):
+            packed, scales, references = [], [], []
+            values = torch.tensor(
+                [0, 0.5, 1, 1.5, 2, 3, 4, 6, 0, -0.5, -1, -1.5, -2, -3, -4, -6],
+                device=weights.device,
+            )
+            for weight in weights:
+                q, scale = per_token_cast_to_fp4(
+                    weight.float(), use_ue8m0=True, gran_k=32
+                )
+                unpacked = torch.stack((q & 15, q >> 4), dim=-1).flatten(-2)
+                references.append(
+                    (values[unpacked.long()] * scale.repeat_interleave(32, dim=-1)).to(
+                        torch.bfloat16
+                    )
+                )
+                packed.append(q)
+                scales.append(scale)
+            return torch.stack(packed), torch.stack(scales), torch.stack(references)
+
+        w1, w1_scale, w1_ref = quantize(w1_bf16)
+        w2, w2_scale, w2_ref = quantize(w2_bf16)
+        reference = torch_experts(
+            test_tensors.rank_tokens,
+            w1_ref,
+            w2_ref,
+            test_tensors.topk_weights,
+            test_tensors.topk,
+        )
+        shape = GroupShape(128, 128)
+        quant = FusedMoEQuantConfig(
+            _a1=FusedMoEQuantDesc(torch.float8_e4m3fn, shape),
+            _a2=FusedMoEQuantDesc(torch.float8_e4m3fn, shape),
+            _w1=FusedMoEQuantDesc("mxfp4", scale=w1_scale[e_start:e_end]),
+            _w2=FusedMoEQuantDesc("mxfp4", scale=w2_scale[e_start:e_end]),
+        )
+        return (
+            DeepGemmFP4Experts(moe_config=moe_config, quant_config=quant),
+            w1[e_start:e_end],
+            w2[e_start:e_end],
+            reference,
+            6e-2,
+            6e-2,
+        )
+
+    if experts_backend not in ("trtllm_fp8", "deep_gemm"):
         from vllm.model_executor.layers.fused_moe.config import (
             FUSED_MOE_UNQUANTIZED_CONFIG,
         )
@@ -397,8 +461,8 @@ def _make_experts(
         w1_ep, w2_ep = convert_to_unquantized_kernel_format(
             backend,
             moe_config,
-            w1_bf16[e_start:e_end],
-            w2_bf16[e_start:e_end],
+            w1_bf16[e_start:e_end].clone(),
+            w2_bf16[e_start:e_end].clone(),
         )
         experts_cls = next(
             cls
@@ -454,7 +518,11 @@ def _make_experts(
             is_gated = True
 
     w1_ep, w2_ep, w1_scale_ep, w2_scale_ep = convert_to_fp8_moe_kernel_format(
-        fp8_backend=Fp8MoeBackend.FLASHINFER_TRTLLM,
+        fp8_backend=(
+            Fp8MoeBackend.DEEPGEMM
+            if experts_backend == "deep_gemm"
+            else Fp8MoeBackend.FLASHINFER_TRTLLM
+        ),
         layer=_MockLayer(),
         w13=qw.w13_weight[e_start:e_end],
         w2=qw.w2_weight[e_start:e_end],
@@ -464,7 +532,14 @@ def _make_experts(
         w2_input_scale=None,
     )
 
-    fused_experts = TrtLlmFp8ExpertsModular(
+    experts_cls = TrtLlmFp8ExpertsModular
+    if experts_backend == "deep_gemm":
+        from vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe import (
+            DeepGemmExperts,
+        )
+
+        experts_cls = DeepGemmExperts
+    fused_experts = experts_cls(
         moe_config=moe_config,
         quant_config=FusedMoEQuantConfig.make(
             torch.float8_e4m3fn,
@@ -481,6 +556,8 @@ def _deep_ep_v2_moe_backends(
     dp_size: int,
     config: TestConfig,
     experts_backend: str,
+    do_expand: bool,
+    do_cpu_sync: bool,
 ):
     import tempfile
 
@@ -520,7 +597,11 @@ def _deep_ep_v2_moe_backends(
     torch.distributed.broadcast(w2_bf16, src=0, group=pg)
 
     vllm_cfg = VllmConfig()
-    vllm_cfg.kernel_config = KernelConfig(moe_backend="flashinfer_trtllm")
+    vllm_cfg.kernel_config = KernelConfig(
+        moe_backend="deep_gemm"
+        if experts_backend.startswith("deep_gemm")
+        else "flashinfer_trtllm"
+    )
 
     with set_current_vllm_config(vllm_cfg):
         temp_file = tempfile.mktemp()
@@ -576,6 +657,9 @@ def _deep_ep_v2_moe_backends(
             hidden_size=hidden_size,
             max_tokens_per_rank=8192,
             use_fp8_dispatch=False,
+            do_expand=do_expand,
+            do_cpu_sync=do_cpu_sync,
+            expert_alignment=128,
         )
         a2a = make_deepep_v2_a2a(
             pg=pg,
@@ -588,6 +672,24 @@ def _deep_ep_v2_moe_backends(
             fused_experts=fused_experts,
         )
 
+        expert_map = None
+        if experts_backend.startswith("deep_gemm"):
+            expert_map = torch.full(
+                (config.num_experts,), -1, device=device, dtype=torch.int32
+            )
+            start = pgi.rank * num_local_experts
+            expert_map[start : start + num_local_experts] = torch.arange(
+                num_local_experts, device=device, dtype=torch.int32
+            )
+            if do_expand:
+                import vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe as dg
+
+                def unexpected_permutation(*args, **kwargs):
+                    raise AssertionError("Expanded DeepGEMM must skip permutation")
+
+                dg.deepgemm_moe_permute = unexpected_permutation
+                dg.deepgemm_unpermute_and_reduce = unexpected_permutation
+
         def apply():
             return mk_kernel.apply(
                 hidden_states=test_tensors.rank_tokens,
@@ -597,16 +699,17 @@ def _deep_ep_v2_moe_backends(
                 topk_ids=test_tensors.topk,
                 activation=MoEActivation.SILU,
                 global_num_experts=config.num_experts,
-                expert_map=None,
+                expert_map=expert_map,
                 apply_router_weight_on_input=False,
             )
 
-        for mode in (
+        modes = (
             CUDAGraphMode.NONE,
             CUDAGraphMode.FULL,
             CUDAGraphMode.PIECEWISE,
             CUDAGraphMode.NONE,
-        ):
+        )
+        for mode in (CUDAGraphMode.NONE,) if do_cpu_sync else modes:
             with set_forward_context(None, vllm_cfg, cudagraph_runtime_mode=mode):
                 out = apply()
                 if mode == CUDAGraphMode.FULL:
@@ -622,15 +725,38 @@ def _deep_ep_v2_moe_backends(
                     ):
                         out = apply()
                     graph.replay()
+                    torch.testing.assert_close(
+                        torch_combined, out, atol=atol, rtol=rtol
+                    )
+                    original_topk = test_tensors.topk.clone()
+                    test_tensors.topk.copy_((original_topk + 1) % config.num_experts)
+                    changed_reference = _make_experts(
+                        experts_backend,
+                        config,
+                        moe_config,
+                        num_local_experts,
+                        pgi.rank,
+                        w1_bf16,
+                        w2_bf16,
+                        test_tensors,
+                    )[3]
+                    graph.replay()
+                    torch.testing.assert_close(
+                        changed_reference, out, atol=atol, rtol=rtol
+                    )
+                    test_tensors.topk.copy_(original_topk)
+                    graph.replay()
 
             torch.testing.assert_close(torch_combined, out, atol=atol, rtol=rtol)
 
 
-@pytest.mark.parametrize("m,n,k", [(32, 256, 1024)])
+@pytest.mark.parametrize("m,n,k", [(32, 256, 1024), (8192, 256, 1024)])
 @pytest.mark.parametrize("num_experts", [32])
 @pytest.mark.parametrize("topk", [6])
 @pytest.mark.parametrize("world_dp_size", [(2, 1)])
 @pytest.mark.parametrize("experts_backend", EXPERTS_BACKENDS)
+@pytest.mark.parametrize("do_expand", [False, True])
+@pytest.mark.parametrize("do_cpu_sync", [False, True])
 @multi_gpu_test(num_gpus=2)
 @requires_deep_ep_v2
 @pytest.mark.skipif(
@@ -645,6 +771,8 @@ def test_deep_ep_v2_moe_backends(
     topk: int,
     world_dp_size: tuple[int, int],
     experts_backend: str,
+    do_expand: bool,
+    do_cpu_sync: bool,
     workspace_init,
 ):
     set_random_seed(7)
@@ -666,4 +794,6 @@ def test_deep_ep_v2_moe_backends(
         dp_size,
         config,
         experts_backend,
+        do_expand,
+        do_cpu_sync,
     )
