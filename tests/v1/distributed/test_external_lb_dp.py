@@ -16,10 +16,12 @@ import pytest_asyncio
 import requests
 
 from tests.utils import RemoteOpenAIServer
+from vllm.distributed.elastic_ep import elastic_state
 from vllm.distributed.elastic_ep.external_elastic_ep import (
     ExternalElasticEPScaleCoordinator,
 )
 from vllm.platforms import current_platform
+from vllm.v1.engine import EEPNotificationType
 
 if TYPE_CHECKING:
     from vllm.v1.engine.core_client import DPAsyncMPClient
@@ -45,6 +47,69 @@ class DictStore:
 
     def set(self, key: str, value: bytes) -> None:
         self.values[key] = value
+
+
+@pytest.mark.parametrize("delivery_error", [False, True])
+def test_preserve_completion_delivery_before_external_rank_retires(
+    monkeypatch, delivery_error
+):
+    """Preserve completion delivery even when client processing is delayed."""
+    config = SimpleNamespace(
+        data_parallel_external_lb=True,
+        enable_elastic_ep=True,
+        data_parallel_master_ip="127.0.0.1",
+        _coord_store_port=12345,
+    )
+    coordinator = ExternalElasticEPScaleCoordinator(
+        cast(
+            "DPAsyncMPClient",
+            SimpleNamespace(vllm_config=SimpleNamespace(parallel_config=config)),
+        )
+    )
+    epoch = "retirement"
+    coordinator.active_epoch = epoch
+    store = DictStore({coordinator.key("current_epoch"): epoch.encode()})
+    monkeypatch.setattr(coordinator, "_get_reconfig_store", lambda: store)
+    monkeypatch.setattr(
+        elastic_state, "get_cached_tcp_store_client", lambda *_args: store
+    )
+    notifications = []
+    core = SimpleNamespace(
+        dp_rank=2,
+        _eep_send_engine_core_notification=lambda kind: notifications.append(
+            (kind.value, 2)
+        ),
+    )
+    state = object.__new__(elastic_state.ElasticEPScalingState)
+    state.engine_core_ref = lambda: core
+    state.vllm_config = SimpleNamespace(parallel_config=config)
+    state.new_parallel_config = config
+    state.worker_type = "removing"
+    state.scale_type = "scale_down"
+    state.state = elastic_state.ScaleDownRemovingEngineState.PREPARE
+    state.old_dp_group = SimpleNamespace(rank=lambda: 2)
+    monkeypatch.setattr(state, "_commit_scale_down", lambda removing: None)
+    shutdown_key = coordinator.key(epoch, "shutdown_complete", 2)
+
+    def wait_for_delivery(keys):
+        assert keys == [shutdown_key]
+        assert not state.is_complete()
+        assert notifications == [(EEPNotificationType.SHUTDOWN_COMPLETE.value, 2)]
+        assert not store.check(keys)
+        if delivery_error:
+            raise TimeoutError("notification not received")
+        asyncio.run(coordinator.process_engine_core_notification(notifications[0]))
+        assert store.check(keys)
+
+    monkeypatch.setattr(store, "wait", wait_for_delivery, raising=False)
+    if delivery_error:
+        with pytest.raises(TimeoutError, match="notification not received"):
+            state.progress()
+        assert not state.is_complete()
+    else:
+        assert state.progress()
+        assert state.is_complete()
+        assert store.get(shutdown_key) == b"1"
 
 
 def test_external_elastic_ep_visible_epoch_has_bootstrap_and_phase(monkeypatch):
