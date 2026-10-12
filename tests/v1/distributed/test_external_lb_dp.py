@@ -8,6 +8,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import AsyncExitStack
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
+from unittest.mock import AsyncMock
 
 import msgspec
 import openai  # use the official client for correctness check
@@ -16,10 +17,13 @@ import pytest_asyncio
 import requests
 
 from tests.utils import RemoteOpenAIServer
+from vllm.distributed.elastic_ep import elastic_state
 from vllm.distributed.elastic_ep.external_elastic_ep import (
     ExternalElasticEPScaleCoordinator,
+    _PreparedExternalElasticEPScale,
 )
 from vllm.platforms import current_platform
+from vllm.v1.engine import EEPNotificationType, ReconfigureDistributedRequest
 
 if TYPE_CHECKING:
     from vllm.v1.engine.core_client import DPAsyncMPClient
@@ -45,6 +49,255 @@ class DictStore:
 
     def set(self, key: str, value: bytes) -> None:
         self.values[key] = value
+
+
+def _prepared_coordinator(rank, control_store, reconfig_store, pause):
+    client = SimpleNamespace(
+        pause_scheduler_async=pause,
+        call_utility_async=AsyncMock(),
+        _eep_commit_pause_mode=lambda: "keep",
+    )
+    coordinator = ExternalElasticEPScaleCoordinator(cast("DPAsyncMPClient", client))
+    coordinator.prepared_scale = _PreparedExternalElasticEPScale(
+        control_store=control_store,
+        reconfig_store=reconfig_store,
+        epoch="draining",
+        bootstrap=ReconfigureDistributedRequest(
+            3, -1, -1, "127.0.0.1", 12345, [], 12346
+        ),
+        dp_rank=rank,
+        cur_data_parallel_size=2,
+        num_redundant_experts=64,
+        scale_up=True,
+        handshake_server=None,
+    )
+    return coordinator
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error_type", [TimeoutError, asyncio.CancelledError])
+async def test_propagate_drain_failures_before_peer_collective_pause(
+    monkeypatch, error_type
+):
+    """Propagate drain failures without stranding a peer in collective pause."""
+    from vllm.v1.engine import async_llm as async_llm_module
+    from vllm.v1.engine.async_llm import AsyncLLM
+
+    control_store, reconfig_store = DictStore({}), DictStore({})
+    pause = AsyncMock()
+    peer = _prepared_coordinator(0, control_store, reconfig_store, pause)
+    failing = _prepared_coordinator(1, control_store, reconfig_store, pause)
+    waiting = asyncio.Event()
+
+    async def backoff(_step):
+        waiting.set()
+        await asyncio.sleep(0)
+        return 0
+
+    monkeypatch.setattr(peer, "_sleep_with_backoff", backoff)
+    gate_updates: list[bool] = []
+    monkeypatch.setattr(async_llm_module, "set_scaling_elastic_ep", gate_updates.append)
+    llm = SimpleNamespace(
+        vllm_config=SimpleNamespace(
+            parallel_config=SimpleNamespace(data_parallel_external_lb=True)
+        ),
+        wait_for_requests_to_drain=AsyncMock(side_effect=error_type("drain failed")),
+        engine_core=SimpleNamespace(
+            notify_elastic_ep_failure=AsyncMock(side_effect=failing.fail_prepared_scale)
+        ),
+    )
+    task = asyncio.create_task(peer.commit())
+    try:
+        await asyncio.wait_for(waiting.wait(), timeout=1)
+        pause.assert_not_awaited()
+        with pytest.raises(error_type, match="drain failed"):
+            await AsyncLLM._drain_requests_for_elastic_ep(cast("AsyncLLM", llm), 1)
+        with pytest.raises(RuntimeError, match="drain failed"):
+            await asyncio.wait_for(task, timeout=1)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    pause.assert_not_awaited()
+    assert gate_updates == []
+    assert peer.prepared_scale is None and failing.prepared_scale is None
+    for store in (control_store, reconfig_store):
+        assert store.get(peer.key("draining", "phase")) == b"failed"
+
+
+@pytest.mark.asyncio
+async def test_propagate_drain_failures_barrier_admits_all_ready_ranks(monkeypatch):
+    """The drain-failure barrier permits pause after every old rank is ready."""
+    control_store, reconfig_store = DictStore({}), DictStore({})
+    pause = AsyncMock(side_effect=RuntimeError("pause reached"))
+    coordinator = _prepared_coordinator(0, control_store, reconfig_store, pause)
+    waiting = asyncio.Event()
+
+    async def backoff(_step):
+        waiting.set()
+        await asyncio.sleep(0)
+        return 0
+
+    monkeypatch.setattr(coordinator, "_sleep_with_backoff", backoff)
+    task = asyncio.create_task(coordinator.commit())
+    try:
+        await asyncio.wait_for(waiting.wait(), timeout=1)
+        pause.assert_not_awaited()
+        reconfig_store.set(coordinator.key("draining", "commit_ready", 1), b"1")
+        with pytest.raises(RuntimeError, match="pause reached"):
+            await asyncio.wait_for(task, timeout=1)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    pause.assert_awaited_once_with(mode="keep", clear_cache=False)
+
+
+@pytest.mark.parametrize("delivery", ["delayed", "next_epoch", "failure"])
+def test_capture_retirement_epoch_before_completion_notification(monkeypatch, delivery):
+    """Capture the retirement epoch before a subsequent scale changes it."""
+    config = SimpleNamespace(
+        data_parallel_external_lb=True,
+        enable_elastic_ep=True,
+        data_parallel_master_ip="127.0.0.1",
+        _coord_store_port=12345,
+    )
+    coordinator = ExternalElasticEPScaleCoordinator(
+        cast(
+            "DPAsyncMPClient",
+            SimpleNamespace(vllm_config=SimpleNamespace(parallel_config=config)),
+        )
+    )
+    coordinator.active_epoch = "retirement"
+    store = DictStore({coordinator.key("current_epoch"): b"retirement"})
+    monkeypatch.setattr(coordinator, "_get_reconfig_store", lambda: store)
+    monkeypatch.setattr(
+        elastic_state, "get_cached_tcp_store_client", lambda *args: store
+    )
+    notification = (EEPNotificationType.SHUTDOWN_COMPLETE.value, 2)
+
+    def notify(kind):
+        assert kind == EEPNotificationType.SHUTDOWN_COMPLETE
+        if delivery == "next_epoch":
+            asyncio.run(coordinator.process_engine_core_notification(notification))
+            store.set(coordinator.key("current_epoch"), b"next-scale")
+
+    core = SimpleNamespace(dp_rank=2, _eep_send_engine_core_notification=notify)
+    state = object.__new__(elastic_state.ElasticEPScalingState)
+    state.engine_core_ref = lambda: core
+    state.vllm_config = SimpleNamespace(parallel_config=config)
+    state.new_parallel_config = config
+    state.worker_type = "removing"
+    state.scale_type = "scale_down"
+    state.state = elastic_state.ScaleDownRemovingEngineState.PREPARE
+    state.old_dp_group = SimpleNamespace(rank=lambda: 2)
+    monkeypatch.setattr(state, "_commit_scale_down", lambda removing: None)
+
+    def wait(keys):
+        assert keys == [coordinator.key("retirement", "shutdown_complete", 2)]
+        assert not state.is_complete()
+        if delivery == "failure":
+            raise TimeoutError("notification not received")
+        if delivery == "delayed":
+            asyncio.run(coordinator.process_engine_core_notification(notification))
+        assert store.check(keys)
+
+    monkeypatch.setattr(store, "wait", wait, raising=False)
+    if delivery == "failure":
+        with pytest.raises(TimeoutError, match="notification not received"):
+            state.progress()
+        assert not state.is_complete()
+    else:
+        assert state.progress()
+        assert state.is_complete()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("peer_failure", [True, False])
+async def test_propagate_precommit_failure_while_collective_pause_is_pending(
+    peer_failure,
+):
+    """Pre-commit failures and timeouts terminate the pending client pause wait."""
+    started, cancelled = asyncio.Event(), asyncio.Event()
+
+    async def pause(**kwargs):
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    control_store, reconfig_store = DictStore({}), DictStore({})
+    coordinator = _prepared_coordinator(0, control_store, reconfig_store, pause)
+    prepared = coordinator.prepared_scale
+    assert prepared is not None
+    task = asyncio.create_task(
+        coordinator._pause_scheduler(
+            prepared, remaining=True, timeout_s=1 if peer_failure else 0.01
+        )
+    )
+    try:
+        await asyncio.wait_for(started.wait(), timeout=1)
+        if peer_failure:
+            coordinator._publish_error(prepared, RuntimeError("peer pause failed"))
+        with pytest.raises(RuntimeError if peer_failure else TimeoutError):
+            await asyncio.wait_for(task, timeout=2)
+        assert cancelled.is_set()
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_preserve_control_store_retries_after_handshake_failure(monkeypatch):
+    """Preserve control-store retries when preparation fails before engine changes."""
+    from vllm.distributed import utils as distributed_utils
+    from vllm.utils import network_utils
+    from vllm.v1.engine.core_client import DPAsyncMPClient
+
+    original_store, next_store = DictStore({}), DictStore({})
+    monkeypatch.setattr(next_store, "port", 23456, raising=False)
+    config = SimpleNamespace(
+        data_parallel_rank=0,
+        data_parallel_size=2,
+        data_parallel_master_ip="127.0.0.1",
+        _coord_store_port=12345,
+        elastic_ep_max_dp_size=3,
+        eplb_config=SimpleNamespace(num_redundant_experts=0),
+    )
+    client = SimpleNamespace(
+        vllm_config=SimpleNamespace(
+            parallel_config=config,
+            model_config=SimpleNamespace(get_num_experts=lambda: 128),
+        ),
+        _coord_store=original_store,
+    )
+    client._setup_elastic_ep_reconfig_bootstrap = lambda: (
+        DPAsyncMPClient._setup_elastic_ep_reconfig_bootstrap(
+            cast("DPAsyncMPClient", client)
+        )
+    )
+    monkeypatch.setattr(
+        distributed_utils, "create_tcp_store", lambda *a, **k: next_store
+    )
+    monkeypatch.setattr(
+        distributed_utils, "get_cached_tcp_store_client", lambda *a: original_store
+    )
+    monkeypatch.setattr(
+        network_utils, "get_open_ports_list", lambda _count: [12346, 12347]
+    )
+    coordinator = ExternalElasticEPScaleCoordinator(cast("DPAsyncMPClient", client))
+
+    def fail_handshake(*args):
+        raise RuntimeError("listener cannot bind")
+
+    monkeypatch.setattr(coordinator, "_start_scale_up_handshake_server", fail_handshake)
+    epochs = []
+    for _ in range(2):
+        with pytest.raises(RuntimeError, match="listener cannot bind"):
+            await coordinator.prepare(2, 3)
+        assert config._coord_store_port == 12345
+        assert client._coord_store is original_store
+        epochs.append(original_store.get(coordinator.key("current_epoch")))
+    assert epochs[0] != epochs[1]
 
 
 def test_external_elastic_ep_visible_epoch_has_bootstrap_and_phase(monkeypatch):

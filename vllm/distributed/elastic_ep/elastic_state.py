@@ -258,13 +258,11 @@ class ElasticEPScalingState:
 
         if state == ScaleDownRemovingEngineState.PREPARE:
             assert self.old_dp_group.rank() > 0
-            self._commit_scale_down(removing=True)
-            self.engine_core._eep_send_engine_core_notification(
-                EEPNotificationType.SHUTDOWN_COMPLETE
-            )
+            store = None
+            shutdown_keys: list[str] = []
             if self.vllm_config.parallel_config.data_parallel_external_lb:
-                # Preserve completion delivery: client cleanup on exit must not
-                # cancel the receiver before it records the notification.
+                # Capture the retirement epoch before notification lets rank 0
+                # complete this operation and publish the next epoch.
                 parallel_config = self.new_parallel_config
                 store = get_cached_tcp_store_client(
                     parallel_config.data_parallel_master_ip,
@@ -272,7 +270,16 @@ class ElasticEPScalingState:
                 )
                 key = ExternalElasticEPScaleCoordinator.key
                 epoch = store.get(key("current_epoch")).decode()
-                store.wait([key(epoch, "shutdown_complete", self.engine_core.dp_rank)])
+                shutdown_keys = [
+                    key(epoch, "shutdown_complete", self.engine_core.dp_rank)
+                ]
+            self._commit_scale_down(removing=True)
+            self.engine_core._eep_send_engine_core_notification(
+                EEPNotificationType.SHUTDOWN_COMPLETE
+            )
+            if store is not None:
+                # Preserve completion delivery before exit triggers client cleanup.
+                store.wait(shutdown_keys)
             self.state = ScaleDownRemovingEngineState.COMPLETE
             return True
 

@@ -274,6 +274,9 @@ class EngineCoreClient(ABC):
     async def prepare_elastic_ep(self, new_data_parallel_size: int) -> None:
         raise NotImplementedError
 
+    async def notify_elastic_ep_failure(self, error: BaseException) -> None:
+        raise NotImplementedError
+
     async def get_external_elastic_ep_status(
         self,
     ) -> dict[str, str | int | None] | None:
@@ -1708,6 +1711,10 @@ class DPAsyncMPClient(AsyncMPClient):
 
     async def commit_elastic_ep(self) -> None:
         await self._get_external_eep_coordinator().commit()
+
+    async def notify_elastic_ep_failure(self, error: BaseException) -> None:
+        # Propagate drain failures to peers before they enter collective pause.
+        self._get_external_eep_coordinator().fail_prepared_scale(error)
 
     async def get_external_elastic_ep_status(
         self,
