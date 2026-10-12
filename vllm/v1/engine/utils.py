@@ -1231,7 +1231,7 @@ def launch_core_engines(
         vllm_config.needs_dp_coordinator and not offline_mode and dp_rank == 0
     )
 
-    elastic_ep_coord_store = None
+    coord_store = None
 
     create_coord_store = (
         parallel_config.enable_elastic_ep
@@ -1243,18 +1243,18 @@ def launch_core_engines(
     if create_coord_store:
         from vllm.distributed.utils import create_tcp_store
 
-        elastic_ep_coord_store = create_tcp_store(
+        coord_store = create_tcp_store(
             host,
             0,
             is_master=True,
             world_size=-1,
             wait_for_workers=False,
         )
-        parallel_config._coord_store_port = elastic_ep_coord_store.port
+        parallel_config._coord_store_port = coord_store.port
         logger.info(
             "Created Elastic EP coordination TCPStore on %s:%d",
             host,
-            elastic_ep_coord_store.port,
+            coord_store.port,
         )
 
     if run_coordinator:
@@ -1272,8 +1272,8 @@ def launch_core_engines(
         )
 
         logger.info("Started DP Coordinator process (PID: %d)", coordinator.proc.pid)
-        if elastic_ep_coord_store is not None:
-            coordinator._coord_store = elastic_ep_coord_store
+        if coord_store is not None:
+            coordinator._coord_store = coord_store
     else:
         coordinator = None
 
@@ -1375,10 +1375,6 @@ def launch_core_engines(
         else:
             local_engine_manager = None
 
-        # Preserve the coordination store without a coordinator: offline Elastic
-        # EP engines need its server after this launch context returns.
-        if elastic_ep_coord_store is not None:
-            coord_store = elastic_ep_coord_store
         if (
             coord_store is not None
             and coordinator is None

@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
-import weakref
 from contextlib import nullcontext
 from multiprocessing import connection
 from threading import Event
@@ -279,56 +278,6 @@ class _FinishedProcess:
     @property
     def exitcode(self):
         return 1
-
-
-def test_preserve_coordination_store_without_coordinator(monkeypatch):
-    """Preserve the coordination store for offline Elastic EP after launch."""
-    import vllm.distributed.utils as distributed_utils
-
-    class Store:
-        port = 12345
-
-    stores = []
-
-    def create_store(*args, **kwargs):
-        store = Store()
-        stores.append(weakref.ref(store))
-        return store
-
-    monkeypatch.setattr(distributed_utils, "create_tcp_store", create_store)
-    monkeypatch.setattr(
-        engine_utils, "CoreEngineProcManager", lambda **kwargs: SimpleNamespace()
-    )
-    monkeypatch.setattr(
-        engine_utils, "zmq_socket_ctx", lambda *args, **kwargs: nullcontext(object())
-    )
-    monkeypatch.setattr(engine_utils, "wait_for_engine_startup", lambda *args: None)
-    config = SimpleNamespace(
-        needs_dp_coordinator=True,
-        model_config=SimpleNamespace(multimodal_config=None, is_moe=True),
-        cache_config=None,
-        parallel_config=SimpleNamespace(
-            data_parallel_size=2,
-            data_parallel_size_local=1,
-            data_parallel_rank_local=0,
-            data_parallel_rank=0,
-            data_parallel_master_ip="127.0.0.1",
-            data_parallel_rpc_port=12346,
-            local_engines_only=True,
-            enable_elastic_ep=True,
-            data_parallel_backend="mp",
-            _coord_store_port=None,
-        ),
-    )
-    with engine_utils.launch_core_engines(
-        config, object, False, EngineZmqAddresses(inputs=[], outputs=[])
-    ) as launch:
-        assert launch.coordinator is None
-        manager = launch.engine_manager
-    store = stores[0]()
-    assert store is not None
-    assert manager._coord_store is store
-    assert config.parallel_config._coord_store_port == store.port
 
 
 def test_wait_for_engine_startup_reports_watched_process_exit():

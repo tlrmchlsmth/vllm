@@ -11,6 +11,9 @@ from vllm.config import ParallelConfig
 from vllm.distributed import (
     stateless_destroy_torch_distributed_process_group,
 )
+from vllm.distributed.elastic_ep.external_elastic_ep import (
+    ExternalElasticEPScaleCoordinator,
+)
 from vllm.distributed.utils import get_cached_tcp_store_client
 from vllm.logger import init_logger
 from vllm.v1.engine import (
@@ -260,10 +263,6 @@ class ElasticEPScalingState:
                 EEPNotificationType.SHUTDOWN_COMPLETE
             )
             if self.vllm_config.parallel_config.data_parallel_external_lb:
-                from vllm.distributed.elastic_ep.external_elastic_ep import (
-                    ExternalElasticEPScaleCoordinator,
-                )
-
                 # Preserve completion delivery: client cleanup on exit must not
                 # cancel the receiver before it records the notification.
                 parallel_config = self.new_parallel_config
