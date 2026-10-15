@@ -904,6 +904,12 @@ class MPClient(EngineCoreClient):
             )
 
         parallel_config = vllm_config.parallel_config
+        # Isolate external EEP readiness metadata from ordinary startup validation.
+        if not (
+            parallel_config.enable_elastic_ep
+            and parallel_config.data_parallel_external_lb
+        ):
+            return
         if response.coord_store_port:
             if parallel_config._coord_store_port:
                 assert response.coord_store_port == parallel_config._coord_store_port

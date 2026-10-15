@@ -1817,7 +1817,7 @@ class EngineCoreProc(EngineCore):
     def _make_ready_response(self) -> EngineCoreReadyResponse:
         parallel_config = self.vllm_config.parallel_config
         scheduler_config = self.vllm_config.scheduler_config
-        return EngineCoreReadyResponse(
+        response = EngineCoreReadyResponse(
             max_model_len=self.vllm_config.model_config.max_model_len,
             num_gpu_blocks=self.vllm_config.cache_config.num_gpu_blocks or 0,
             block_size=self.vllm_config.cache_config.block_size,
@@ -1859,10 +1859,16 @@ class EngineCoreProc(EngineCore):
                 if self.vllm_config.weight_transfer_config is not None
                 else False
             ),
-            coord_store_port=parallel_config._coord_store_port,
-            coordinator_input_address=self.addresses.coordinator_input,
-            coordinator_output_address=self.addresses.coordinator_output,
         )
+        # Isolate external EEP readiness metadata so other startup modes keep defaults.
+        if (
+            parallel_config.enable_elastic_ep
+            and parallel_config.data_parallel_external_lb
+        ):
+            response.coord_store_port = parallel_config._coord_store_port
+            response.coordinator_input_address = self.addresses.coordinator_input
+            response.coordinator_output_address = self.addresses.coordinator_output
+        return response
 
     def process_input_sockets(
         self,

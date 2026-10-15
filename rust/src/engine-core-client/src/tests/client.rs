@@ -2738,6 +2738,7 @@ async fn reset_prefix_cache_returns_false_when_any_engine_fails() {
 }
 
 #[test]
+/// Keep readiness schemas aligned across Python fixtures and Rust decoding.
 fn python_msgpack_fixtures_match_rust_encoding() {
     init_tracing();
     let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/tests/python_compat.py");
@@ -2992,10 +2993,25 @@ fn python_msgpack_fixtures_match_rust_encoding() {
     let ready_response: EngineCoreReadyResponse =
         rmp_serde::from_slice(&hex::decode(ready_response_hex).unwrap()).unwrap();
     let mut legacy_ready = serde_json::to_value(&ready_response).unwrap();
-    legacy_ready.as_object_mut().unwrap().remove("effective_attention_block_size");
+    for field in [
+        "effective_attention_block_size",
+        "coord_store_port",
+        "coordinator_input_address",
+        "coordinator_output_address",
+    ] {
+        legacy_ready.as_object_mut().unwrap().remove(field);
+    }
     let legacy_ready: EngineCoreReadyResponse =
         rmp_serde::from_slice(&rmp_serde::to_vec_named(&legacy_ready).unwrap()).unwrap();
     assert!(legacy_ready.effective_attention_block_size.is_none());
+    assert_eq!(
+        (
+            legacy_ready.coord_store_port,
+            legacy_ready.coordinator_input_address,
+            legacy_ready.coordinator_output_address,
+        ),
+        (0, None, None),
+    );
     assert!(ready_response.supports_lora);
     assert_eq!(ready_response.max_loras, 8);
     assert_eq!(
@@ -3005,6 +3021,18 @@ fn python_msgpack_fixtures_match_rust_encoding() {
     assert!(ready_response.enable_sleep_mode);
     assert!(ready_response.supports_draft_weight_updates);
     assert_eq!(ready_response.effective_attention_block_size, Some(64));
+    assert_eq!(
+        (
+            ready_response.coord_store_port,
+            ready_response.coordinator_input_address.as_deref(),
+            ready_response.coordinator_output_address.as_deref(),
+        ),
+        (
+            18000,
+            Some("tcp://127.0.0.1:18001"),
+            Some("tcp://127.0.0.1:18002"),
+        ),
+    );
     let kv_events_config = ready_response.kv_events_config.expect("KV events config should decode");
     assert!(kv_events_config.enable_kv_cache_events);
     assert_eq!(kv_events_config.publisher, "zmq");
