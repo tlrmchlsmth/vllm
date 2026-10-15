@@ -414,26 +414,15 @@ def test_dplb_finished_requests_release_inflight():
     ("effective_size", "other_size"),
     [(None, None), (4224, 4224), (4224, 1056), (4224, None)],
 )
-@pytest.mark.parametrize("enable_elastic_ep", [False, True])
-@pytest.mark.parametrize("external_lb", [False, True])
-def test_apply_ready_response_syncs_engine_metadata(
-    effective_size, other_size, enable_elastic_ep, external_lb
-):
-    """Isolate external EEP readiness metadata from other engine metadata."""
+def test_apply_ready_response_syncs_engine_metadata(effective_size, other_size):
     import msgspec
 
-    external_eep = enable_elastic_ep and external_lb
-    initial_store_port = 0 if external_eep else 4321
     client = object.__new__(MPClient)
     client._effective_attention_block_sizes = set()
     client.vllm_config = SimpleNamespace(
         cache_config=SimpleNamespace(block_size=16, num_gpu_blocks=0),
         model_config=SimpleNamespace(max_model_len=8192),
-        parallel_config=SimpleNamespace(
-            _coord_store_port=initial_store_port,
-            enable_elastic_ep=enable_elastic_ep,
-            data_parallel_external_lb=external_lb,
-        ),
+        parallel_config=SimpleNamespace(_coord_store_port=0),
     )
     client.stats_update_address = None
     client.coordinator_input_address = None
@@ -481,15 +470,9 @@ def test_apply_ready_response_syncs_engine_metadata(
 
     client._apply_ready_response(b"")
     assert cache_config.effective_attention_block_size is None
-    assert client.vllm_config.parallel_config._coord_store_port == (
-        1234 if external_eep else initial_store_port
-    )
-    assert client.coordinator_input_address == (
-        "tcp://127.0.0.1:1235" if external_eep else None
-    )
-    assert client.coordinator_output_address == (
-        "tcp://127.0.0.1:1236" if external_eep else None
-    )
+    assert client.vllm_config.parallel_config._coord_store_port == 1234
+    assert client.coordinator_input_address == "tcp://127.0.0.1:1235"
+    assert client.coordinator_output_address == "tcp://127.0.0.1:1236"
 
 
 def test_apply_ready_response_syncs_mamba_block_size():
@@ -500,11 +483,7 @@ def test_apply_ready_response_syncs_mamba_block_size():
     client.vllm_config = SimpleNamespace(
         cache_config=SimpleNamespace(block_size=16, num_gpu_blocks=0),
         model_config=SimpleNamespace(max_model_len=8192),
-        parallel_config=SimpleNamespace(
-            _coord_store_port=0,
-            enable_elastic_ep=False,
-            data_parallel_external_lb=False,
-        ),
+        parallel_config=SimpleNamespace(_coord_store_port=0),
     )
     client.stats_update_address = None
 
@@ -1524,9 +1503,7 @@ def test_engine_core_proc_instantiation_cuda_empty(monkeypatch: pytest.MonkeyPat
         engine_core_proc.shutdown()
 
 
-def _ready_response_with_weight_transfer(
-    weight_transfer_config, *, enable_elastic_ep=False, external_lb=False
-):
+def _ready_response_with_weight_transfer(weight_transfer_config):
     """Build a ready response against a mock executor."""
     from vllm.v1.engine.core import EngineCoreProc
 
@@ -1539,36 +1516,10 @@ def _ready_response_with_weight_transfer(
     proc.vllm_config.weight_transfer_config = weight_transfer_config
     proc.vllm_config.lora_config = None
     proc.vllm_config.model_config.enable_sleep_mode = False
-    proc.vllm_config.parallel_config.enable_elastic_ep = enable_elastic_ep
-    proc.vllm_config.parallel_config.data_parallel_external_lb = external_lb
-    proc.vllm_config.parallel_config._coord_store_port = 1234
-    proc.addresses.coordinator_input = "tcp://127.0.0.1:1235"
-    proc.addresses.coordinator_output = "tcp://127.0.0.1:1236"
     proc.scheduler = MagicMock()
 
     response = EngineCoreProc._make_ready_response(proc)
     return response, executor
-
-
-@pytest.mark.parametrize("enable_elastic_ep", [False, True])
-@pytest.mark.parametrize("external_lb", [False, True])
-def test_isolate_external_eep_readiness_metadata_on_engine(
-    enable_elastic_ep, external_lb
-):
-    """Isolate external EEP readiness metadata at its source."""
-    response, _ = _ready_response_with_weight_transfer(
-        None, enable_elastic_ep=enable_elastic_ep, external_lb=external_lb
-    )
-    expected = (
-        (1234, "tcp://127.0.0.1:1235", "tcp://127.0.0.1:1236")
-        if enable_elastic_ep and external_lb
-        else (0, None, None)
-    )
-    assert (
-        response.coord_store_port,
-        response.coordinator_input_address,
-        response.coordinator_output_address,
-    ) == expected
 
 
 def test_ready_response_skips_draft_rpc_without_weight_transfer():
@@ -1603,11 +1554,7 @@ def test_apply_ready_response_retains_kv_event_sources():
     client.vllm_config = SimpleNamespace(
         cache_config=SimpleNamespace(block_size=16, num_gpu_blocks=0),
         model_config=SimpleNamespace(max_model_len=8192),
-        parallel_config=SimpleNamespace(
-            _coord_store_port=0,
-            enable_elastic_ep=False,
-            data_parallel_external_lb=False,
-        ),
+        parallel_config=SimpleNamespace(_coord_store_port=0),
     )
 
     def ready(rank: int, config: KVEventsConfig | None) -> bytes:

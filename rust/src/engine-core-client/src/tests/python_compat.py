@@ -473,10 +473,6 @@ class EngineCoreReadyResponse:
     enable_sleep_mode: bool = False
     supports_draft_weight_updates: bool = False
     effective_attention_block_size: int | None = None
-    # Keep readiness schemas aligned so the Rust fixture covers external EEP fields.
-    coord_store_port: int = 0
-    coordinator_input_address: str | None = None
-    coordinator_output_address: str | None = None
 
 
 ready_response = EngineCoreReadyResponse(
@@ -501,9 +497,6 @@ ready_response = EngineCoreReadyResponse(
     enable_sleep_mode=True,
     supports_draft_weight_updates=True,
     effective_attention_block_size=64,
-    coord_store_port=18000,
-    coordinator_input_address="tcp://127.0.0.1:18001",
-    coordinator_output_address="tcp://127.0.0.1:18002",
     kv_events_config=KVEventsConfig(
         enable_kv_cache_events=True,
         publisher="zmq",

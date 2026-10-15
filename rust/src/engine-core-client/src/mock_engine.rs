@@ -73,10 +73,6 @@ pub fn default_ready_response() -> EngineCoreReadyResponse {
         enable_sleep_mode: false,
         supports_draft_weight_updates: false,
         effective_attention_block_size: None,
-        // Keep readiness schemas aligned when the mock engine serializes defaults.
-        coord_store_port: 0,
-        coordinator_input_address: None,
-        coordinator_output_address: None,
     }
 }
 

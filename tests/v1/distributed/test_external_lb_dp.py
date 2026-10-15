@@ -20,7 +20,6 @@ from vllm.distributed.elastic_ep.external_elastic_ep import (
     ExternalElasticEPScaleCoordinator,
 )
 from vllm.platforms import current_platform
-from vllm.v1.engine import ReconfigureDistributedRequest
 
 if TYPE_CHECKING:
     from vllm.v1.engine.core_client import DPAsyncMPClient
@@ -137,61 +136,6 @@ async def test_external_elastic_ep_late_rank_observes_epoch_error():
 
     with pytest.raises(RuntimeError, match="scale failed"):
         await coordinator._wait_for_bootstrap(store, requested_new_dp_size=3)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("wait_for", ["bootstrap", "ready", "local", "all_old"])
-async def test_move_tcpstore_polling_off_api_event_loop(wait_for):
-    """Move TCPStore polling off the API event loop so callbacks can run."""
-    release = threading.Event()
-
-    class SlowStore(DictStore):
-        def check(self, keys):
-            assert release.wait(timeout=5), "TCPStore polling blocked the API loop"
-            return super().check(keys)
-
-    coordinator = ExternalElasticEPScaleCoordinator(
-        cast("DPAsyncMPClient", SimpleNamespace())
-    )
-    epoch = "responsive-epoch"
-    key = coordinator.key
-    bootstrap = ReconfigureDistributedRequest(
-        new_data_parallel_size=3,
-        new_data_parallel_rank=-1,
-        new_data_parallel_rank_local=-1,
-        new_data_parallel_master_ip="127.0.0.1",
-        new_data_parallel_master_port=12345,
-        new_data_parallel_master_port_list=[],
-        coord_store_port=12346,
-    )
-    store = SlowStore(
-        {
-            key("current_epoch"): epoch.encode(),
-            key(epoch, "bootstrap"): msgspec.msgpack.encode(bootstrap),
-            key(epoch, "prepared"): b"1",
-            **{f"eep_ready/{rank}": b"1" for rank in range(3)},
-            **{key(epoch, "old_rank_finished", rank): b"1" for rank in range(2)},
-        }
-    )
-    asyncio.get_running_loop().call_soon(release.set)
-    if wait_for == "bootstrap":
-        assert await coordinator._wait_for_bootstrap(store, 3) == (epoch, bootstrap)
-    elif wait_for == "ready":
-        await coordinator._wait_for_ready_ranks(store, store, epoch, 3)
-    elif wait_for == "local":
-        await coordinator._wait_for_local_reconfig_finished(
-            store, store, epoch, bootstrap, dp_rank=0, scale_up=True
-        )
-    else:
-        prepared = SimpleNamespace(
-            control_store=store,
-            reconfig_store=store,
-            epoch=epoch,
-            bootstrap=bootstrap,
-            cur_data_parallel_size=2,
-            scale_up=True,
-        )
-        await coordinator._wait_for_all_old_ranks(prepared)
 
 
 class ExternalLBServerManager:

@@ -366,25 +366,20 @@ class ExternalElasticEPScaleCoordinator:
         loop = asyncio.get_running_loop()
         start = loop.time()
         current_epoch_key = self.key("current_epoch")
-
-        def get_previous_epoch() -> str | None:
-            if store.check([current_epoch_key]):
-                current_epoch = store.get(current_epoch_key).decode()
-                if store.check([self.key(current_epoch, "completed")]):
-                    return current_epoch
-            return self.active_epoch
-
-        # Move TCPStore polling off the API event loop so status queries
-        # remain responsive.
-        previous_epoch = await asyncio.to_thread(get_previous_epoch)
-
-        def get_bootstrap() -> tuple[str, ReconfigureDistributedRequest | str] | None:
+        previous_epoch = self.active_epoch
+        if store.check([current_epoch_key]):
+            current_epoch = store.get(current_epoch_key).decode()
+            if store.check([self.key(current_epoch, "completed")]):
+                previous_epoch = current_epoch
+        backoff_step = 0
+        while True:
             if store.check([current_epoch_key]):
                 epoch = store.get(current_epoch_key).decode()
                 if epoch != previous_epoch:
                     error = self._get_error(store, epoch)
                     if error is not None:
-                        return epoch, error
+                        self.active_epoch = epoch
+                        raise RuntimeError(error)
 
                     bootstrap_key = self.key(epoch, "bootstrap")
                     if store.check([bootstrap_key]):
@@ -403,17 +398,7 @@ class ExternalElasticEPScaleCoordinator:
                                 )
                         elif store.check([prepared_key]):
                             return epoch, bootstrap
-            return None
 
-        backoff_step = 0
-        while True:
-            bootstrap_result = await asyncio.to_thread(get_bootstrap)
-            if bootstrap_result is not None:
-                epoch, bootstrap_or_error = bootstrap_result
-                if isinstance(bootstrap_or_error, str):
-                    self.active_epoch = epoch
-                    raise RuntimeError(bootstrap_or_error)
-                return epoch, bootstrap_or_error
             now = loop.time()
             if now - start > timeout_s:
                 raise TimeoutError(
@@ -507,7 +492,11 @@ class ExternalElasticEPScaleCoordinator:
         start = loop.time()
         ready_keys = [f"eep_ready/{rank}" for rank in range(new_data_parallel_size)]
 
-        def is_ready() -> bool:
+        backoff_step = 0
+        while True:
+            if handshake_server is not None:
+                handshake_server.raise_if_failed()
+
             error = self._get_error(control_store, epoch)
             if error is not None:
                 raise RuntimeError(
@@ -515,15 +504,7 @@ class ExternalElasticEPScaleCoordinator:
                     f"ranks to prepare: {error}"
                 )
 
-            return reconfig_store.check(ready_keys)
-
-        backoff_step = 0
-        while True:
-            if handshake_server is not None:
-                handshake_server.raise_if_failed()
-
-            # Move TCPStore polling off the API event loop while serving continues.
-            if await asyncio.to_thread(is_ready):
+            if reconfig_store.check(ready_keys):
                 return
 
             now = loop.time()
@@ -559,20 +540,15 @@ class ExternalElasticEPScaleCoordinator:
 
         loop = asyncio.get_running_loop()
         start = loop.time()
-
-        def is_finished() -> bool:
+        backoff_step = 0
+        while True:
             error = self._get_error(control_store, epoch)
             if error is not None:
                 raise RuntimeError(
                     error or "External Elastic EP scaling failed on another rank."
                 )
 
-            return reconfig_store.check([wait_key])
-
-        backoff_step = 0
-        while True:
-            # Move TCPStore polling off the API event loop during reconfiguration.
-            if await asyncio.to_thread(is_finished):
+            if reconfig_store.check([wait_key]):
                 return
 
             now = loop.time()
@@ -601,17 +577,12 @@ class ExternalElasticEPScaleCoordinator:
         ]
         loop = asyncio.get_running_loop()
         start = loop.time()
-
-        def is_finished() -> bool:
+        backoff_step = 0
+        while True:
             error = self._get_error(prepared.control_store, prepared.epoch)
             if error is not None:
                 raise RuntimeError(error)
-            return prepared.reconfig_store.check(keys)
-
-        backoff_step = 0
-        while True:
-            # Move TCPStore polling off the API event loop while peers finish.
-            if await asyncio.to_thread(is_finished):
+            if prepared.reconfig_store.check(keys):
                 return
             if loop.time() - start > timeout_s:
                 raise TimeoutError(

@@ -107,16 +107,6 @@ pub struct EngineCoreReadyResponse {
     /// Full-attention block size in tokens after initialization, or unavailable.
     #[serde(default)]
     pub effective_attention_block_size: Option<u64>,
-    // Keep readiness schemas aligned with Python's defaulted external EEP metadata.
-    /// Coordination-store port for external Elastic EP, or zero when unused.
-    #[serde(default)]
-    pub coord_store_port: u16,
-    /// DP coordinator input address for external Elastic EP.
-    #[serde(default)]
-    pub coordinator_input_address: Option<String>,
-    /// DP coordinator output address for external Elastic EP.
-    #[serde(default)]
-    pub coordinator_output_address: Option<String>,
 }
 
 /// Frontend-owned ZMQ addresses that are sent to the engine during startup
