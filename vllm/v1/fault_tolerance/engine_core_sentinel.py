@@ -90,6 +90,7 @@ class EngineCoreSentinel:
         engine = self.engine
         scheduler = cast(Scheduler, engine.scheduler)
         ft_config = self.parallel_config.fault_tolerance_config
+        # Evict the KV blocks that the failed step may have partially written.
         self._clear_contaminated_blocks()
 
         if ft_config.resume_requests_after_recovery:
@@ -196,6 +197,16 @@ class EngineCoreSentinel:
     def retry(self, ft_request: FaultToleranceRequest) -> FaultToleranceResult:
         engine = self.engine
         executor = engine.model_executor
+        scheduler = cast(Scheduler, engine.scheduler)
+
+        # ``abort`` lets the caller give up on the parked requests for this
+        # recovery round. It exists for faults such as OOM: retrying with the
+        # same in-flight requests would likely hit OOM again, so aborting them
+        # is safer than resuming. Otherwise leave them parked for the scheduler
+        # to resume after recovery.
+        if ft_request.params.get("abort", False):
+            aborted = scheduler.finish_requests(None, RequestStatus.FINISHED_ABORTED)
+            engine._send_abort_outputs(aborted)
 
         ft_request.params.update(self._reinit_dp_group())
         if hasattr(engine, "step_counter"):
