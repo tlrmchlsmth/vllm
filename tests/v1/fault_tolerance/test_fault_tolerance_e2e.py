@@ -286,6 +286,8 @@ def test_injected_fault_retry_recovers_all_ranks(monkeypatch, tmp_path):
 
     Both being UNHEALTHY is the precondition for ``retry``. The fault is patched
     into the DP-sync fn from the test (via a generated ``sitecustomize``).
+
+    Enforce fixed-length recovery: EOS must not end the stream before the fault.
     """
     fault_step = int(os.getenv("FT_FAULT_STEP", "50"))
     max_tokens = fault_step + 50  # the stream must still be running at the fault
@@ -310,6 +312,8 @@ def test_injected_fault_retry_recovers_all_ranks(monkeypatch, tmp_path):
             prompt="Hello, my name is",
             max_tokens=max_tokens,
             temperature=0.0,
+            # Enforce fixed-length recovery so EOS cannot bypass the fault.
+            extra_body={"ignore_eos": True},
             stream=True,
             timeout=600.0,
         )
