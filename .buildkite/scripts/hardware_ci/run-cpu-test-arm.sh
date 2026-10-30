@@ -52,7 +52,7 @@ kernel_tests() {
     pytest -x -v -s tests/kernels/mamba/test_cpu_short_conv.py
     pytest -x -v -s tests/kernels/mamba/test_causal_conv1d.py
     pytest -x -v -s tests/kernels/mamba/test_mamba_ssm.py
-    pytest -x -v -s tests/v1/worker/cpu"
+    pytest -x -v -s tests/v1/worker/cpu -m 'not cpu_model'"
 }
 
 model_tests() {
@@ -69,6 +69,8 @@ model_tests() {
   docker exec "$CONTAINER_NAME" bash -c "
     set -e
     pytest -x -v -s tests/models/multimodal/generation/test_whisper.py -m cpu_model
+    pytest -x -v -s tests/v1/worker/cpu/test_cpu_logits_processors.py::test_cpu_penalties_ignore_multimodal_placeholders_generate
+    pytest -x -v -s tests/v1/worker/cpu/test_cpu_encoder_runner.py::test_cpu_encoder_only_instances_stay_on_v1
     pytest -x -v -s tests/v1/e2e/test_cpu_linear_attn_chunked_prefix.py
     pytest -x -v -s 'tests/models/language/pooling/test_embedding.py::test_models[sentence-transformers/all-MiniLM-L12-v2]'"
 

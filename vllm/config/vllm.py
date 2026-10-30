@@ -3119,6 +3119,10 @@ class VllmConfig:
         """Collect V2 features not supported by CPU without Triton."""
         unsupported: list[str] = []
 
+        # Keep encoder-only instances on V1: V2 still executes the missing LM.
+        if self.is_mm_encoder_only:
+            unsupported.append("multimodal encoder-only instances")
+
         if self.speculative_config is not None:
             unsupported.append("speculative decoding")
 

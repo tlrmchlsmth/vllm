@@ -36,6 +36,23 @@ pytestmark = pytest.mark.skipif(
 HIDDEN_SIZE = 4
 
 
+@pytest.mark.cpu_model
+def test_cpu_encoder_only_instances_stay_on_v1(vllm_runner, monkeypatch) -> None:
+    """Keep encoder-only instances on V1 through real model startup."""
+    monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
+    with vllm_runner(
+        "llava-hf/llava-1.5-7b-hf",
+        dtype="bfloat16",
+        mm_encoder_only=True,
+        enforce_eager=True,
+        max_model_len=1024,
+        max_num_seqs=1,
+    ) as runner:
+        config = runner.llm.llm_engine.vllm_config
+        assert config.is_mm_encoder_only
+        assert not config.use_v2_model_runner
+
+
 class _EncoderModel(torch.nn.Module):
     def __init__(self) -> None:
         super().__init__()

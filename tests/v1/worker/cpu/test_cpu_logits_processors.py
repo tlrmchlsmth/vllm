@@ -31,7 +31,7 @@ PROMPT = [5, 6, 5]
 COMMITTED_OUTPUT = [7, 7, 8]
 
 
-def _make_req_states() -> tuple[CPURequestState, int]:
+def _make_req_states(prompt: list[int] = PROMPT) -> tuple[CPURequestState, int]:
     req_states = CPURequestState(
         max_num_reqs=4,
         max_model_len=64,
@@ -41,9 +41,9 @@ def _make_req_states() -> tuple[CPURequestState, int]:
     )
     req_states.add_request(
         req_id="req",
-        prompt_len=len(PROMPT),
-        all_token_ids=PROMPT + COMMITTED_OUTPUT,
-        num_computed_tokens=len(PROMPT) + len(COMMITTED_OUTPUT),
+        prompt_len=len(prompt),
+        all_token_ids=prompt + COMMITTED_OUTPUT,
+        num_computed_tokens=len(prompt) + len(COMMITTED_OUTPUT),
         max_tokens=32,
     )
     return req_states, req_states.req_id_to_index["req"]
@@ -76,13 +76,22 @@ def _reference_penalties(
         logits[token_id] -= frequency * count + presence
 
 
-def test_cpu_penalties_match_reference() -> None:
-    req_states, req_idx = _make_req_states()
+@pytest.mark.parametrize("placeholder", [None, VOCAB_SIZE, VOCAB_SIZE + 3, -1])
+@pytest.mark.parametrize(
+    ("repetition", "frequency", "presence"),
+    [(1.7, 0.4, -0.25), (1.0, 0.4, 0.0), (1.0, 0.0, -0.25)],
+)
+def test_cpu_penalties_match_reference(
+    placeholder: int | None, repetition: float, frequency: float, presence: float
+) -> None:
+    """Ignore multimodal placeholders while penalizing real vocabulary tokens."""
+    prompt = PROMPT + ([] if placeholder is None else [placeholder])
+    req_states, req_idx = _make_req_states(prompt)
     state = CPUPenalties(None, LogitsProcRequestState.from_request_state(req_states))
     params = SamplingParams(
-        repetition_penalty=1.7,
-        frequency_penalty=0.4,
-        presence_penalty=-0.25,
+        repetition_penalty=repetition,
+        frequency_penalty=frequency,
+        presence_penalty=presence,
     )
     state.add_request(req_idx, params)
 
@@ -105,7 +114,11 @@ def test_cpu_penalties_match_reference() -> None:
     torch.testing.assert_close(actual, expected)
 
 
-def test_cpu_penalties_keep_request_rows_independent() -> None:
+@pytest.mark.parametrize("placeholder_request", [None, "first", "second"])
+def test_cpu_penalties_keep_request_rows_independent(
+    placeholder_request: str | None,
+) -> None:
+    """Ignore multimodal placeholders before they can address another row."""
     req_states = CPURequestState(
         max_num_reqs=4,
         max_model_len=64,
@@ -118,6 +131,8 @@ def test_cpu_penalties_keep_request_rows_independent() -> None:
         "second": ([4], [5]),
     }
     for req_id, (prompt, output) in requests.items():
+        if req_id == placeholder_request:
+            prompt = prompt + [VOCAB_SIZE]
         tokens = prompt + output
         req_states.add_request(
             req_id=req_id,
@@ -172,6 +187,40 @@ def test_cpu_penalties_keep_request_rows_independent() -> None:
 
     actual = state.apply(logits, ctx)
     torch.testing.assert_close(actual, expected)
+
+
+@pytest.mark.cpu_model
+def test_cpu_penalties_ignore_multimodal_placeholders_generate(
+    vllm_runner, monkeypatch
+) -> None:
+    """Ignore multimodal placeholders on the real LLaVA generation path."""
+    from vllm.assets.image import ImageAsset
+
+    monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
+    prompt = {
+        "prompt": "USER: <image>\nDescribe the image.\nASSISTANT:",
+        "multi_modal_data": {"image": ImageAsset("cherry_blossom").pil_image},
+    }
+    with vllm_runner(
+        "llava-hf/llava-1.5-7b-hf",
+        dtype="bfloat16",
+        enforce_eager=True,
+        max_model_len=1024,
+        max_num_seqs=2,
+        enable_prefix_caching=False,
+    ) as runner:
+        assert runner.llm.llm_engine.vllm_config.use_v2_model_runner
+        params = SamplingParams(temperature=0, max_tokens=1, logprobs=1)
+        expected = runner.llm.generate([prompt, prompt], params)
+        params.frequency_penalty = 1.0
+        actual = runner.llm.generate([prompt, prompt], params)
+
+        vocab_size = runner.llm.llm_engine.vllm_config.model_config.get_vocab_size()
+        for reference, result in zip(expected, actual):
+            assert vocab_size in result.prompt_token_ids
+            # With no generated history, frequency penalties must be a no-op.
+            assert result.outputs[0].token_ids == reference.outputs[0].token_ids
+            assert result.outputs[0].logprobs == reference.outputs[0].logprobs
 
 
 def test_cpu_penalties_clear_reused_slot() -> None:
