@@ -291,7 +291,19 @@ See [AMD Zen optimizations](#amd-zen-optimizations) for detection rules, support
 
 - When deploying vLLM CPU backend on a multi-socket machine with NUMA and enable tensor parallel or pipeline parallel, each NUMA node is treated as a TP/PP rank. So be aware to set CPU cores of a single rank on the same NUMA node to avoid cross NUMA node memory access.
 
-### How to decide `VLLM_CPU_KVCACHE_SPACE`?
+### How is the CPU KV cache sized?
+
+On Linux, vLLM sizes the cache after warmup for decoder-only text models,
+including sliding-window attention and hybrid attention and recurrent state.
+This supports both CPU model runners and single-node tensor parallelism.
+Each worker budgets for its NUMA node and shares any cgroup memory limit
+with the other workers. The budget leaves headroom for serving.
+
+Set `--kv-cache-memory-bytes` to use a fixed cache size per worker.
+`--no-enable-extensible-kv-cache` selects the previous sizing behavior.
+Speculative decoding and KV cache connectors also use the previous behavior.
+
+#### `VLLM_CPU_KVCACHE_SPACE` (legacy)
 
 This value is 0 by default, which means vLLM doesn't override the KV cache size through this variable. When set, the value is in GiB (e.g, `VLLM_CPU_KVCACHE_SPACE`=40 means 40 GiB). Larger space can support more concurrent requests, longer context length. However, users should take care of memory capacity of each NUMA node. The memory usage of each TP rank is the sum of `weight shard size` and `VLLM_CPU_KVCACHE_SPACE`, if it exceeds the capacity of a single NUMA node, the TP worker will be killed with `exitcode 9` due to out-of-memory. This is a legacy setting; use `--kv-cache-memory-bytes` instead.
 

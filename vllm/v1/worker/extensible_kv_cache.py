@@ -43,6 +43,7 @@ from vllm.v1.worker.utils import layer_kernel_block_size, layer_spec_for_tensor
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.v1.worker.cpu.standalone_model_runner import StandaloneCPUModelRunner
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 logger = init_logger(__name__)
@@ -304,6 +305,10 @@ class ExtensibleKVCache:
 
     def physical_bytes_for(self, num_blocks: int) -> int:
         """Bytes a commit of num_blocks maps, each segment rounded to granules."""
+        if self.buffer.device.type == "cpu":
+            return self.buffer.physical_bytes_for_segments(
+                [num_blocks * stride for stride in self.segment_strides]
+            )
         granule = self.buffer.granularity
         return sum(
             -(-num_blocks * stride // granule) * granule
@@ -470,7 +475,9 @@ def pad_kv_cache_segments(
     return padded
 
 
-def num_committable_kv_blocks(runner: "GPUModelRunner") -> int:
+def num_committable_kv_blocks(
+    runner: "GPUModelRunner | StandaloneCPUModelRunner",
+) -> int:
     """Blocks warmup may address: all of them, or, for an extensible cache,
     the count agreed across ranks so that every rank warms up the same shapes."""
     kv_cache = getattr(runner, "extensible_kv_cache", None)
@@ -479,7 +486,9 @@ def num_committable_kv_blocks(runner: "GPUModelRunner") -> int:
     return runner.kv_cache_config.num_blocks
 
 
-def ensure_kv_cache_blocks(runner: "GPUModelRunner", num_blocks: int) -> None:
+def ensure_kv_cache_blocks(
+    runner: "GPUModelRunner | StandaloneCPUModelRunner", num_blocks: int
+) -> None:
     """Commit enough of an extensible KV cache to address num_blocks."""
     kv_cache = getattr(runner, "extensible_kv_cache", None)
     if kv_cache is not None:
@@ -487,7 +496,9 @@ def ensure_kv_cache_blocks(runner: "GPUModelRunner", num_blocks: int) -> None:
 
 
 def extend_kv_cache(
-    runner: "GPUModelRunner", kv_cache_config: KVCacheConfig, num_blocks: int
+    runner: "GPUModelRunner | StandaloneCPUModelRunner",
+    kv_cache_config: KVCacheConfig,
+    num_blocks: int,
 ) -> None:
     """Commit the final size once post-warmup memory is known.
 
@@ -555,7 +566,7 @@ def extend_kv_cache(
         attn_groups = [
             group
             for groups in runner.attn_groups
-            + getattr(runner.speculator, "attn_groups", [])
+            + getattr(getattr(runner, "speculator", None), "attn_groups", [])
             for group in groups
         ]
         bind_kv_caches(
@@ -574,7 +585,9 @@ def extend_kv_cache(
             for cache in runner.kv_caches_by_layer.values()
             if cache.device == runner.device
         ]
-        if runner.vllm_config.cache_config.use_replayssm:
+        if runner.vllm_config.cache_config.use_replayssm and hasattr(
+            runner, "replayssm_block_copy_tensors"
+        ):
             from vllm.v1.worker.replayssm_utils import (
                 get_replayssm_block_copy_tensors,
                 initialize_replayssm_ring_trackers,
@@ -584,9 +597,10 @@ def extend_kv_cache(
             runner.replayssm_block_copy_tensors = get_replayssm_block_copy_tensors(
                 forward_context
             )
-    runner.kv_connector = get_kv_connector(
-        runner.vllm_config, runner.kv_caches_by_layer
-    )
+    if kv_cache.buffer.device.type != "cpu":
+        runner.kv_connector = get_kv_connector(
+            runner.vllm_config, runner.kv_caches_by_layer
+        )
 
 
 def measure_kv_cache_bytes(
@@ -731,7 +745,7 @@ def kv_cache_lent_for_weight_update(
     weight changes, when not even the largest layer fits and fail_if_short,
     or warn. Torch's memory cap is lifted for the context.
     """
-    if kv_cache is None:
+    if kv_cache is None or current_platform.is_cpu():
         yield
         return
     lent = _release_for_weight_update(

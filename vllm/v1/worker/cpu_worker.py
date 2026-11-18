@@ -5,7 +5,9 @@
 import vllm.v1.worker.cpu.shm  # noqa # isort: skip
 
 import math
+import mmap
 import os
+import resource
 import sys
 
 import psutil
@@ -13,20 +15,25 @@ import torch
 
 from vllm import envs
 from vllm.config import CompilationMode, VllmConfig
+from vllm.distributed import get_world_group
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.utils.cpu_resource_utils import (
     get_allowed_cpu_list,
+    get_cgroup_memory_headroom,
     get_memory_node_info,
     get_worker_memory_nodes,
 )
 from vllm.utils.mem_utils import format_gib
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.worker.cpu.model_runner import CPUModelRunner
+from vllm.v1.worker.extensible_kv_cache import ExtensibleKVCache
 from vllm.v1.worker.gpu_worker import Worker, init_worker_distributed_environment
 from vllm.v1.worker.worker_base import CompilationTimes
 
 logger = init_logger(__name__)
+
+_CPU_KV_CACHE_MIN_HEADROOM = 256 << 20
 
 
 class CPUWorker(Worker):
@@ -71,6 +78,7 @@ class CPUWorker(Worker):
 
         torch.ops._C.init_cpu_memory_env([memory_node])
 
+        self.memory_node = memory_node
         memory_status = get_memory_node_info(memory_node)
         memory_fraction = vllm_config.cache_config.resolved_gpu_memory_utilization
         self.requested_cpu_memory = math.ceil(
@@ -183,6 +191,8 @@ class CPUWorker(Worker):
         )
 
     def determine_available_memory(self) -> int:
+        if self.cache_config.enable_extensible_kv_cache:
+            return self._profile_extensible_kv_cache_memory()
         if self._should_warm_up_model():
             self.model_runner.warming_up_model()
 
@@ -256,11 +266,84 @@ class CPUWorker(Worker):
 
         return kv_cache_size
 
+    def extensible_kv_cache_unsupported_reason(self) -> str | None:
+        config = self.vllm_config
+        parallel = self.parallel_config
+        if (
+            parallel.nnodes != 1
+            or parallel.data_parallel_size != 1
+            or parallel.pipeline_parallel_size != 1
+        ):
+            return "CPU extensible KV cache supports single-node tensor parallelism"
+        if (
+            config.kv_transfer_config is not None
+            or config.speculative_config is not None
+            or config.model_config.supports_multimodal_inputs
+            or config.model_config.is_encoder_decoder
+            or config.aux_output_config.enabled
+            or config.weight_transfer_config is not None
+        ):
+            return "CPU extensible KV cache requires a decoder-only text model"
+        return None
+
+    def extend_kv_cache(self, num_blocks: int) -> None:
+        super().extend_kv_cache(num_blocks)
+        if self.model_runner.kv_cache_config.needs_kv_cache_zeroing:
+            self.model_runner._init_kv_zero_meta()
+
+    def disable_extensible_kv_cache(self) -> None:
+        self.cache_config.enable_extensible_kv_cache = False
+        self.requested_cpu_memory = math.ceil(
+            get_memory_node_info(self.memory_node).total_memory
+            * self.cache_config.resolved_gpu_memory_utilization
+        )
+
+    def _extensible_kv_cache_granule(self) -> int:
+        return mmap.PAGESIZE
+
+    def _extensible_kv_cache_warmup_limit(self, kv_cache: ExtensibleKVCache) -> int:
+        bytes_available = self._extensible_kv_cache_budget() + kv_cache.physical_bytes
+        return max(0, kv_cache.blocks_within(bytes_available))
+
+    def _extensible_kv_cache_budget(self) -> int:
+        # Divide the shared headroom before adding back a worker's own
+        # committed cache pages. All workers can then grow concurrently.
+        available = get_memory_node_info(self.memory_node).available_memory
+        available //= self._ranks_on_memory_node
+        cgroup_headroom = get_cgroup_memory_headroom()
+        if cgroup_headroom is not None:
+            available = min(
+                available, cgroup_headroom // self.parallel_config.world_size
+            )
+        reserve = max(
+            _CPU_KV_CACHE_MIN_HEADROOM, available // 10, self._cpu_warmup_peak
+        )
+        return max(0, available - reserve)
+
+    def _profile_extensible_kv_cache_memory(self) -> int:
+        peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        if self._should_warm_up_model():
+            self.model_runner.warming_up_model()
+        # Linux reports ru_maxrss in KiB. The high-water increase is a
+        # lower bound when model loading had a higher peak than profiling.
+        self._cpu_warmup_peak = (
+            resource.getrusage(resource.RUSAGE_SELF).ru_maxrss - peak
+        ) * 1024
+        group = get_world_group().cpu_group
+        memory_nodes: list[int | None] = [None] * group.size()
+        torch.distributed.all_gather_object(memory_nodes, self.memory_node, group)
+        self._ranks_on_memory_node = memory_nodes.count(self.memory_node)
+        return self._extensible_kv_cache_budget()
+
     def compile_or_warm_up_model(self) -> CompilationTimes:
         # Note: the model has been compiled in determine_available_memory(),
         # Only compile here for models without kv cache
         if len(self.model_runner.kv_caches) == 0 and self._should_warm_up_model():
             self.model_runner.warming_up_model()
+        kv_cache = getattr(self.model_runner, "extensible_kv_cache", None)
+        if kv_cache is not None:
+            peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+            backed_bytes = kv_cache.physical_bytes
         # profile_run skips the scheduler-driven kernels, so without this
         # their Triton JIT lands in the first request's TTFT.
         if self.vllm_config.kernel_config.enable_jit_warmup:
@@ -274,6 +357,21 @@ class CPUWorker(Worker):
                 self.execute_model,
                 self.sample_tokens,
             )
+        num_kv_blocks = None
+        if kv_cache is not None:
+            peak_growth = (
+                resource.getrusage(resource.RUSAGE_SELF).ru_maxrss - peak
+            ) * 1024
+            self._cpu_warmup_peak = max(
+                self._cpu_warmup_peak,
+                peak_growth - (kv_cache.physical_bytes - backed_bytes),
+            )
+            group = get_world_group().cpu_group
+            torch.distributed.barrier(group=group)
+            num_kv_blocks = self._extensible_kv_cache_warmup_limit(kv_cache)
+            logger.info(
+                "CPU KV cache budget after warmup fits %d blocks.", num_kv_blocks
+            )
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         set_random_seed(
@@ -282,4 +380,5 @@ class CPUWorker(Worker):
         return CompilationTimes(
             language_model=self.compilation_config.compilation_time,
             encoder=self.compilation_config.encoder_compilation_time,
+            num_kv_blocks=num_kv_blocks,
         )

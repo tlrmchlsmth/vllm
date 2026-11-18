@@ -23,6 +23,10 @@ from vllm.v1.core.single_type_kv_cache_manager import (
 )
 from vllm.v1.kv_cache_interface import KVCacheGroup
 from vllm.v1.request import Request
+from vllm.v1.worker.extensible_kv_cache import (
+    ensure_kv_cache_blocks,
+    num_committable_kv_blocks,
+)
 
 if TYPE_CHECKING:
     from vllm.v1.worker.cpu.standalone_model_runner import StandaloneCPUModelRunner
@@ -110,10 +114,16 @@ def warmup_kernels(
     )
     null_blocks = model_runner.block_tables.redirect_writes_to_null_block
     if max_blocks_per_req > 0 and not null_blocks:
+        available_blocks = num_committable_kv_blocks(model_runner) - 1
+        if model_runner.extensible_kv_cache is not None and (
+            available_blocks < max_blocks_per_req
+        ):
+            return
         num_reqs = min(
             num_reqs,
-            max(1, (model_runner.kv_cache_config.num_blocks - 1) // max_blocks_per_req),
+            max(1, available_blocks // max_blocks_per_req),
         )
+        ensure_kv_cache_blocks(model_runner, 1 + num_reqs * max_blocks_per_req)
 
     req_ids = [f"_warmup_{i}_" for i in range(num_reqs)]
     if model_runner.is_pooling_model:

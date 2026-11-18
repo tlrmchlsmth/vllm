@@ -629,9 +629,15 @@ def _warmup_kernels(
     if max_blocks_per_req > 0 and not null_blocks:
         # Reserve block 0 (null block) and ensure we have enough blocks.
         # Encoder-only models allocate no KV blocks, so this cap doesn't apply.
+        available_blocks = num_committable_kv_blocks(model_runner) - 1
+        if getattr(model_runner, "device", None) == torch.device("cpu") and (
+            model_runner.extensible_kv_cache is not None
+            and available_blocks < max_blocks_per_req
+        ):
+            return
         num_reqs = min(
             num_reqs,
-            max(1, (num_committable_kv_blocks(model_runner) - 1) // max_blocks_per_req),
+            max(1, available_blocks // max_blocks_per_req),
         )
         ensure_kv_cache_blocks(model_runner, 1 + num_reqs * max_blocks_per_req)
 

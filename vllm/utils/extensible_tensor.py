@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Growable device byte buffers backed by GPU virtual memory management."""
+"""Growable byte buffers backed by virtual memory."""
 
 from __future__ import annotations
 
 import ctypes
 import itertools
+import mmap
 import sys
 from collections.abc import Sequence
 from contextlib import suppress
@@ -241,6 +242,43 @@ def uint8_tensor_from_ptr(ptr: int, num_bytes: int, device_index: int) -> torch.
     return torch.from_dlpack(capsule)
 
 
+class _HostVirtualBuffer:
+    granularity = mmap.PAGESIZE
+
+    def __init__(self, max_bytes: int) -> None:
+        self.reserved_size = _round_up(max(max_bytes, 1), self.granularity)
+        self._mapping = mmap.mmap(
+            -1, self.reserved_size, flags=mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS
+        )
+        # Budget physical memory in base pages, including during warmup.
+        if hasattr(mmap, "MADV_NOHUGEPAGE"):
+            self._mapping.madvise(mmap.MADV_NOHUGEPAGE)
+        self.base_ptr = ctypes.addressof(ctypes.c_char.from_buffer(self._mapping))
+
+    def view(self, offset: int, size: int) -> torch.Tensor:
+        if size == 0:
+            return torch.empty(0, dtype=torch.uint8)
+        return torch.frombuffer(
+            self._mapping, dtype=torch.uint8, count=size, offset=offset
+        )
+
+    def ensure_committed_range(self, start: int, end: int) -> None:
+        if not self.base_ptr:
+            raise RuntimeError("CPU extensible tensor has been freed.")
+        if end > start:
+            # Touch on the worker thread to honor its NUMA memory policy.
+            ctypes.memset(self.base_ptr + start, 0, end - start)
+
+    def release_physical(self) -> None:
+        self._mapping.madvise(mmap.MADV_DONTNEED)
+
+    def free(self) -> None:
+        # Tensor views retain the mmap, so the VA stays valid until they die.
+        if hasattr(self, "_mapping"):
+            del self._mapping
+        self.base_ptr = 0
+
+
 class ExtensibleTensor:
     """A device byte buffer that grows without moving its base pointer.
 
@@ -281,13 +319,14 @@ class ExtensibleTensor:
         if device is None:
             device = torch.accelerator.current_device_index()
         dev = device if isinstance(device, torch.device) else torch.device(device)
-        if dev.type != "cuda":
-            raise ValueError(f"ExtensibleTensor requires a cuda device, got {dev}.")
-        self._device_index: int = (
-            dev.index
-            if dev.index is not None
-            else torch.accelerator.current_device_index()
-        )
+        if dev.type not in ("cpu", "cuda"):
+            raise ValueError(
+                f"ExtensibleTensor requires a CPU or CUDA device, got {dev}."
+            )
+        self._device_index = dev.index
+        if dev.type == "cuda" and self._device_index is None:
+            self._device_index = torch.accelerator.current_device_index()
+        self._device = torch.device(dev.type, self._device_index)
 
         self._max_num_bytes: int = max_num_bytes
         self._segment_capacities: list[int] = list(segment_capacities)
@@ -295,25 +334,34 @@ class ExtensibleTensor:
             itertools.accumulate([0, *self._segment_capacities[:-1]])
         )
         self._committed: list[int] = [0] * len(self._segment_capacities)
-        self._buffer: _VirtualBuffer = _VirtualBuffer(
-            max_num_bytes, self._device_index, export_handle_types
+        self._buffer: _VirtualBuffer | _HostVirtualBuffer
+        if dev.type == "cpu":
+            if export_handle_types:
+                raise ValueError("CPU extensible tensors cannot export memory handles.")
+            self._buffer = _HostVirtualBuffer(max_num_bytes)
+        else:
+            assert self._device_index is not None
+            self._buffer = _VirtualBuffer(
+                max_num_bytes, self._device_index, export_handle_types
+            )
+
+    def _view(self, offset: int, size: int) -> torch.Tensor:
+        if isinstance(self._buffer, _HostVirtualBuffer):
+            return self._buffer.view(offset, size)
+        assert self._device_index is not None
+        return uint8_tensor_from_ptr(
+            self._buffer.base_ptr + offset, size, self._device_index
         )
 
     def full_view(self) -> torch.Tensor:
         """Uint8 view spanning the whole reservation."""
-        return uint8_tensor_from_ptr(
-            self._buffer.base_ptr, self._max_num_bytes, self._device_index
-        )
+        return self._view(0, self._max_num_bytes)
 
     def segment_view(self, index: int) -> torch.Tensor:
         """Uint8 tensor over one segment's committed prefix, sized exactly to it."""
         if not 0 <= index < self.num_segments:
             raise IndexError(f"Segment {index} out of range ({self.num_segments}).")
-        return uint8_tensor_from_ptr(
-            self._buffer.base_ptr + self._segment_offsets[index],
-            self._committed[index],
-            self._device_index,
-        )
+        return self._view(self._segment_offsets[index], self._committed[index])
 
     def resize_per_segment_(
         self, bytes_per_segment: int, zero_new: bool = False
@@ -344,7 +392,7 @@ class ExtensibleTensor:
         for start, end in grown:
             self._buffer.ensure_committed_range(start, end)
         self._committed = list(sizes)
-        if zero_new and grown:
+        if zero_new and grown and not isinstance(self._buffer, _HostVirtualBuffer):
             full = self.full_view()
             for start, end in grown:
                 full[start:end].zero_()
@@ -395,16 +443,34 @@ class ExtensibleTensor:
     @property
     def physical_bytes(self) -> int:
         """Physically mapped bytes, including granule rounding."""
+        if isinstance(self._buffer, _HostVirtualBuffer):
+            return self.physical_bytes_for_segments(self._committed)
         return self._buffer.committed_bytes
+
+    def physical_bytes_for_segments(self, sizes: Sequence[int]) -> int:
+        """Count pages covered by prefixes, including any shared boundary page."""
+        granule = self.granularity
+        end = total = 0
+        for offset, size in zip(self._segment_offsets, sizes):
+            if not size:
+                continue
+            start = max(end, offset // granule * granule)
+            end = _round_up(offset + size, granule)
+            total += end - start
+        return total
 
     @property
     def num_physical_chunks(self) -> int:
         """Number of driver allocations currently mapped into the reservation."""
+        if isinstance(self._buffer, _HostVirtualBuffer):
+            return 0
         return len(self._buffer._handles)
 
     def segments_backed_by_one_chunk(self, sizes: Sequence[int]) -> list[bool]:
         """Whether each segment's first `sizes[i]` bytes lie within a single
         driver allocation, as RDMA registration of the segment requires."""
+        if isinstance(self._buffer, _HostVirtualBuffer):
+            return [False] * len(sizes)
         chunks = [(offset, offset + size) for _, offset, size in self._buffer._handles]
         return [
             any(start <= offset and offset + size <= end for start, end in chunks)
@@ -421,7 +487,7 @@ class ExtensibleTensor:
 
     @property
     def device(self) -> torch.device:
-        return torch.device("cuda", self._device_index)
+        return self._device
 
     def free(self) -> None:
         self._buffer.free()

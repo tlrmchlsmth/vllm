@@ -78,6 +78,7 @@ from vllm.v1.worker.cpu.states import CPURequestState
 from vllm.v1.worker.cpu.structured_outputs import CPUStructuredOutputsWorker
 from vllm.v1.worker.cpu.utils import CPUKVBlockZeroer, free_before_shutdown
 from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
+from vllm.v1.worker.extensible_kv_cache import ExtensibleKVCache
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 from vllm.v1.worker.utils import (
     clear_layer_kv_caches,
@@ -138,6 +139,7 @@ class StandaloneCPUModelRunner(LoRAModelRunnerMixin):
         # Lazily initialized in _init_kv_zero_meta() when the KV cache needs
         # zeroing (e.g. hybrid models with fp8 KV cache).
         self.kv_block_zeroer: CPUKVBlockZeroer | None = None
+        self.extensible_kv_cache: ExtensibleKVCache | None = None
 
         self.vocab_size = self.model_config.get_vocab_size()
         self.max_model_len = self.model_config.max_model_len
@@ -356,9 +358,16 @@ class StandaloneCPUModelRunner(LoRAModelRunnerMixin):
         kv_cache_config: KVCacheConfig,
         is_profiling: bool = False,
         kv_cache_allocation_context: AbstractContextManager | None = None,
+        extensible: bool = False,
     ) -> None:
         kv_cache_config = deepcopy(kv_cache_config)
         self.kv_cache_config = kv_cache_config
+        if extensible:
+            self.extensible_kv_cache = ExtensibleKVCache(
+                kv_cache_config,
+                self.device,
+                self.cache_config.get_resolved_kv_cache_layout(),
+            )
 
         block_table_max_model_len = self.max_model_len
         if self.is_encoder_decoder:
@@ -415,6 +424,11 @@ class StandaloneCPUModelRunner(LoRAModelRunnerMixin):
                 self.vllm_config,
                 kv_cache_allocation_context=kv_cache_allocation_context,
                 attn_groups=(group for groups in self.attn_groups for group in groups),
+                allocate=(
+                    self.extensible_kv_cache.allocate
+                    if self.extensible_kv_cache is not None
+                    else None
+                ),
             )
         self.kv_caches = [
             cache for cache in kv_caches_dict.values() if cache.device == self.device
@@ -423,6 +437,7 @@ class StandaloneCPUModelRunner(LoRAModelRunnerMixin):
         if is_profiling:
             self.kv_connector = NO_OP_KV_CONNECTOR
         else:
+            self.kv_caches_by_layer = kv_caches_dict
             self.kv_connector = get_kv_connector(self.vllm_config, kv_caches_dict)
 
     def _init_kv_zero_meta(self) -> None:
@@ -1310,6 +1325,8 @@ class StandaloneCPUModelRunner(LoRAModelRunnerMixin):
         self.kv_block_zeroer = None
         if hasattr(self, "kv_caches"):
             self.kv_caches.clear()
+        if hasattr(self, "kv_caches_by_layer"):
+            self.kv_caches_by_layer.clear()
         if hasattr(self, "attn_groups"):
             self.attn_groups.clear()
         if hasattr(self, "kv_cache_config"):
@@ -1324,6 +1341,9 @@ class StandaloneCPUModelRunner(LoRAModelRunnerMixin):
         if hasattr(self, "model"):
             clear_layer_kv_caches(self.model.modules())
             del self.model
+        if self.extensible_kv_cache is not None:
+            self.extensible_kv_cache.free()
+            self.extensible_kv_cache = None
 
         gc.collect()
         logger.debug("Cleaned up model weights, KV caches, and workspace")
