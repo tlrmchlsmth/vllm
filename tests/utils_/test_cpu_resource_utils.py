@@ -43,6 +43,23 @@ def _stub_files(monkeypatch, files: dict):
     monkeypatch.setattr("builtins.open", fake_open)
 
 
+def test_cgroup_headroom_accounts_for_shared_parent_usage(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "linux")
+    _stub_files(
+        monkeypatch,
+        {
+            "/proc/self/cgroup": "0::/parent/worker\n",
+            _V2_LIMIT_PATH: "max",
+            "/sys/fs/cgroup/parent/memory.max": str(8 * GiB_bytes),
+            "/sys/fs/cgroup/parent/memory.current": str(7 * GiB_bytes),
+            "/sys/fs/cgroup/parent/worker/memory.max": str(4 * GiB_bytes),
+            "/sys/fs/cgroup/parent/worker/memory.current": str(GiB_bytes),
+            _V1_LIMIT_PATH: None,
+        },
+    )
+    assert cru.get_cgroup_memory_headroom() == GiB_bytes
+
+
 def test_cgroup_v2_limit_and_usage(monkeypatch):
     monkeypatch.setattr(sys, "platform", "linux")
     _stub_files(

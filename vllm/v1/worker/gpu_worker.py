@@ -119,6 +119,7 @@ from vllm.v1.outputs import (
 )
 from vllm.v1.utils import report_usage_stats
 from vllm.v1.worker.extensible_kv_cache import (
+    ExtensibleKVCache,
     extend_kv_cache,
     kv_cache_export_handle_types,
     kv_cache_lent_for_weight_update,
@@ -953,7 +954,7 @@ class Worker(WorkerBase):
             kv_cache_config = pad_kv_cache_segments(
                 kv_cache_config,
                 self.cache_config.get_resolved_kv_cache_layout(),
-                granule_size(torch.accelerator.current_device_index()),
+                self._extensible_kv_cache_granule(),
                 registers_memory=registers_kv_cache_memory(self.vllm_config),
             )
             # The connector is created in `extend_kv_cache`, once the
@@ -986,12 +987,9 @@ class Worker(WorkerBase):
                 # peak free for the steps it runs.
                 kv_cache = self.model_runner.extensible_kv_cache
                 assert kv_cache is not None
-                kv_cache.reserved_headroom_bytes = getattr(
-                    self, "peak_activation_memory", 0
-                )
                 # Every rank must warm up the same shapes.
                 kv_cache.warmup_committable_blocks = _min_across_ranks(
-                    kv_cache.committable_blocks()
+                    self._extensible_kv_cache_warmup_limit(kv_cache)
                 )
             else:
                 self.model_runner.initialize_kv_cache(
@@ -1005,6 +1003,13 @@ class Worker(WorkerBase):
             self.model_runner, "_init_kv_zero_meta"
         ):
             self.model_runner._init_kv_zero_meta()
+
+    def _extensible_kv_cache_granule(self) -> int:
+        return granule_size(torch.accelerator.current_device_index())
+
+    def _extensible_kv_cache_warmup_limit(self, kv_cache: ExtensibleKVCache) -> int:
+        kv_cache.reserved_headroom_bytes = getattr(self, "peak_activation_memory", 0)
+        return kv_cache.committable_blocks()
 
     def get_simple_cpu_offload_num_cpu_blocks(self) -> int | None:
         from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector import (  # noqa: E501

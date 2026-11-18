@@ -398,8 +398,11 @@ class CacheConfig:
     """Reserve the KV cache address range with device virtual memory and commit
     physical pages after warmup, so the cache is sized from the memory actually
     free after CUDA graph capture rather than from a profiling estimate. If
-    unspecified, enabled on CUDA and ROCm unless kv_cache_memory_bytes is set,
-    or NIXL on device memory has no IMEX channel; falls back to estimate-based
+    unspecified, enabled on CUDA, ROCm, and supported Linux CPU setups
+    unless kv_cache_memory_bytes is set, or NIXL on device memory has no IMEX
+    channel. On CPU, sizing uses available NUMA and cgroup memory after
+    warmup and reserves headroom for serving. Setting gpu_memory_utilization
+    on CPU selects estimate-based sizing. Falls back to estimate-based
     sizing where the driver lacks VMM support. Explicitly requesting it where
     unsupported is an error. On unpartitioned discrete ROCm GPUs, the sizing
     adds back free memory that HIP hides by counting each allocation as at

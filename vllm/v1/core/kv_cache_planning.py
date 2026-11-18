@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 from vllm.config import SpeculativeConfig, VllmConfig
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import format_gib
 from vllm.utils.torch_utils import get_dtype_size
@@ -67,6 +68,12 @@ def _more_kv_cache_memory_hint(
     after_warmup: the KV cache was sized after CUDA graph capture and warmup."""
     cache_config = vllm_config.cache_config
     if cache_config.enable_extensible_kv_cache:
+        if current_platform.is_cpu():
+            return (
+                "The CPU KV cache uses available NUMA and cgroup memory after "
+                "reserving headroom for serving. Reduce `max_model_len` or "
+                "increase the memory available to the workers."
+            )
         used_by = "the model and its activations"
         graphs_hint = ""
         if after_warmup:

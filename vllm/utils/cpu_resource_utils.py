@@ -8,6 +8,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from functools import cache
+from pathlib import PurePosixPath
 
 import psutil
 import regex as re
@@ -113,6 +114,51 @@ def get_cgroup_memory_usage() -> int | None:
         return _read_int_file("/sys/fs/cgroup/memory/memory.usage_in_bytes")
 
     return None
+
+
+def get_cgroup_memory_headroom() -> int | None:
+    """Return the tightest remaining memory limit in the CPU worker's cgroup."""
+    if sys.platform != "linux":
+        return None
+
+    # The proc path can be "/" in a private cgroup namespace. On a host or
+    # in a shared namespace, parent slices can impose additional limits.
+    locations = {
+        ("/sys/fs/cgroup", "memory.max", "memory.current"),
+        ("/sys/fs/cgroup/memory", "memory.limit_in_bytes", "memory.usage_in_bytes"),
+    }
+    try:
+        with open("/proc/self/cgroup") as cgroups:
+            for line in cgroups:
+                _, controllers, path = line.strip().split(":", 2)
+                if not controllers:
+                    root = PurePosixPath("/sys/fs/cgroup")
+                    limit_name, usage_name = "memory.max", "memory.current"
+                elif "memory" in controllers.split(","):
+                    root = PurePosixPath("/sys/fs/cgroup/memory")
+                    limit_name = "memory.limit_in_bytes"
+                    usage_name = "memory.usage_in_bytes"
+                else:
+                    continue
+                group = PurePosixPath(os.path.normpath(path))
+                for member in (group, *group.parents):
+                    directory = root / member.relative_to("/")
+                    locations.add((str(directory), limit_name, usage_name))
+    except OSError:
+        pass
+
+    headroom = None
+    for directory, limit_name, usage_name in locations:
+        limit = _read_int_file(os.path.join(directory, limit_name))
+        if limit is None or limit >= (1 << 62):
+            continue
+        usage = _read_int_file(os.path.join(directory, usage_name))
+        if usage is None:
+            # We know there's a limit but cannot safely budget against it.
+            return 0
+        available = max(0, limit - usage)
+        headroom = available if headroom is None else min(headroom, available)
+    return headroom
 
 
 def get_available_memory() -> int:

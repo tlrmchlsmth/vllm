@@ -4,6 +4,7 @@
 import copy
 import getpass
 import os
+import sys
 import tempfile
 import threading
 import time
@@ -3348,8 +3349,10 @@ class VllmConfig:
             else self.kv_transfer_config.kv_cache_access()
         )
         unsupported = None
-        if not current_platform.is_cuda_alike():
-            unsupported = "it is only supported on CUDA and ROCm"
+        cuda_alike = current_platform.is_cuda_alike()
+        cpu = not cuda_alike and current_platform.is_cpu()
+        if not cuda_alike and not (cpu and sys.platform == "linux"):
+            unsupported = "it requires CUDA, ROCm, or Linux CPU"
         elif cache_config.kv_cache_memory_bytes is not None:
             unsupported = (
                 "it sizes the KV cache from measured memory, which "
@@ -3365,6 +3368,13 @@ class VllmConfig:
                 "elastic EP scale-up skips warmup and reuses the profiled KV "
                 "cache size, so no measurement would size the cache"
             )
+        elif cpu and (
+            self.kv_transfer_config is not None
+            or cache_config.kv_offloading_size is not None
+        ):
+            unsupported = "CPU extensible KV cache does not support KV connectors"
+        elif cpu and cache_config.gpu_memory_utilization is not None:
+            unsupported = "CPU extensible KV cache uses available host memory directly"
         elif KVCacheAccess.LEGACY_IPC in kv_cache_access:
             unsupported = (
                 "a KV connector (e.g. LMCacheMPConnector) shares the KV cache "

@@ -6,6 +6,7 @@ A worker whose own footprint exceeds its reservation and a node that is short
 of free memory need opposite remedies, so they get separate errors.
 """
 
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -29,7 +30,9 @@ def _worker(monkeypatch, *, reserved, rss, total=8 * GiB, available=4 * GiB):
 
     worker = CPUWorker.__new__(CPUWorker)
     worker.requested_cpu_memory = reserved
-    worker.cache_config = SimpleNamespace(kv_cache_memory_bytes=None)
+    worker.cache_config = SimpleNamespace(
+        kv_cache_memory_bytes=None, enable_extensible_kv_cache=False
+    )
     monkeypatch.setattr(CPUWorker, "_should_warm_up_model", lambda self: False)
     monkeypatch.setattr(
         cpu_worker_mod,
@@ -68,3 +71,75 @@ def test_short_node_memory_still_asks_to_free_memory(monkeypatch):
 def test_budget_that_fits_sizes_the_kv_cache(monkeypatch):
     worker = _worker(monkeypatch, reserved=3 * GiB, rss=1 * GiB)
     assert worker.determine_available_memory() == 2 * GiB
+
+
+@pytest.mark.skipif(
+    sys.platform != "linux", reason="CPU extensible KV cache requires Linux"
+)
+@pytest.mark.parametrize("mixed_attention", [False, True], ids=["full", "mixed"])
+def test_automatic_cpu_kv_cache_generates_after_warmup(
+    monkeypatch, tmp_path, vllm_runner, mixed_attention
+):
+    from transformers import Gemma2Config, OPTConfig
+
+    from vllm import SamplingParams
+    from vllm.v1.worker import cpu_worker
+
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    monkeypatch.delenv("VLLM_CPU_KVCACHE_SPACE", raising=False)
+    monkeypatch.setattr(
+        cpu_worker, "get_memory_node_info", lambda _: MemoryNodeInfo(8 * GiB, GiB)
+    )
+    monkeypatch.setattr(cpu_worker, "get_cgroup_memory_headroom", lambda: GiB)
+
+    common = dict(
+        vocab_size=256,
+        hidden_size=128,
+        num_hidden_layers=2,
+        num_attention_heads=2,
+        max_position_embeddings=512,
+        bos_token_id=1,
+        eos_token_id=2,
+        pad_token_id=0,
+    )
+    if mixed_attention:
+        config = Gemma2Config(
+            **common,
+            architectures=["Gemma2ForCausalLM"],
+            intermediate_size=256,
+            num_key_value_heads=2,
+            head_dim=64,
+            sliding_window=32,
+            query_pre_attn_scalar=64,
+            attn_logit_softcapping=None,
+        )
+    else:
+        config = OPTConfig(**common, architectures=["OPTForCausalLM"], ffn_dim=256)
+    config.save_pretrained(tmp_path)
+
+    kwargs = dict(
+        load_format="dummy",
+        skip_tokenizer_init=True,
+        dtype="float32",
+        compilation_config={"mode": 0, "cudagraph_mode": "NONE"},
+        max_model_len=128,
+        max_num_seqs=2,
+        max_num_batched_tokens=128,
+        kernel_config={"enable_jit_warmup": True},
+    )
+    prompts = [{"prompt_token_ids": [1, *range(3, 54)]}]
+    sampling = SamplingParams(
+        temperature=0, max_tokens=8, ignore_eos=True, detokenize=False
+    )
+    with vllm_runner(
+        str(tmp_path), kv_cache_memory_bytes=128 << 20, **kwargs
+    ) as runner:
+        expected = runner.llm.generate(prompts, sampling)[0].outputs[0].token_ids
+    assert len(expected) == sampling.max_tokens
+    with vllm_runner(str(tmp_path), **kwargs) as runner:
+        cache_config = runner.llm.llm_engine.vllm_config.cache_config
+        assert cache_config.enable_extensible_kv_cache
+        assert cache_config.num_gpu_blocks > 1
+        assert (
+            runner.llm.generate(prompts, sampling)[0].outputs[0].token_ids == expected
+        )
