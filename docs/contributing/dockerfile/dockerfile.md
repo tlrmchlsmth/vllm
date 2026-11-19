@@ -34,9 +34,9 @@ The `vllm-runtime-base` stage explicitly installs the current Ubuntu
 certificate removals when the image is rebuilt. This complements the Python
 `certifi` bundle used by other HTTP clients.
 
-`vllm-openai-base` builds on `vllm-base-rubin-${INSTALL_RUBIN_PRERELEASE}`:
-`vllm-base-rubin-false` is `vllm-base` unchanged, and `vllm-base-rubin-true`
-also sets `TRITON_PTXAS_BLACKWELL_PATH` for Rubin images.
+`vllm-openai-base` builds directly on `vllm-base`. When
+`INSTALL_RUBIN_PRERELEASE=true`, it sets `TRITON_PTXAS_BLACKWELL_PATH` to the
+assembler bundled with the Triton wheel.
 
 When `INSTALL_KV_CONNECTORS=true`, `vllm-openai-base` also installs a minimal
 AWS EFA userspace (libfabric, aws-ofi-nccl and hwloc), which NIXL's LIBFABRIC

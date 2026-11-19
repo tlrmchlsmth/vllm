@@ -1218,18 +1218,8 @@ RUN mv vllm src/vllm
 #################### TEST IMAGE ####################
 
 #################### OPENAI API SERVER ####################
-# Rubin images keep Triton on the ptxas-blackwell that its wheel bundles.
-# Importing FlashInfer otherwise points Triton at the ptxas on PATH, and CUDA
-# 13.5.0's ptxas 13.5.37 silently miscompiles some sm_107a code. Other images
-# leave TRITON_PTXAS_BLACKWELL_PATH unset.
-FROM vllm-base AS vllm-base-rubin-true
-ARG PYTHON_VERSION
-ENV TRITON_PTXAS_BLACKWELL_PATH=/usr/local/lib/python${PYTHON_VERSION}/dist-packages/triton/backends/nvidia/bin/ptxas-blackwell
-
-FROM vllm-base AS vllm-base-rubin-false
-
 # base openai image with additional requirements, for any subsequent openai-style images
-FROM vllm-base-rubin-${INSTALL_RUBIN_PRERELEASE} AS vllm-openai-base
+FROM vllm-base AS vllm-openai-base
 ARG TARGETPLATFORM
 ARG INSTALL_KV_CONNECTORS=false
 ARG EFA_INSTALLER_VERSION
@@ -1243,6 +1233,13 @@ ARG VLLM_IMAGE_TAG
 
 ARG PIP_INDEX_URL UV_INDEX_URL
 ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
+
+# Keep the Rubin assembler override in one stage. FlashInfer otherwise selects
+# CUDA 13.5.0's ptxas, which silently miscompiles some sm_107a code.
+# Treat the default false as empty for Docker's :+ expansion.
+ARG RUBIN_PTXAS_ENABLED=${INSTALL_RUBIN_PRERELEASE#false}
+ARG RUBIN_PTXAS_PATH=${RUBIN_PTXAS_ENABLED:+/usr/local/lib/python${PYTHON_VERSION}/dist-packages/triton/backends/nvidia/bin/ptxas-blackwell}
+ENV TRITON_PTXAS_BLACKWELL_PATH=${RUBIN_PTXAS_PATH:-${TRITON_PTXAS_BLACKWELL_PATH:-}}
 
 # This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
 # Reference: https://github.com/astral-sh/uv/pull/1694
